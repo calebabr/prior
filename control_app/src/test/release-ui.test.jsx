@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { setToken } from '../services/api.js';
 import { renderApp, stubApi, STATUS } from './helpers.jsx';
 import { StatusProvider } from '../context/StatusContext.jsx';
 import UpdateBanner from '../components/UpdateBanner.jsx';
 import { isOlder, shortId } from '../utils/version.js';
+import { resetForTests, markReady, getReady, setApplyServiceWorker, checkDeployedBundle } from '../utils/updateSignal.js';
 
 beforeEach(() => setToken(null));
 afterEach(() => vi.unstubAllGlobals());
@@ -67,6 +68,72 @@ describe('UpdateBanner', () => {
     renderApp('/');
     expect(await screen.findByText(/update available, reopen the app/i)).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /stop the bot/i })[0]).toBeEnabled();
+  });
+});
+
+describe('UpdateBanner new bundle prompt', () => {
+  const READY = /a new version is ready/i;
+  function mount(extra = {}) {
+    stubApi({ 'GET /api/status': { ...STATUS, ...extra } });
+    setToken('tok');
+    render(
+      <StatusProvider>
+        <UpdateBanner appVersion="0.2.0" />
+      </StatusProvider>,
+    );
+  }
+  beforeEach(() => {
+    resetForTests();
+    sessionStorage.clear();
+  });
+  it('is hidden by default and when status has no version', async () => {
+    mount({ min_app_version: undefined, api_version: undefined });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+  it('shows when a new bundle is signalled and the app is current', async () => {
+    mount({ min_app_version: '0.1.0' });
+    act(() => markReady());
+    expect(await screen.findByText(READY)).toBeInTheDocument();
+  });
+  it('keeps the stronger min_app_version message when both apply', async () => {
+    mount({ min_app_version: '9.0.0' });
+    act(() => markReady());
+    expect(await screen.findByText(/update available, reopen the app/i)).toBeInTheDocument();
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+  it('dismisses for the session', async () => {
+    mount();
+    act(() => markReady());
+    await userEvent.click(await screen.findByRole('button', { name: /dismiss update notice/i }));
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+  it('tap asks the worker to update then reloads once', async () => {
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, reload });
+    const sw = vi.fn().mockResolvedValue();
+    setApplyServiceWorker(sw);
+    mount();
+    act(() => markReady());
+    await userEvent.click(await screen.findByRole('button', { name: READY }));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(sw).toHaveBeenCalled();
+  });
+  it('does not re-signal right after a reload (no loop)', () => {
+    sessionStorage.setItem('prior_update_reloaded_at', String(Date.now()));
+    markReady();
+    expect(getReady()).toBe(false);
+  });
+  it('bundle check signals only when the deployed entry script differs', async () => {
+    document.head.innerHTML = '<script type="module" src="/assets/index-AAAA.js"></script>';
+    const same = vi.fn().mockResolvedValue({ ok: true, text: async () => '<script src="/assets/index-AAAA.js">' });
+    await checkDeployedBundle(same);
+    expect(getReady()).toBe(false);
+    resetForTests();
+    const newer = vi.fn().mockResolvedValue({ ok: true, text: async () => '<script src="/assets/index-BBBB.js">' });
+    await checkDeployedBundle(newer);
+    expect(getReady()).toBe(true);
+    document.head.innerHTML = '';
   });
 });
 

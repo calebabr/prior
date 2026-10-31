@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased - Update prompt
+- The app now shows a dismissible "A new version is ready" banner (tap to reload) when a new service worker or a newer deployed bundle is detected. The min_app_version "update available" message is unchanged. Stop and data are never blocked.
+
 ## Unreleased - Home rows by settlement date
 - Fix: Home By Strategy rows now use settlement-date P&L like the Total P&L headline, so Maker + Arbitrage equal the total. New ledger field `settled_by_strategy`; the Ledger tab shows fill-day and settlement-day P&L side by side.
 

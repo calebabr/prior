@@ -57,6 +57,8 @@ def create_app(settings: Settings | None = None, store: Any = None,
     app.state.settings = settings
     app.state.store = store
     app.state.runner = runner
+    # After each bot pass, pre-build the default analytics dataset in the background (read only; a failure only logs).
+    runner.post_pass_hook = lambda: runner._spawn(analytics.warm(app))
     app.state.cronjob_factory = cronjob_factory or (lambda key: CronJobClient(key))
     app.state.last_inbound_utc = None
 

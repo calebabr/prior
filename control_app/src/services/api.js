@@ -279,7 +279,9 @@ export async function request(method, path, opts = {}) {
       err.retryAfter = retryAfterSeconds(res);
       throw err;
     }
-    throw new ApiError(res.status, detail);
+    const err = new ApiError(res.status, detail);
+    if (res.status === 429 || res.status === 503) err.retryAfter = retryAfterSeconds(res);
+    throw err;
   }
   if (auth && path !== '/api/bot/stop') setStoreDown(false);
   if (opts.raw) {
@@ -295,6 +297,39 @@ export async function request(method, path, opts = {}) {
   }
   if (cache) writeCache(opts.cacheKey || path, data);
   return data;
+}
+
+// Automatic retry for the two "try again in a moment" answers of the read-only analytics path: 429 analytics_busy
+// (another build holds the gate) and 503 store_unavailable. Honors Retry-After (default 2 s, capped), adds jitter so
+// several screens never retry in step, and gives up after `tries` retries by throwing the LAST error (the caller
+// then shows its manual Retry). Every other error, including every other 4xx, is thrown at once.
+export const RETRY_POLICY = { tries: 2, defaultS: 2, maxS: 15, jitterMs: 500 };
+export const RETRYABLE = [
+  { status: 429, detail: 'analytics_busy' },
+  { status: 503, detail: STORE_DOWN },
+];
+
+export function isRetryable(err) {
+  return !!err && RETRYABLE.some((r) => r.status === err.status && r.detail === err.detail);
+}
+
+function retryDelayMs(err) {
+  const s = typeof err.retryAfter === 'number' && err.retryAfter >= 0 ? err.retryAfter : RETRY_POLICY.defaultS;
+  return Math.min(s, RETRY_POLICY.maxS) * 1000 + Math.random() * RETRY_POLICY.jitterMs;
+}
+
+/** run() is called again after a retryable error. onRetry(attempt, err) fires before each wait. */
+export async function withRetry(run, { signal, onRetry } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (err) {
+      if (attempt >= RETRY_POLICY.tries || !isRetryable(err) || (signal && signal.aborted)) throw err;
+      if (onRetry) onRetry(attempt + 1, err);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(err)));
+      if (signal && signal.aborted) throw err;
+    }
+  }
 }
 
 // 'attachment; filename="x.csv"' -> 'x.csv' (plain names only; no paths).

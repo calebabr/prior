@@ -7,9 +7,14 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
   trade rows for one (env, days); concurrent requests for the same key share it (single flight); a request for
   another key waits up to BUSY_WAIT_S for the gate, then gets 429 `analytics_busy` + Retry-After.
 * Builds run on a dedicated one-thread executor, never the default pool that Stop's cancel uses (S-25 family).
-* Results are cached CACHE_TTL_S: the summary per (env, days, period, tz) (small; `generated_utc` shows its age) and
+* Results are cached: the summary SUMMARY_TTL_S (60 s) per (env, days, period, tz) (small; `generated_utc` shows its age) and
   the trade rows per (env, days, period) (at most ROWS_CACHE_KEYS keys; the largest objects, independent of the
-  viewer's time zone), so /trades paging and filtering never re-reads Atlas. Both caches are bounded
+  viewer's time zone), so /trades paging and filtering never re-reads Atlas. The rows live CACHE_TTL_S (300 s);
+  /trades and /summary treat them as expired after 60 s (unchanged), the LEDGER (Home) uses stale-while-revalidate:
+  a copy older than REFRESH_AFTER_S but younger than CACHE_TTL_S is served at once and refreshed once in the
+  background (never more than one refresh at a time, through the same gate). After each bot pass the runner's
+  post-pass hook calls warm(), which pre-builds the default key so Home usually finds a copy. A failed refresh or
+  warm-up only logs. Both caches are bounded
   (CACHE_MAX_KEYS summaries; the oldest entry is dropped first). `tz` is validated (pnl.resolve_tz: IANA names
   only, anything else means UTC), so the key space is the tz database, never raw client text. Only successful
   builds are cached.
@@ -22,8 +27,10 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -42,8 +49,13 @@ from ..services import strategies as strat
 from .periods import window_for
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("analytics")
 STORE_TIMEOUT_S = 10.0
-CACHE_TTL_S = 60.0
+CACHE_TTL_S = 300.0                      # trade rows (the ledger's dataset) are kept this long; see the module doc
+SUMMARY_TTL_S = 60.0                     # a cached summary is served this long (unchanged)
+REFRESH_AFTER_S = 60.0                   # ledger: older rows are served stale while one background refresh runs
+WARM_MIN_GAP_S = 120.0                   # a warm-up is skipped if another ran this recently (run-once spam)
+WARM_DAYS = 30
 CACHE_MAX_KEYS = 64                      # summaries per (env, days, period, tz); the oldest is dropped beyond this
 ROWS_CACHE_KEYS = 2                      # cached trade-row sets (each up to MAX_FILLS rows)
 BUSY_WAIT_S = 8.0                        # how long a request waits for another key's build before 429
@@ -135,7 +147,8 @@ def _cache(request: Request) -> dict:
 def _state(request: Request) -> dict:
     st = getattr(request.app.state, "analytics", None)
     if st is None:
-        st = request.app.state.analytics = {"rows": {}, "inflight": {}, "gate": asyncio.Lock(), "jmap": None}
+        st = request.app.state.analytics = {"rows": {}, "inflight": {}, "gate": asyncio.Lock(), "jmap": None,
+                                            "refresh_task": None, "warm_at": None, "last_tz": None}
     return st
 
 
@@ -146,6 +159,7 @@ def clear_cache(app) -> None:
     if st is not None:
         st["rows"].clear()
         st["jmap"] = None
+        st["warm_at"] = None
 
 
 def _env(request: Request, raw: str | None) -> str:
@@ -166,8 +180,8 @@ def _capped(rows: list, cap: int) -> tuple[list, bool]:
     return (rows[:cap], True) if len(rows) > cap else (rows, False)
 
 
-def _fresh(entry, t0: float) -> bool:
-    return entry is not None and 0 <= t0 - entry[0] < CACHE_TTL_S
+def _fresh(entry, t0: float, ttl: float | None = None) -> bool:
+    return entry is not None and 0 <= t0 - entry[0] < (SUMMARY_TTL_S if ttl is None else ttl)
 
 
 async def _journal_map(request: Request, start: datetime, now: datetime) -> tuple[dict[str, str], bool]:
@@ -253,8 +267,8 @@ def _store_result(request: Request, key: tuple, t0: float, summary: dict, rows: 
     """key = (env, days, period key, validated tz). The summary is cached per full key; the rows per key without
     the zone (they do not depend on it). Both caches drop expired entries, then the OLDEST ones beyond their bound."""
     cache, rc = _cache(request), _state(request)["rows"]
-    for c in (cache, rc):
-        for k in [k for k, v in c.items() if not _fresh(v, t0)]:
+    for c, ttl in ((cache, SUMMARY_TTL_S), (rc, CACHE_TTL_S)):
+        for k in [k for k, v in c.items() if not _fresh(v, t0, ttl)]:
             c.pop(k, None)                                    # drop expired entries
     while len(cache) >= CACHE_MAX_KEYS:
         cache.pop(min(cache, key=lambda k: cache[k][0]))      # bounded: oldest first
@@ -270,19 +284,104 @@ def _pick(res: tuple[dict, list[dict]], want: str):
     return res[0] if want == "summary" else res[1]
 
 
+async def _run_build(request, st: dict, key: tuple, env: str, days: int, period: dict | None, tz: str):
+    """Single-flight build + cache store. The CALLER holds the gate. Raises HTTPException on a store failure."""
+    fut = asyncio.get_running_loop().create_future()
+    st["inflight"][key] = fut
+    t0 = _clock()
+    try:
+        res = await _build(request, env, days, period, tz)
+    except BaseException as e:
+        fut.set_exception(e if isinstance(e, HTTPException) else HTTPException(503, "store_unavailable"))
+        fut.exception()                                       # mark retrieved (no "never retrieved" warning)
+        raise
+    finally:
+        st["inflight"].pop(key, None)
+    _store_result(request, key, t0, *res)
+    fut.set_result(res)
+    return res
+
+
+async def _background_build(app, key: tuple, env: str, days: int, period: dict | None, tz: str, wait: bool) -> bool:
+    """A build nobody is waiting on (stale refresh or warm-up). Never raises (only logs); True if it stored a result.
+    wait=False gives up at once when another build holds the gate."""
+    ctx = SimpleNamespace(app=app)
+    st = _state(ctx)
+    gate: asyncio.Lock = st["gate"]
+    try:
+        if wait:
+            await asyncio.wait_for(gate.acquire(), timeout=BUSY_WAIT_S)
+        elif gate.locked():
+            return False
+        else:
+            await gate.acquire()
+    except asyncio.TimeoutError:
+        return False
+    try:
+        if key in st["inflight"]:
+            return False
+        await _run_build(ctx, st, key, env, days, period, tz)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("analytics background build failed: %s", type(e).__name__)
+        return False
+    finally:
+        gate.release()
+
+
+def _spawn_refresh(request: Request, key: tuple, env: str, days: int, period: dict | None, tz: str) -> None:
+    """At most ONE background refresh at a time; skipped while any build holds the gate."""
+    st = _state(request)
+    t = st.get("refresh_task")
+    if (t is not None and not t.done()) or st["gate"].locked() or key in st["inflight"]:
+        return
+    st["refresh_task"] = asyncio.create_task(_background_build(request.app, key, env, days, period, tz, wait=False))
+
+
+async def warm(app) -> None:
+    """Pre-build the default dataset (current mode, 30 days, UTC and the last time zone a viewer used) after a bot
+    pass, so Home's ledger finds a copy. Read only, one build at a time through the gate, rate limited by
+    WARM_MIN_GAP_S. NEVER raises (a failure only logs): it runs beside the trading loop, not in it."""
+    try:
+        st = _state(SimpleNamespace(app=app))
+        t = _clock()
+        if st.get("warm_at") is not None and 0 <= t - st["warm_at"] < WARM_MIN_GAP_S:
+            return
+        st["warm_at"] = t
+        mode = getattr(app.state.runner, "mode", None)
+        env = mode if mode in ("demo", "live") else "demo"
+        zones = ["UTC"]
+        if st.get("last_tz") and st["last_tz"] != "UTC":
+            zones.append(st["last_tz"])
+        for tz in zones:
+            await _background_build(app, (env, WARM_DAYS, None, tz), env, WARM_DAYS, None, tz, wait=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("analytics warm-up failed: %s", type(e).__name__)
+
+
 async def _dataset(request: Request, env: str, days: int, want: str, period: dict | None = None,
-                   tz: str = "UTC"):
+                   tz: str = "UTC", swr: bool = False):
     """Cached summary (want="summary") or trade rows (want="rows") for (env, days[, period][, tz]); at most one
-    build at a time. `tz` must already be a validated name (pnl.resolve_tz); rows ignore it."""
+    build at a time. `tz` must already be a validated name (pnl.resolve_tz); rows ignore it. swr=True (the ledger,
+    rows only): a copy up to CACHE_TTL_S old is served immediately, and past REFRESH_AFTER_S one background refresh
+    is started."""
     st, key = _state(request), (env, days, _pkey(period), tz)
 
+    def entry():
+        return _cache(request).get(key) if want == "summary" else st["rows"].get(key[:3])
+
     def cached():
-        hit = _cache(request).get(key) if want == "summary" else st["rows"].get(key[:3])
-        return hit[1] if _fresh(hit, _clock()) else None
+        hit = entry()
+        return hit[1] if _fresh(hit, _clock(), REFRESH_AFTER_S if want == "rows" else SUMMARY_TTL_S) else None
 
     res = cached()
     if res is not None:
         return res
+    if swr and want == "rows":
+        hit = entry()
+        if _fresh(hit, _clock(), CACHE_TTL_S):
+            _spawn_refresh(request, key, env, days, period, tz)
+            return hit[1]
     fut = st["inflight"].get(key)
     if fut is not None:                                       # same key already building: share it
         return _pick(await asyncio.shield(fut), want)
@@ -298,20 +397,7 @@ async def _dataset(request: Request, env: str, days: int, want: str, period: dic
         fut = st["inflight"].get(key)
         if fut is not None:
             return _pick(await asyncio.shield(fut), want)
-        fut = asyncio.get_running_loop().create_future()
-        st["inflight"][key] = fut
-        t0 = _clock()
-        try:
-            res = await _build(request, env, days, period, tz)
-        except BaseException as e:
-            fut.set_exception(e if isinstance(e, HTTPException) else HTTPException(503, "store_unavailable"))
-            fut.exception()                                   # mark retrieved (no "never retrieved" warning)
-            raise
-        finally:
-            st["inflight"].pop(key, None)
-        _store_result(request, key, t0, *res)
-        fut.set_result(res)
-        return _pick(res, want)
+        return _pick(await _run_build(request, st, key, env, days, period, tz), want)
     finally:
         gate.release()
 
@@ -323,6 +409,7 @@ async def analytics_summary(request: Request, user: dict = Depends(current_user)
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
     _zone, tzname = pnlsvc.resolve_tz(q.get("tz"))       # unknown / malformed -> UTC, never an error
+    _state(request)["last_tz"] = tzname                  # the warm-up also pre-builds this zone's summary
     days, period = await _period(request, days)
     out = await _dataset(request, env, days, "summary", period, tzname)
     return _with_restart(request, out)
@@ -419,6 +506,19 @@ async def _soft(coro, notes: list[str], what: str, default=None):
         return default
 
 
+async def _parallel(*coros):
+    """Run independent store reads at once (total ~ the slowest, not the sum). Each coroutine keeps its own timeout
+    and failure rule (`_read` raises 503, `_soft` returns its default); the first exception cancels the rest."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _window(request: Request, days: int) -> tuple[int, dict | None, datetime, datetime | None, datetime]:
     """(days, period, since, until, now) for the rolling window or the period (fill-date attribution)."""
     now = datetime.now(timezone.utc)
@@ -442,14 +542,17 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
     zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
+    _state(request)["last_tz"] = tzname
     days, period, since, until, now = await _window(request, days)
-    all_rows = await _dataset(request, env, days, "rows", period)
+    all_rows = await _dataset(request, env, days, "rows", period, swr=True)
     rows = _in_window(all_rows, since, until)
     store, notes = request.app.state.store, []
-    arbs, _t = _capped(await _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)), an.MAX_ARB)
-    snaps = await _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
-                        "account snapshots", [])
-    flows = await _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", [])
+    arb_raw, snaps, flows = await _parallel(
+        _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)),
+        _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+              "account snapshots", []),
+        _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
+    arbs, _t = _capped(arb_raw, an.MAX_ARB)
     sets = arbsets.build_sets(arbs, [r for r in rows if r.get("strategy") == "arb"], env=env, since=since,
                               until=until, limit=arbsets.MAX_SETS * 5)
     out = ledgersvc.build(rows, sets, zone=zone, tzname=tzname, since=since, until=until, snapshots=snaps or [],
@@ -475,15 +578,17 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
     all_rows = await _dataset(request, env, days, "rows", period)
     rows = _in_window(all_rows, since, until)
     store, notes = request.app.state.store, []
-    hbs = await _soft(store.list_heartbeats(since=since, limit=HB_LIMIT), notes, "heartbeats", [])
-    jr = await _soft(store.list_journal(since=since, limit=an.MAX_JOURNAL + 1, events=["quote", "cancel"],
-                                        fields=("event", "ts")), notes, "journal", [])
-    alerts = await _soft(store.list_alerts(limit=ALERT_LIMIT), notes, "alerts", [])
-    audit_rows = await _soft(store.list_audit(limit=AUDIT_LIMIT), notes, "audit log", [])
-    arbs, _t = _capped(await _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)), an.MAX_ARB)
-    snaps = await _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
-                        "account snapshots", [])
-    flows = await _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", [])
+    hbs, jr, alerts, audit_rows, arb_raw, snaps, flows = await _parallel(
+        _soft(store.list_heartbeats(since=since, limit=HB_LIMIT), notes, "heartbeats", []),
+        _soft(store.list_journal(since=since, limit=an.MAX_JOURNAL + 1, events=["quote", "cancel"],
+                                 fields=("event", "ts")), notes, "journal", []),
+        _soft(store.list_alerts(limit=ALERT_LIMIT), notes, "alerts", []),
+        _soft(store.list_audit(limit=AUDIT_LIMIT), notes, "audit log", []),
+        _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)),
+        _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+              "account snapshots", []),
+        _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
+    arbs, _t = _capped(arb_raw, an.MAX_ARB)
 
     def win(docs, key="ts"):
         out = []

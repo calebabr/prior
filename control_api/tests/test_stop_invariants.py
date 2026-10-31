@@ -234,17 +234,27 @@ async def test_stop_with_store_hanging_forever_returns_and_is_stopped(settings, 
     await app.state.runner.shutdown()
 
 
+@pytest.mark.slow
 async def test_stop_with_kalshi_hanging_sets_flags_first_and_still_returns(env, fast_timeouts):
+    # The 0.3 s cap raced the asserts under load (Stop timed out before 'stop_in_progress' was checked): widen the
+    # window to 3 s so the in-progress checks always run while Stop is blocked; Stop must still end by the cap.
+    fast_timeouts._cap = 3.0
     release = threading.Event()
+    entered = threading.Event()
 
     class HangingKalshi(FakeKalshi):
         def get_orders(self, status=None):
+            entered.set()
             release.wait(30)                    # a stuck HTTP call in the worker thread
             return []
     env.runner.kalshi_factory = lambda m: HangingKalshi()
     env.runner.desired = "running"
     task = asyncio.create_task(env.client.post("/api/bot/stop", headers=env.auth))
-    await asyncio.sleep(0.1)                    # Stop is now blocked inside the Kalshi call
+    for _ in range(500):                        # wait (up to 10 s) until Stop is really blocked in the Kalshi call
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.02)
+    assert entered.is_set()
     try:
         # flags + kill switches are already set although the cancel has not finished
         assert env.runner.desired == "stopped" and env.runner.kill_path.exists() and env.runner.arb_kill_path.exists()

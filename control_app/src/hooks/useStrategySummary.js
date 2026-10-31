@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, query, request, viewerTimeZone } from '../services/api.js';
+import { api, query, request, viewerTimeZone, withRetry } from '../services/api.js';
 import { registerRefresh } from '../services/refreshBus.js';
 import { DEFAULT_RANGE, rangeParams } from '../utils/range.js';
 import { STRATEGY_PAGES, strategyPath } from '../utils/routes.js';
@@ -16,7 +16,10 @@ import { strategyShortName } from '../utils/format.js';
  * yet") and is named in `errors`; the rest still render. `GET /api/analytics/summary` is not called: it has no
  * strategy filter, so per-strategy drawdown stays null (`capabilities.strategyDrawdown` is false).
  *
- *   const { strategies, total, manual, errors, partial, loading, reload } =
+ * Sources fill in as they arrive (the slow ledger no longer holds the others back): `loading` is true until all
+ * have settled, `ledgerLoading` only while the ledger (including its automatic retries) is pending.
+ *
+ *   const { strategies, total, manual, errors, partial, loading, ledgerLoading, reload } =
  *     useStrategySummary({ range: '30d', status });   // pass useStatus().status to avoid a second status poll
  *
  * strategies[]: { id, name, shortName, color, to, state: 'running'|'stopped'|'error'|'unknown', mode, stateText,
@@ -42,8 +45,10 @@ const sum = (vals) => {
   return n.length ? Math.round(n.reduce((a, b) => a + b, 0) * 100) / 100 : null;
 };
 
+// The ledger is the slow call (a cold server build). 429 analytics_busy and 503 store_unavailable are retried twice
+// by themselves (Retry-After honored, jitter); the section stays in its loading state meanwhile (see withRetry).
 function fetchLedger(range, env) {
-  return request('GET', `/api/analytics/ledger${query({ ...rangeParams(range), env, tz: viewerTimeZone() })}`);
+  return withRetry(() => request('GET', `/api/analytics/ledger${query({ ...rangeParams(range), env, tz: viewerTimeZone() })}`));
 }
 
 /** Maker / Arbitrage run state from GET /api/status (null status -> unknown). */
@@ -81,9 +86,10 @@ function stateText(state, mode) {
 
 export default function useStrategySummary({ range = DEFAULT_RANGE, env, status: statusProp } = {}) {
   const ownStatus = statusProp === undefined;
-  const [raw, setRaw] = useState({ registry: null, status: null, ledger: null, positions: null, markets: null });
+  const [raw, setRaw] = useState({ registry: null, status: null, ledger: null, ledgerFor: null, positions: null, markets: null });
   const [errors, setErrors] = useState({ strategies: null, status: null, ledger: null, positions: null, markets: null });
   const [loading, setLoading] = useState(true);
+  const [ledgerLoading, setLedgerLoading] = useState(true);
   const seq = useRef(0);
   const alive = useRef(true);
   useEffect(() => {
@@ -92,10 +98,14 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
       alive.current = false;
     };
   }, []);
+  const ledgerKey = `${range}|${env ?? ''}`;
 
   const reload = useCallback(async () => {
     const mine = ++seq.current;
+    const live = () => alive.current && mine === seq.current;
     setLoading(true);
+    setLedgerLoading(true);
+    setErrors((e) => ({ ...e, ledger: null }));
     const jobs = {
       strategies: api.getStrategies(),
       ledger: fetchLedger(range, env),
@@ -103,27 +113,29 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
       markets: api.getMarkets(),
     };
     if (ownStatus) jobs.status = api.status();
-    const keys = Object.keys(jobs);
-    const settled = await Promise.allSettled(keys.map((k) => jobs[k]));
-    if (!alive.current || mine !== seq.current) return;
-    const nextRaw = {};
-    const nextErr = { strategies: null, status: null, ledger: null, positions: null, markets: null };
-    keys.forEach((k, i) => {
-      const r = settled[i];
-      if (r.status === 'fulfilled') nextRaw[k] = r.value;
-      else nextErr[k] = r.reason || new Error('Request failed');
-    });
-    // A failed source keeps its last good value (except the ledger: it belongs to the chosen range).
-    setRaw((prev) => ({
-      registry: nextRaw.strategies ?? prev.registry,
-      status: ownStatus ? (nextRaw.status ?? prev.status) : null,
-      ledger: nextRaw.ledger ?? null,
-      positions: nextRaw.positions ?? prev.positions,
-      markets: nextRaw.markets ?? prev.markets,
-    }));
-    setErrors(nextErr);
-    setLoading(false);
-  }, [range, env, ownStatus]);
+    const tracked = Object.entries(jobs).map(([k, p]) =>
+      Promise.resolve(p).then(
+        (value) => {
+          if (!live()) return;
+          const field = k === 'strategies' ? 'registry' : k;
+          setRaw((prev) => ({ ...prev, [field]: value, ...(k === 'ledger' ? { ledgerFor: ledgerKey } : {}) }));
+          setErrors((e) => ({ ...e, [k]: null }));
+          if (k === 'ledger') setLedgerLoading(false);
+        },
+        (reason) => {
+          if (!live()) return;
+          // A failed source keeps its last good value (except the ledger: it belongs to the chosen range).
+          if (k === 'ledger') {
+            setRaw((prev) => ({ ...prev, ledger: null, ledgerFor: null }));
+            setLedgerLoading(false);
+          }
+          setErrors((e) => ({ ...e, [k]: reason || new Error('Request failed') }));
+        },
+      ),
+    );
+    await Promise.all(tracked);
+    if (live()) setLoading(false);
+  }, [range, env, ownStatus, ledgerKey]);
 
   useEffect(() => {
     reload();
@@ -136,8 +148,9 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     const registry = (Array.isArray(raw.registry) && raw.registry.length ? raw.registry : FALLBACK_REGISTRY).filter(
       (s) => s && s.id !== 'you' && s.source !== 'you',
     );
+    const ledger = raw.ledger && raw.ledgerFor === ledgerKey ? raw.ledger : null; // never another range's figures
     const rows = {};
-    for (const r of (raw.ledger && raw.ledger.strategies) || []) rows[r.strategy] = r;
+    for (const r of (ledger && ledger.strategies) || []) rows[r.strategy] = r;
     const positions = Array.isArray(raw.positions) ? raw.positions : null;
     const posSum = (pred, kind) =>
       positions ? sum(positions.filter((p) => (p.kind || 'position') === kind && pred(p)).map((p) => p.value)) ?? 0 : null;
@@ -146,7 +159,7 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     const strategies = registry.map((s) => {
       const st = strategyState(s.id, status);
       const row = rows[s.id] || null;
-      const ledgerOk = !!raw.ledger;
+      const ledgerOk = !!ledger;
       const shortName = STRATEGY_PAGES[s.id] || strategyShortName(s.name);
       const lastAction = st.lastRunAt ? { ts: st.lastRunAt, text: s.id === 'arb' ? 'Last scan' : 'Last pass' } : null;
       return {
@@ -194,11 +207,11 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     };
     const you = rows.you;
     const manual =
-      raw.ledger || positions
+      ledger || positions
         ? {
-            pnl: you ? you.realized_pnl : raw.ledger ? 0 : null,
-            fills: you ? you.fills : raw.ledger ? 0 : null,
-            openCost: you ? you.open_cost : raw.ledger ? 0 : null,
+            pnl: you ? you.realized_pnl : ledger ? 0 : null,
+            fills: you ? you.fills : ledger ? 0 : null,
+            openCost: you ? you.open_cost : ledger ? 0 : null,
             exposure: posSum((p) => p.source === 'you', 'position'),
           }
         : null;
@@ -211,9 +224,10 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
       errors,
       partial,
       loading,
+      ledgerLoading,
       reload,
       capabilities: SUMMARY_CAPABILITIES,
-      env: raw.ledger ? raw.ledger.env : null,
+      env: ledger ? ledger.env : null,
     };
-  }, [raw, status, errors, loading, reload]);
+  }, [raw, status, errors, loading, ledgerLoading, ledgerKey, reload]);
 }

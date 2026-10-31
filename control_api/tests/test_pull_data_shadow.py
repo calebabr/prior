@@ -35,7 +35,8 @@ async def _store():
          "join_ts": NOW - timedelta(days=5), "end_ts": NOW - timedelta(days=5, hours=-1), "end_reason": "cancel",
          "close_time": close, "trades_read": True, "fill": {"lo": 0.0, "mid": 5.0, "hi": 10.0}, "result": None,
          "settle_checked_ts": NOW, "api_key": "k-should-not-appear", "tick_token": "tick-should-not-appear",
-         "q0": 120.0, "level_min": 100.0},
+         "q0": 120.0, "level_min": 100.0, "interval": 7, "fee_mode": "std", "through": True,
+         "through_vol": 3.5, "traded_vol": 9.0, "truncated": False, "n_obs": 4, "pnl": 0.6, "cell": "secret-cell"},
         {"ep_id": "ep2", "ticker": "KXDEMOA-26OCT27-B1", "series": "KXDEMOA", "side": "no", "price": 0.9,
          "count": 5.0, "cost": 4.5, "methodology": 2, "capped": True, "cap_reason": "open_cap",
          "join_ts": NOW - timedelta(hours=1), "end_ts": None, "close_time": NOW + timedelta(hours=5),
@@ -66,6 +67,11 @@ def test_shadow_export_is_read_only_scrubbed_and_documented(tmp_path):
     assert by["ep1"]["methodology"] == "1" and by["ep1"]["result"] == "" and by["ep1"]["capped"] == "False"
     assert by["ep1"]["settle_checked_ts"].startswith("2026-10-27T15:00") and "+00:00" in by["ep1"]["close_time"]
     assert by["ep2"]["cap_reason"] == "open_cap" and by["ep2"]["result"] == "yes"
+    assert by["ep1"]["interval"] == "7" and by["ep1"]["through"] == "True" and by["ep1"]["through_vol"] == "3.5"
+    assert by["ep1"]["n_obs"] == "4" and by["ep1"]["pnl"] == "0.6" and by["ep2"]["interval"] in ("", "10")
+    doc = (out / "DATA_DICTIONARY.md").read_text(encoding="utf-8") if (out / "DATA_DICTIONARY.md").exists() else ""
+    assert not doc or "through_vol" in doc
+    assert "secret-cell" not in (out / "shadow_episodes.csv").read_text(encoding="utf-8")
     text = (out / "shadow_episodes.csv").read_text(encoding="utf-8")
     assert "k-should-not-appear" not in text and "tick-should-not-appear" not in text and "q0" not in text
 

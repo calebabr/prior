@@ -49,7 +49,8 @@ AUDIT_KEYS = ["ts", "user", "action", "ok", "details"]
 # --shadow: the only Shadow episode fields exported (ids, the hypothetical bid, caps, timing, fill and settlement state)
 SHADOW_EPISODE_KEYS = ["ep_id", "ticker", "series", "side", "price", "count", "cost", "methodology", "capped",
                        "cap_reason", "join_ts", "end_ts", "end_reason", "close_time", "trades_read", "fill",
-                       "result", "settled_ts", "settle_checked_ts"]
+                       "result", "settled_ts", "settle_checked_ts", "interval", "fee_mode", "last_seen_ts", "through",
+                       "through_ts", "through_vol", "traded_vol", "truncated", "n_obs", "pnl"]
 SHADOW_EXPORT_EPISODES = 20_000            # newest episodes exported (Atlas keeps 30 days, at most ~1500 new a day)
 SHADOW_EXPORT_PASSES = 5_000               # newest pass docs exported
 BIG = 10_000_000
@@ -675,6 +676,16 @@ FILES_DOC["shadow_episodes.csv"] = (
         "result": "yes | no | void once settled; empty = not yet settled.",
         "settled_ts": "When the result was read (" + TS + ").",
         "settle_checked_ts": "When settlement was last looked up for this episode (" + TS + ").",
+        "interval": "Shadow cadence in minutes (5 | 7 | 10) that created the bid.",
+        "fee_mode": "Fee schedule applied to the modeled fill: empty = not set (legacy).",
+        "last_seen_ts": "Last cycle that still saw the bid resting (" + TS + ").",
+        "through": "true once a public trade crossed the bid price after the join (modeled fill evidence).",
+        "through_ts": "First such crossing trade (" + TS + "); empty if none.",
+        "through_vol": "Contracts traded through the price after the join; empty if not read yet.",
+        "traded_vol": "Contracts traded at the price level after the join.",
+        "truncated": "true if the trade read hit its page limit, so the fill estimate may be understated.",
+        "n_obs": "Number of cycles the bid was observed.",
+        "pnl": "Modeled profit in dollars once settled; empty before. Not a real fill.",
     })
 FILES_DOC["shadow_passes.csv"] = (
     "Only with --shadow. One row per Shadow cycle (newest 5,000): counts, errors and the held-position figures.", {

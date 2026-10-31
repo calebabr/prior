@@ -838,3 +838,151 @@ export function mockScorecard(q, mode = 'demo') {
     notes: ['Order-error counters and maker cap bindings are not stored yet.'],
   };
 }
+
+// ---------------------------------------------------------------- Returns per day / week / month
+// A fixture of docs/RETURNS_FEATURE_CONTRACT.md 4.1 and 4.2 (the real route is built in parallel). Deterministic:
+// the same (granularity, days) always gives the same bars. Dates use UTC calendar days (the mock ignores `tz`).
+
+const RET_GRANS = ['day', 'week', 'month'];
+const RET_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const retIso = (d) => d.toISOString().slice(0, 10);
+const retAddDays = (d, n) => new Date(d.getTime() + n * DAY);
+const retShort = (d) => `${RET_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+// small deterministic pseudo-random in [0, 1)
+const retRand = (n) => {
+  const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
+  return x - Math.floor(x);
+};
+
+// q is a URLSearchParams (the mock router) or a plain object (direct calls).
+const retGet = (q, k) => (q && typeof q.get === 'function' ? q.get(k) : q ? q[k] : null);
+
+export function mockReturns(q, { mode = 'demo', nowMs = Date.now() } = {}) {
+  const granularity = retGet(q, 'granularity') || 'day';
+  const days = retGet(q, 'days') != null ? Number(retGet(q, 'days')) : 30;
+  const env = retGet(q, 'env') || mode;
+  if (!RET_GRANS.includes(granularity)) return [422, { detail: 'granularity must be day, week or month' }];
+  if (!Number.isInteger(days) || days < 1 || days > 400) return [422, { detail: 'days is out of range' }];
+  if (!['demo', 'live', 'all'].includes(env)) return [422, { detail: 'env must be demo, live or all' }];
+  const now = new Date(nowMs);
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const spans = [];
+  if (granularity === 'day') {
+    for (let i = days - 1; i >= 0; i -= 1) spans.push([retAddDays(today, -i), retAddDays(today, -i)]);
+  } else if (granularity === 'week') {
+    const monday = retAddDays(today, -((today.getUTCDay() + 6) % 7));
+    for (let k = Math.max(1, Math.floor(days / 7)) - 1; k >= 0; k -= 1) {
+      const s = retAddDays(monday, -7 * k);
+      spans.push([s, retAddDays(s, 6)]);
+    }
+  } else {
+    const n = Math.max(1, Math.round(days / 30));
+    for (let k = n - 1; k >= 0; k -= 1) {
+      const s = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - k, 1));
+      spans.push([s, new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 0))]);
+    }
+  }
+  const scale = granularity === 'day' ? 1 : granularity === 'week' ? 5 : 20;
+  let totalPnl = 0;
+  let totalFills = 0;
+  const periods = spans.map(([s, e], i) => {
+    const partial = i === spans.length - 1;
+    const seed = Math.floor(s.getTime() / DAY);
+    const empty = granularity === 'day' && !partial && retRand(seed + 3) < 0.12;
+    const fills = empty ? 0 : Math.max(1, Math.round(retRand(seed + 5) * 9 * (granularity === 'day' ? 1 : scale)));
+    const arbFills = Math.round(fills * 0.7);
+    const maker = empty ? 0 : +(((retRand(seed + 1) - 0.42) * 1.2) * scale).toFixed(2);
+    const arb = empty ? 0 : +(retRand(seed + 2) * 1.6 * scale).toFixed(2);
+    const pnl = +(maker + arb).toFixed(2);
+    const base = +(500 + i * 3).toFixed(2);
+    totalPnl += pnl;
+    totalFills += fills;
+    const label =
+      granularity === 'day' ? retShort(s) : granularity === 'week' ? `${retShort(s)} to ${retShort(e)}` : RET_MONTHS[s.getUTCMonth()];
+    const endUtc = retAddDays(e, 1);
+    return {
+      start_local: retIso(s),
+      end_local: retIso(e),
+      start_utc: `${retIso(s)}T00:00:00Z`,
+      end_utc: `${retIso(endUtc)}T00:00:00Z`,
+      label,
+      partial,
+      elapsed_hours: partial ? +(((nowMs - s.getTime()) / 3600000) % (granularity === 'day' ? 24 : 168)).toFixed(1) : null,
+      realized_pnl: pnl,
+      by_strategy: { maker, arb },
+      settled_fills: fills,
+      fills_by_strategy: { maker: fills - arbFills, arb: arbFills },
+      base,
+      return_rate: +(pnl / base).toFixed(4),
+      return_reason: 'ok',
+      flows_in_period: { count: 0, net: 0, deposits: 0, withdrawals: 0 },
+      equity_change: pnl,
+      you: { settled_fills: 0, realized_pnl: 0 },
+      small_sample: fills > 0 && fills < 5,
+      empty: fills === 0,
+    };
+  });
+  return [
+    200,
+    {
+      env,
+      days,
+      granularity,
+      tz_used: 'UTC',
+      generated_utc: new Date(nowMs).toISOString(),
+      attribution: 'settlement date (local period in tz_used)',
+      label: env === 'live' ? 'live, small sample, indicative only' : env === 'all' ? 'mixed demo and live, indicative only' : 'demo, indicative only',
+      small_sample_threshold: 5,
+      min_base: 10.0,
+      truncated: false,
+      periods,
+      totals: { realized_pnl: +totalPnl.toFixed(2), settled_fills: totalFills },
+      notes: [],
+    },
+  ];
+}
+
+export function mockReturnsFills(q, { mode = 'demo', nowMs = Date.now() } = {}) {
+  const [st, body] = mockReturns(q, { mode, nowMs });
+  if (st !== 200) return [st, body];
+  // like the real route: both `start` and `end` (local dates) are required
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(retGet(q, 'start') || '') || !/^\d{4}-\d{2}-\d{2}$/.test(retGet(q, 'end') || '')) {
+    return [422, { detail: 'end: required date' }];
+  }
+  const p = body.periods.find((x) => x.start_local === retGet(q, 'start'));
+  if (!p) return [404, { detail: 'period_not_found' }];
+  const limit = Math.min(100, Math.max(1, Number(retGet(q, 'limit')) || 50));
+  const offset = Math.max(0, Number(retGet(q, 'offset')) || 0);
+  const all = [];
+  for (const [strategy, n] of Object.entries(p.fills_by_strategy)) {
+    const each = n ? p.by_strategy[strategy] / n : 0;
+    for (let i = 0; i < n; i += 1) {
+      all.push({
+        fill_id: `${strategy}-${p.start_local}-${i}`,
+        ticker: `KXDEMOA-${p.start_local.replace(/-/g, '')}-T${60 + i}`,
+        series: 'KXDEMOA',
+        side: i % 3 === 0 ? 'no' : 'yes',
+        strategy,
+        count: 1 + (i % 5),
+        price: +(0.82 + (i % 7) * 0.02).toFixed(2),
+        pnl: +each.toFixed(2),
+        result: each >= 0 ? 'win' : 'loss',
+        settled_utc: `${p.start_local}T${String(6 + (i % 12)).padStart(2, '0')}:02:00Z`,
+        ts: `${p.start_local}T0${i % 6}:15:00Z`,
+      });
+    }
+  }
+  all.sort((a, b) => (a.settled_utc < b.settled_utc ? 1 : -1));
+  return [
+    200,
+    {
+      tz_used: body.tz_used,
+      env: body.env,
+      period: { start_local: p.start_local, end_local: p.end_local },
+      total: all.length,
+      offset,
+      limit,
+      fills: all.slice(offset, offset + limit),
+    },
+  ];
+}

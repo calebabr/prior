@@ -213,6 +213,12 @@ export function formatReturn(v, { sign = true } = {}) {
   return fmtPct(v, { sign, digits: 1 }, MINUS);
 }
 
+/** Return for one period: two decimals under 1%, one decimal from 1% up, signed, U+2212 minus, dash for null. */
+export function formatPeriodReturn(v) {
+  if (!isNum(v)) return DASH;
+  return fmtPct(v, { sign: true, digits: Math.abs(v) < 0.01 ? 2 : 1 }, MINUS);
+}
+
 /** Shares and rates, zero decimals, no sign: 0.914 -> "91%". */
 export function formatShare(v) {
   return fmtPct(v, { sign: false, digits: 0 }, MINUS);

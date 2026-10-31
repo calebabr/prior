@@ -419,6 +419,7 @@ class Runner:
         self.last_pass_started_utc: datetime | None = None
         self.fill_quality_cache: dict | None = None   # S-23: {mode, overall, by_series}; served by /status, /markets
         self._fq_task: asyncio.Task | None = None
+        self.post_pass_hook = None     # optional zero-argument callable run after a pass (read-only warm-ups); never raises
         # queue-position telemetry (read-only): journal quote/cancel rows waiting for the next evaluation,
         # order ids cancelled by Stop, and the cached aggregate (same S-23 pattern as fill quality)
         self.queue_stats_cache: dict | None = None
@@ -1338,8 +1339,20 @@ class Runner:
             self._start_fill_quality()          # S-24: outside the pass lock, own time budget, never blocks Stop
             self._start_queue_position(mode)    # same pattern: read-only, budgeted, Stop never waits on it
             self._start_close_time(mode)        # same pattern; runs after the queue evaluation above
+            self._fire_post_pass_hook()         # read-only analytics warm-up; wrapped, never blocks or raises
         if ok and (self.last_monitor_utc is None or utcnow() - self.last_monitor_utc > MONITOR_EVERY):
             await self.run_monitor("weekly")
+
+    def _fire_post_pass_hook(self) -> None:
+        """Call the optional post-pass hook (it only schedules a background task). Any failure is logged, never raised
+        into the trading loop."""
+        hook = self.post_pass_hook
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception as e:  # noqa: BLE001
+            log.warning("post-pass hook failed: %s", type(e).__name__)
 
     async def _handle_write_report(self, out: str | None, mode: str, now: datetime | None = None) -> dict:
         """After a pass: record the strategy's write-path summary and send at most ONE grouped order-error alert

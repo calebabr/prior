@@ -45,6 +45,7 @@ from ..services import botfiles
 from ..services import ledger as ledgersvc
 from ..services import periods as per
 from ..services import pnl as pnlsvc
+from ..services import returns as retsvc
 from ..services import strategies as strat
 from .periods import window_for
 
@@ -57,6 +58,7 @@ REFRESH_AFTER_S = 60.0                   # ledger: older rows are served stale w
 WARM_MIN_GAP_S = 120.0                   # a warm-up is skipped if another ran this recently (run-once spam)
 WARM_DAYS = 30
 CACHE_MAX_KEYS = 64                      # summaries per (env, days, period, tz); the oldest is dropped beyond this
+RETURNS_CACHE_KEYS = 24                  # returns bodies per (env, days, tz, granularity); the oldest is dropped
 ROWS_CACHE_KEYS = 2                      # cached trade-row sets (each up to MAX_FILLS rows)
 BUSY_WAIT_S = 8.0                        # how long a request waits for another key's build before 429
 BUSY_RETRY_S = 5
@@ -69,7 +71,7 @@ ALERT_LIMIT = 2000
 AUDIT_LIMIT = 1000
 JOURNAL_MAP_MAX = 60_000                 # order ids kept in the map (oldest dropped beyond this)
 RATE_LIMITS = {"analytics_summary": (30, 60.0), "analytics_trades": (60, 60.0),
-               "analytics_ledger": (20, 60.0)}   # per user, per minute
+               "analytics_ledger": (20, 60.0), "analytics_returns": (20, 60.0)}   # per user, per minute
 _clock = time.monotonic                  # tests monkeypatch this
 _SERIES_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.]{0,39}$")
 _CHOICES = {"env": an.ENVS, "side": ("yes", "no"), "kind": ("maker", "taker"), "status": ("settled", "open"),
@@ -148,7 +150,8 @@ def _state(request: Request) -> dict:
     st = getattr(request.app.state, "analytics", None)
     if st is None:
         st = request.app.state.analytics = {"rows": {}, "inflight": {}, "gate": asyncio.Lock(), "jmap": None,
-                                            "refresh_task": None, "warm_at": None, "last_tz": None}
+                                            "refresh_task": None, "warm_at": None, "last_tz": None,
+                                            "returns": {}}
     return st
 
 
@@ -158,6 +161,7 @@ def clear_cache(app) -> None:
     st = getattr(app.state, "analytics", None)
     if st is not None:
         st["rows"].clear()
+        st.setdefault("returns", {}).clear()
         st["jmap"] = None
         st["warm_at"] = None
 
@@ -562,6 +566,86 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
         out["period"] = {"id": period.get("id"), "name": period.get("name")}
     out["notes"] = out["notes"] + notes
     return out
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)                  # tests monkeypatch this
+
+
+def _parse_date(field: str, raw: str | None):
+    try:
+        return datetime.strptime(raw or "", "%Y-%m-%d").date()
+    except ValueError:
+        raise _bad(field, "must be a date YYYY-MM-DD") from None
+
+
+@router.get("/analytics/returns")
+async def analytics_returns(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Returns per calendar day / week / month (services/returns.py): realized P&L of bot fills by settlement date in
+    the viewer's zone, over a modified-Dietz base from account snapshots and cash flows. Whole periods only. Read
+    only; signed in (no 2FA); validated params (422); own cache per (env, days, tz, granularity), 60 s, 24 keys."""
+    _rate_limit(request, user, "analytics_returns")
+    q = request.query_params
+    gran = q.get("granularity", "day")
+    if gran not in retsvc.GRANULARITIES:
+        raise _bad("granularity", f"must be one of {list(retsvc.GRANULARITIES)}")
+    days = _int("days", q.get("days"), 30, 1, max(an.DAYS_ALLOWED))     # any 1..180: the app asks 84 for weeks
+    ds_days = next(d for d in an.DAYS_ALLOWED if d >= days)           # rows come from the smallest cached set covering it
+    env = _env(request, q.get("env"))
+    zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
+    st = _state(request)
+    st["last_tz"] = tzname
+    key, t0, rc = (env, days, tzname, gran), _clock(), st.setdefault("returns", {})
+    hit = rc.get(key)
+    if _fresh(hit, t0, SUMMARY_TTL_S):
+        return hit[1]
+    now = _now()
+    since = now - timedelta(days=days)
+    all_rows = await _dataset(request, env, ds_days, "rows", None, swr=True)
+    store, notes = request.app.state.store, []
+    snaps, flows = await _parallel(
+        _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+              "account snapshots", []),
+        _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
+    if len(snaps or []) >= SNAP_LIMIT:
+        notes.append("the snapshot read hit its row limit: the oldest periods may have no start balance")
+    mode = getattr(request.app.state.runner, "mode", None)
+    out = retsvc.build(all_rows, snaps or [], flows or [], zone=zone, tzname=tzname, granularity=gran, days=days,
+                       env=env, env_is_current=env in ("demo", "live") and env == mode, now=now,
+                       truncated=len(all_rows) >= an.MAX_FILLS, notes=notes)
+    if not any("store read failed" in n for n in notes):     # only successful builds are cached
+        for k in [k for k, v in rc.items() if not _fresh(v, t0, SUMMARY_TTL_S)]:
+            rc.pop(k, None)
+        while len(rc) >= RETURNS_CACHE_KEYS:
+            rc.pop(min(rc, key=lambda k: rc[k][0]))
+        rc[key] = (t0, out)
+    return out
+
+
+@router.get("/analytics/returns/fills")
+async def analytics_returns_fills(request: Request, user: dict = Depends(current_user)) -> dict:
+    """Drill-down for one period: bot fills settled in the local dates [start, end], newest settlement first, from the
+    cached rows. `start` / `end` are the period's `start_local` / `end_local`. Read only; same bucket as /returns."""
+    _rate_limit(request, user, "analytics_returns")
+    q = request.query_params
+    start, end = _parse_date("start", q.get("start")), _parse_date("end", q.get("end"))
+    if end < start or (end - start).days >= retsvc.FILLS_MAX_SPAN_DAYS:
+        raise _bad("end", f"must be on or after start and within {retsvc.FILLS_MAX_SPAN_DAYS} days")
+    limit = _int("limit", q.get("limit"), 50, 1, 100)
+    offset = _int("offset", q.get("offset"), 0, 0, 1_000_000)
+    env = _env(request, q.get("env"))
+    zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
+    now = _now()
+    lo = retsvc.local_start_utc(start, zone)
+    need = (now - lo).total_seconds() / 86400.0
+    days = next((d for d in an.DAYS_ALLOWED if d >= need), None)
+    if days is None:
+        raise _bad("start", f"must be within the last {max(an.DAYS_ALLOWED)} days")
+    all_rows = await _dataset(request, env, days, "rows", None, swr=True)
+    hits = retsvc.period_fills(all_rows, zone=zone, start=start, end=end, now=now)
+    return {"tz_used": tzname, "env": env,
+            "period": {"start_local": start.isoformat(), "end_local": end.isoformat()},
+            "total": len(hits), "offset": offset, "limit": limit, "fills": hits[offset:offset + limit]}
 
 
 @router.get("/analytics/scorecard")

@@ -37,6 +37,8 @@ export const PNL_SCOPES = {
   bySourcePeriod: 'Realized by source, by fill date (UTC) within the chosen period',
   // Analytics
   analytics: ({ tz } = {}) => `Realized, maker + arbitrage, by settlement date (${zoneLabel(tz)})`,
+  // Analytics returns (per day, week or month)
+  returns: 'Realized P&L by settlement date, your time zone, over starting balance adjusted for deposits and withdrawals',
   // Account
   period: 'Realized, bot fills in this period, by fill date (UTC)',
   equity: 'Equity minus deposits, open positions at cost',

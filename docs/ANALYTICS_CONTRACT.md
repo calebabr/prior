@@ -45,3 +45,15 @@ The plain-English definitions live in one place, `control_app/src/utils/glossary
 array of `{id, term, short, body, group, related}` with kebab-case ids) and `getTerm(id)`. A help icon such as
 `<HelpIcon term="fill-rate" />` links to `/terminology#fill-rate`, and a test fails if any help icon in `src/` names a
 term that is missing from the glossary.
+
+## Returns per day, week and month
+
+`GET /api/analytics/returns` and `/returns/fills` (`control_api/services/returns.py`). Read only.
+
+- **Return** = realized P&L of bot fills settled in the period (maker + arbitrage; `you` is excluded and counted in a note) divided by a modified Dietz base: `B = V0 + sum(F_i * w_i)`. `V0` is the equity (cash + exposure) of the last account snapshot at or before the period start; `F_i` is a deposit (+) or withdrawal (-) after that snapshot and up to the period end; `w_i = (end_eff - max(ts_i, start)) / (end_eff - start)` on real elapsed seconds (a 23 or 25 hour DST day is handled), `end_eff = min(period end, now)`. `return_rate` is a fraction (0.0265 = 2.65%).
+- **Periods** are local calendar spans in `tz` (day, Monday-start week, month), bucketed by the local date of the settlement time. The current period is `partial` and is never projected. Empty periods are present with zero P&L.
+- **Window:** `days` is any value from 1 to 180 (the app asks 7/30/90/180 for days, 84 for weeks, 180 for months). Whole periods only: a period starting before `now - days` is dropped; if none fits, `periods` is empty with a note.
+- **Null rate** (`return_reason`): `no_start_snapshot`, `stale_start_snapshot` (the snapshot is over 24 h before the start), `base_too_small` (base <= 10.00), `env_not_current` (`env` is `all` or not the account the snapshots belong to). Dollars are still returned.
+- **Small sample:** 1 to 4 settled fills (`small_sample_threshold` 5).
+- **Account snapshots carry no env tag** (the runner stores `ts`, `cash`, `exposure`, `headroom`), so they are taken to belong to the account the runner is in now; any other `env` gets `env_not_current`. Snapshots written before a demo/live switch are not distinguishable, so a period straddling a switch can show a wrong base.
+- Percentages are not additive across periods; the dollars are.

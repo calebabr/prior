@@ -452,6 +452,11 @@ export const api = {
     request('GET', `/api/analytics/ledger${query({ days, env, tz: viewerTimeZone() })}`, { signal }),
   analyticsScorecard: ({ days = 7, env } = {}, { signal } = {}) =>
     request('GET', `/api/analytics/scorecard${query({ days, env })}`, { signal }),
+  // Returns per day / week / month (docs/RETURNS_FEATURE_CONTRACT.md 4.1, 4.2). Read-only, no 2FA.
+  analyticsReturns: ({ granularity = 'day', days = 30, env } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/returns${query({ granularity, days, env, tz: viewerTimeZone() })}`, { signal }),
+  analyticsReturnsFills: ({ granularity = 'day', start, end, days = 30, env, limit = 50, offset = 0 } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/returns/fills${query({ granularity, start, end, days, env, limit, offset, tz: viewerTimeZone() })}`, { signal }),
   // params: days, env, series, side, kind, status, band, cell, result, limit, offset
   analyticsTrades: (params = {}, { signal } = {}) =>
     request('GET', `/api/analytics/trades${query(params)}`, { signal }),

@@ -393,6 +393,56 @@ const RAW_GLOSSARY = [
     related: ['pnl', 'edge'],
   },
   {
+    id: 'period-return',
+    group: 'performance',
+    term: 'Period percent (day, week, month)',
+    aliases: ['daily return', 'weekly return', 'monthly return', 'return rate'],
+    short: 'Profit settled in a day, week or month as a share of the account at the start of it.',
+    body:
+      'Return = realized P&L settled in the period ÷ the base. The dollar figure is always shown; the percent is a dash when the base cannot be trusted. Each period has its own base, so daily percentages do not add up to the weekly one, but the dollars do. This is account growth, not the same as Profit per $1 Spent, which divides by what was paid for contracts.',
+    related: ['return-base', 'partial-period', 'small-sample', 'roi'],
+  },
+  {
+    id: 'return-base',
+    group: 'performance',
+    term: 'Base (modified Dietz)',
+    aliases: ['dietz', 'base', 'starting balance'],
+    short: 'The account balance at the start of the period, adjusted for money you added or took out.',
+    body:
+      'The base is the balance when the period began plus deposits and minus withdrawals, each counted for the part of the period it was in the account (a deposit on Wednesday counts for about four sevenths of a Monday-to-Sunday week). That way moving money in or out never looks like a gain or a loss. If there is no reliable starting balance, or the base is under $10, the percent shows a dash.',
+    related: ['period-return', 'pnl'],
+  },
+  {
+    id: 'small-sample',
+    group: 'performance',
+    term: 'Small sample (fewer than 5 fills)',
+    aliases: ['faded bar', 'few fills', 'noise'],
+    short: 'A period with fewer than 5 settled fills; one fill can swing it, so read it as noise.',
+    body:
+      'Bars with fewer than 5 settled fills are drawn faded with a dotted outline. One winning or losing fill can swing such a period, so it says little about the strategy. Arbitrage counts legs, so 5 fills can be a single set.',
+    related: ['period-return', 'confidence-interval'],
+  },
+  {
+    id: 'partial-period',
+    group: 'performance',
+    term: 'So far (partial period)',
+    aliases: ['so far', 'current period', 'in progress'],
+    short: 'The current day, week or month, still in progress.',
+    body:
+      'The latest bar covers time that has not finished yet, so it is marked "so far" and drawn with a dashed outline. Its percent is on the time elapsed. It is never scaled up to a full period and never projected.',
+    related: ['period-return'],
+  },
+  {
+    id: 'indicative',
+    group: 'performance',
+    term: 'Indicative only',
+    aliases: ['demo, indicative only'],
+    short: 'A number from demo money or a small sample; it describes that account, not what to expect live.',
+    body:
+      'A demo balance is arbitrary, and a short live history is a small sample. Percentages from either are shown for orientation only and should not be read as an expected return.',
+    related: ['small-sample', 'period-return'],
+  },
+  {
     id: 'win-rate',
     group: 'performance',
     term: 'Win rate',

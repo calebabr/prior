@@ -8,6 +8,7 @@ import WinRateByStrategy from '../components/analytics/WinRateByStrategy.jsx';
 import LedgerView from '../components/analytics/LedgerView.jsx';
 import ScorecardView from '../components/analytics/ScorecardView.jsx';
 import PnlCurve from '../components/analytics/PnlCurve.jsx';
+import ReturnsCard from '../components/analytics/ReturnsCard.jsx';
 import EdgeBreakdown from '../components/analytics/EdgeBreakdown.jsx';
 import FillQualityTrend from '../components/analytics/FillQualityTrend.jsx';
 import ArbHistory from '../components/analytics/ArbHistory.jsx';
@@ -97,7 +98,7 @@ function Totals({ t, pooled = true }) {
   );
 }
 
-function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
+function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days, env, onUseDays }) {
   const [kind, setKind] = useState('all');
   const combined = view === 'combined' && my.data && totals;
   return (
@@ -163,6 +164,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days }) {
           </p>
         </Card>
       )}
+      <ReturnsCard days={days} env={env} onUseDays={onUseDays} />
     </>
   );
 }
@@ -342,7 +344,7 @@ export default function Analytics() {
       )}
 
       {s && tab === 'summary' && totals && (
-        <SummaryTab s={s} totals={totals} empty={empty} curve={curve} hasSplit={hasSplit} my={my} view={view} days={days} />
+        <SummaryTab s={s} totals={totals} empty={empty} curve={curve} hasSplit={hasSplit} my={my} view={view} days={days} env={env} onUseDays={setDays} />
       )}
       {s && tab === 'edge' && (empty ? <Empty what="No settled trades yet." why="Edge needs settled fills." /> : <EdgeTab s={s} />)}
       {s && tab === 'execution' && <ExecutionTab s={s} />}

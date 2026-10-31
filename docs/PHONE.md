@@ -46,3 +46,4 @@ Stop is the red button on every page; last resort, suspend the service in Render
 - **Settings > Display:** theme (three dark) and text size. **Settings:** saving shows what changed; **Undo Last Change** reverts it (needs a 2FA code).
 - **Alerts:** history, daily summary time, every fill or problems only, quiet hours (Stop and breaker alerts always come through).
 - **Stop** is on the status card on every state; last resort, suspend the service in Render, or `stop_maker.ps1` on the desktop.
+- **Returns (Performance > Analytics > Summary):** choose Day, Week or Month under the Returns heading. Each bar is one period's profit (Maker and Arbitrage stacked, above or below the zero line); tap a bar to read it, then Details for the fills behind it. Faded bars have fewer than 5 fills, so treat them as noise. "Show as table" gives the same numbers as a list. A dash instead of a percent means there was no reliable starting balance; the dollars are still right.

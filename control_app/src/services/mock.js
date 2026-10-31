@@ -8,7 +8,7 @@
 //   - reusing the previous 2FA code     -> 403 2fa_invalid (codes are single-use)
 //   - any other 6-digit code            -> accepted
 
-import { MOCK_CELLS, mockLedger, mockScorecard, mockArbSummary, analyticsSummary, analyticsTrades, analyticsTradesCsv, mockMyTrades, mockTradeNote } from './mockAnalytics.js';
+import { MOCK_CELLS, mockLedger, mockScorecard, mockArbSummary, analyticsSummary, analyticsTrades, analyticsTradesCsv, mockReturns, mockReturnsFills, mockMyTrades, mockTradeNote } from './mockAnalytics.js';
 import { decorateActivity, resetMockUx, uxRoute } from './mockUx.js';
 
 const SERIES = ['KXDEMOA', 'KXDEMOB', 'KXDEMOC', 'KXDEMOD', 'KXDEMOE', 'KXDEMOF'];
@@ -804,6 +804,14 @@ async function route(method, url, headers, body) {
   // Analytics (docs/ANALYTICS_CONTRACT.md): read-only, normal session, no 2FA.
   if (method === 'GET' && p === '/api/analytics/summary') {
     const [st, data] = analyticsSummary(q, { mode: S.mode });
+    return reply(st, data);
+  }
+  if (method === 'GET' && p === '/api/analytics/returns') {
+    const [st, data] = mockReturns(q, { mode: S.mode });
+    return reply(st, data);
+  }
+  if (method === 'GET' && p === '/api/analytics/returns/fills') {
+    const [st, data] = mockReturnsFills(q, { mode: S.mode });
     return reply(st, data);
   }
   if (method === 'GET' && p === '/api/analytics/ledger') return reply(200, mockLedger(q, S.mode));

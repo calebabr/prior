@@ -1,0 +1,28 @@
+{
+  "_note": "Shared by control_api/tests/test_returns_contract.py (real route) and control_app/src/test/returnsContract.test.js (mock fixture). Types: string number integer boolean object array null.",
+  "return_reasons": ["ok", "no_start_snapshot", "stale_start_snapshot", "base_too_small", "env_not_current"],
+  "strategy_keys": ["maker", "arb"],
+  "top": {
+    "env": ["string"], "days": ["integer"], "granularity": ["string"], "tz_used": ["string"],
+    "generated_utc": ["string"], "attribution": ["string"], "label": ["string"],
+    "small_sample_threshold": ["integer"], "min_base": ["number"], "truncated": ["boolean"],
+    "periods": ["array"], "totals": ["object"], "notes": ["array"]
+  },
+  "period": {
+    "start_local": ["string"], "end_local": ["string"], "start_utc": ["string"], "end_utc": ["string"],
+    "label": ["string"], "partial": ["boolean"], "elapsed_hours": ["number", "null"],
+    "realized_pnl": ["number"], "by_strategy": ["object"], "settled_fills": ["integer"],
+    "fills_by_strategy": ["object"], "base": ["number", "null"], "return_rate": ["number", "null"],
+    "return_reason": ["string"], "flows_in_period": ["object"], "equity_change": ["number", "null"],
+    "you": ["object"], "small_sample": ["boolean"], "empty": ["boolean"]
+  },
+  "flows_in_period": {"count": ["integer"], "net": ["number"], "deposits": ["number"], "withdrawals": ["number"]},
+  "you": {"settled_fills": ["integer"], "realized_pnl": ["number"]},
+  "totals": {"realized_pnl": ["number"], "settled_fills": ["integer"]},
+  "fills_top": {"tz_used": ["string"], "env": ["string"], "period": ["object"], "total": ["integer"],
+                "offset": ["integer"], "limit": ["integer"], "fills": ["array"]},
+  "fills_period": {"start_local": ["string"], "end_local": ["string"]},
+  "fill": {"fill_id": ["string"], "ticker": ["string"], "series": ["string"], "side": ["string"],
+           "strategy": ["string"], "count": ["number"], "price": ["number"], "pnl": ["number"],
+           "result": ["string"], "settled_utc": ["string"], "ts": ["string"]}
+}

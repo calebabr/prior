@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased - Returns per period (app)
+- Analytics > Summary: a Returns card with a Day | Week | Month control, stacked Maker and Arbitrage bars per period (dollars and percent, "so far" on the running period, faded bars under 5 fills), a table view and a tap-to-see-fills sheet. Week and Month always show their own window (12 weeks, about 6 months). Read-only; Stop is untouched.
+
+## Unreleased - Returns per period (API)
+- New read-only `GET /api/analytics/returns` (day, week, month; modified-Dietz percentage, whole periods only, `days` 1-180) and a per-period fills drill-down `GET /api/analytics/returns/fills`.
+
 ## Unreleased - Update prompt
 - The app now shows a dismissible "A new version is ready" banner (tap to reload) when a new service worker or a newer deployed bundle is detected. The min_app_version "update available" message is unchanged. Stop and data are never blocked.
 

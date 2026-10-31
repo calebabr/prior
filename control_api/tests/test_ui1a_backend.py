@@ -537,3 +537,59 @@ async def test_stop_still_works_with_the_new_reads_broken(env, monkeypatch):
     assert r.status_code == 200 and env.runner.desired == "stopped"
     assert (await env.client.get("/api/analytics/ledger", headers=env.auth)).status_code == 503
     assert (await env.client.get("/api/arb", headers=env.auth)).status_code == 200   # the page still answers
+
+
+# ---- settlement-date attribution per strategy (Home rows must add up to the settlement-date headline)
+def _settle_case():
+    since = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    until = since + timedelta(days=7)
+    now = until + timedelta(days=1)
+    spec = [  # (id, ticker suffix, filled at, settled at, taker)
+        ("early_m", "B71", since - timedelta(days=3), since + timedelta(days=1), False),   # filled before, settled in
+        ("in_m", "B72", since + timedelta(days=1), since + timedelta(days=2), False),
+        ("early_a", "B73", since - timedelta(days=2), since + timedelta(days=3), True),    # arb, filled before
+        ("in_a", "B74", since + timedelta(days=2), since + timedelta(days=4), True),
+        ("at_since", "B75", since - timedelta(days=4), since, False),                      # boundary: included
+        ("at_until", "B76", since + timedelta(days=3), until, False),                      # boundary: excluded
+        ("after_now", "B77", since + timedelta(days=3), now + timedelta(hours=1), False),  # not settled yet
+    ]
+    fills = [fill(i, f, ticker=f"KXDEMOB-26OCT22-{t}", price=0.4, count=10, taker=tk) for i, t, f, _, tk in
+             [(a, b, c, d, e) for a, b, c, d, e in spec]]
+    setts = [settle(f"KXDEMOB-26OCT22-{t}", "no", s) for _, t, _, s, _ in spec]
+    allr = rows_of(fills, setts)
+    in_window = [r for r in allr if r["_ts"] >= since and r["_ts"] < until]
+    return since, until, now, allr, in_window
+
+
+def test_settled_by_strategy_counts_rows_filled_before_the_window_and_matches_the_sum():
+    since, until, now, allr, in_window = _settle_case()
+    out = lg.build(in_window, [], zone=CHI, tzname="America/Chicago", since=since, until=until, snapshots=[],
+                   flows=[], now=now, all_rows=allr)
+    by_fill = {s["strategy"]: s for s in out["strategies"]}
+    sb = {s["strategy"]: s for s in out["settled_by_strategy"]}
+    expect = [r for r in allr if r["_settled"] is not None and since <= r["_settled"] <= now and r["_settled"] < until]
+    assert {r["fill_id"] for r in expect} >= {"early_m", "early_a", "at_since"} and "at_until" not in {
+        r["fill_id"] for r in expect} and "after_now" not in {r["fill_id"] for r in expect}
+    m_exp = round(sum(r["_pnl"] for r in expect if r["fill_id"] in ("early_m", "in_m", "at_since")), 2)
+    a_exp = round(sum(r["_pnl"] for r in expect if r["fill_id"] in ("early_a", "in_a")), 2)
+    assert sb["maker"]["realized_pnl"] == m_exp and sb["maker"]["settled_fills"] == 3
+    assert sb["arb"]["realized_pnl"] == a_exp and sb["arb"]["settled_fills"] == 2
+    assert sb["total"]["realized_pnl"] == round(sum(r["_pnl"] for r in expect), 2)
+    assert sb["total"]["settled_fills"] == len(expect) == 5
+    # the fill-date table leaves out the fills made before the window, so it differs; that is the old bug
+    assert by_fill["arb"]["settled_fills"] == 1 and by_fill["arb"]["realized_pnl"] != sb["arb"]["realized_pnl"]
+    assert out["settled_attribution"].startswith("settlement date") and out["attribution"].startswith("fill date")
+    assert out["daily_by_settlement"] and round(sum(d["realized_pnl"] for d in out["daily_by_settlement"]), 2) == \
+        sb["total"]["realized_pnl"]
+
+
+def test_settled_by_strategy_has_maker_and_arb_when_nothing_settled_and_no_until_bound():
+    since, _, now, allr, _ = _settle_case()
+    empty = lg.build([], [], zone=CHI, tzname="America/Chicago", since=since, until=None, snapshots=[], flows=[],
+                     now=since)
+    sb = {s["strategy"]: s for s in empty["settled_by_strategy"]}
+    assert sb["maker"]["realized_pnl"] == 0.0 and sb["arb"]["settled_fills"] == 0 and sb["total"]["realized_pnl"] == 0.0
+    open_ended = lg.build(allr, [], zone=CHI, tzname="America/Chicago", since=since, until=None, snapshots=[],
+                          flows=[], now=now)
+    ids = open_ended["settled_by_strategy"][-1]["settled_fills"]
+    assert ids == 6   # at_until now counts (no upper bound); after_now is still in the future

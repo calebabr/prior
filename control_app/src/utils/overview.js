@@ -162,3 +162,15 @@ export function settingsToastTitle(r) {
   const more = ch.length > 2 ? ` · +${ch.length - 2} More` : '';
   return `Settings Saved · ${first.join(' · ')}${more}`;
 }
+
+/**
+ * The headline total. 7 and 30 days come from the cheap /api/status `pnl_total` (Maker + Arbitrage, the same
+ * settlement-date windows the old Home used), so they show at once and never wait for the ledger. 'This period' (or a
+ * status without the figure) falls back to the ledger total. source: 'status' | 'ledger' | null.
+ */
+export function headlineTotal(status, range, ledgerPnl) {
+  const quick = status && status.pnl_total;
+  const q = quick ? (range === '7d' ? quick.d7 : range === '30d' ? quick.d30 : null) : null;
+  if (isNum(q)) return { pnl: q, source: 'status' };
+  return isNum(ledgerPnl) ? { pnl: ledgerPnl, source: 'ledger' } : { pnl: null, source: null };
+}

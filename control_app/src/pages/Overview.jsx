@@ -18,7 +18,7 @@ import useRange from '../hooks/useRange.js';
 import useStrategySummary from '../hooks/useStrategySummary.js';
 import { api } from '../services/api.js';
 import { riskLimit } from '../utils/status.js';
-import { edgeSummary, headlineParts } from '../utils/overview.js';
+import { edgeSummary, headlineParts, headlineTotal } from '../utils/overview.js';
 import { rangeLabel } from '../utils/range.js';
 import { TODAY_EMPTY, TODAY_UNAVAILABLE, todayKind } from '../utils/pnlScopes.js';
 import { DASH, NA_TITLE, dateTime, formatMoney, money, sentenceCase } from '../utils/format.js';
@@ -127,7 +127,17 @@ export default function Overview() {
   const equityDates = snaps.map((s) => shortDate(s.ts));
   const { strategies, total, manual, errors } = summary;
   const todayTotal = status && status.pnl_today && status.pnl_today.total;
-  const totalLoading = summary.loading && !isNum(total.pnl);
+  const head = headlineTotal(status, range, total.pnl);
+  const totalLoading = summary.ledgerLoading && !isNum(head.pnl); // only a ledger-fed headline ever waits
+  const ledgerError = errors.ledger;
+  const ledgerRetry = (
+    <p className="hint error-text" data-testid="home-ledger-error">
+      Couldn't load P&amp;L{head.source === 'status' ? ' by strategy' : ''}.{' '}
+      <button type="button" className="btn small" onClick={summary.reload}>
+        Retry
+      </button>
+    </p>
+  );
 
   async function onStart() {
     const mode = (status && status.mode) || 'demo';
@@ -184,7 +194,7 @@ export default function Overview() {
       {/* Visual title is the sticky PageTitle bar (aria-hidden); this is the page's one accessible heading. */}
       <h1>Home</h1>
       <SinceCard />
-      {status && <Headline state={headlineParts(status)[0]} pnl={total.pnl} range={range} edge={edgeSummary(edge.data)} />}
+      {status && <Headline state={headlineParts(status)[0]} pnl={head.pnl} range={range} edge={edgeSummary(edge.data)} />}
       <StatusCard ref={cardRef} status={status} busy={busy} onStart={onStart} onRunOnce={onRunOnce} />
       <StatusWidget status={status} cardRef={cardRef} />
       {loading && !status && <Loading text="Loading status…" />}
@@ -201,8 +211,8 @@ export default function Overview() {
               {totalLoading ? (
                 <Skeleton rows={0} figure label="Loading total P&L" />
               ) : (
-                <p className={`home-figure ${tone(total.pnl)}`} data-testid="home-total-figure" title={isNum(total.pnl) ? undefined : NA_TITLE}>
-                  {isNum(total.pnl) ? formatMoney(total.pnl, { sign: true }) : DASH}
+                <p className={`home-figure ${tone(head.pnl)}`} data-testid="home-total-figure" title={isNum(head.pnl) ? undefined : NA_TITLE}>
+                  {isNum(head.pnl) ? formatMoney(head.pnl, { sign: true }) : DASH}
                 </p>
               )}
               <RangeSelect value={range} onChange={setRange} label="P&L range" />
@@ -216,23 +226,21 @@ export default function Overview() {
                   Today <span className={tone(todayTotal)}>{formatMoney(todayTotal, { sign: true })}</span>
                 </p>
               )}
-              {errors.ledger && (
-                <p className="hint error-text" data-testid="home-ledger-error">
-                  Couldn't load P&amp;L.{' '}
-                  <button type="button" className="btn small" onClick={summary.reload}>
-                    Retry
-                  </button>
-                </p>
-              )}
+              {ledgerError && head.source !== 'status' && ledgerRetry}
             </section>
 
             <section className="home-section" aria-labelledby="home-by-h" data-testid="by-strategy">
               <h2 className="home-label" id="home-by-h">By Strategy</h2>
-              <ul className="home-rows">
-                {strategies.map((s) => (
-                  <StrategyRow key={s.id} s={s} />
-                ))}
-              </ul>
+              {summary.ledgerLoading && !ledgerError ? (
+                <Skeleton rows={2} label="Loading P&L by strategy" />
+              ) : (
+                <ul className="home-rows">
+                  {strategies.map((s) => (
+                    <StrategyRow key={s.id} s={s} />
+                  ))}
+                </ul>
+              )}
+              {ledgerError && head.source === 'status' && ledgerRetry}
               {manual && (
                 <div className="home-manual" data-testid="manual-row">
                   <div className="home-row">

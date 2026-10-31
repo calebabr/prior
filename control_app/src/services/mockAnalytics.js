@@ -800,7 +800,14 @@ export function mockLedger(q, mode = 'demo') {
   const you = row('you');
   const sum = (k) => Math.round((maker[k] + arb[k] + you[k]) * 100) / 100;
   return {
-    tz_used: q.get('tz') || 'UTC', attribution: 'fill_day',
+    tz_used: q.get('tz') || 'UTC', attribution: 'fill date (local day in tz_used); realized P&L follows the fill',
+    settled_attribution: 'settlement date (local day in tz_used)',
+    settled_by_strategy: [
+      { strategy: 'maker', settled_fills: 10, wins: 9, losses: 1, realized_pnl: 1.9 },
+      { strategy: 'arb', settled_fills: 2, wins: 2, losses: 0, realized_pnl: 0.35 },
+      { strategy: 'you', settled_fills: 0, wins: 0, losses: 0, realized_pnl: 0 },
+      { strategy: 'total', settled_fills: 12, wins: 11, losses: 1, realized_pnl: 2.25 },
+    ],
     env: q.get('env') || mode,
     days: 30, strategies: [maker, arb, you],
     total: { ...ZERO, fills: sum('fills'), cost: sum('cost'), fees: sum('fees'), realized_pnl: sum('realized_pnl'), open_cost: sum('open_cost') },

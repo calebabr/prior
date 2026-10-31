@@ -4,7 +4,9 @@ Ledger (GET /api/analytics/ledger): ONE reconciled table. Attribution is by FILL
 viewer's zone), so every fill appears once and its realized P&L follows the fill, exactly as the period summary does.
 Per strategy: fills, cost, settled fills (wins / losses per fill; arbitrage ALSO per SET, because a hedged set always
 has losing legs), settled cost, realized P&L (revenue - cost - fees, from the stored settlements), open fills and open
-cost (valued at cost, no mark-to-market). A second small table gives realized P&L by SETTLEMENT day.
+cost (valued at cost, no mark-to-market). A second small table gives realized P&L by SETTLEMENT day, and `settled_by_strategy` gives the same
+settlement-date attribution per strategy (every row settled inside the window, whenever it was filled; no row cap).
+Home uses `settled_by_strategy` so its rows add up to its settlement-date headline.
 
 Reconciliation: equity (cash + exposure from account snapshots) change over the window against what the books explain:
     expected = net cash flows + realized P&L (settled in the window)
@@ -175,6 +177,7 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
     overall: dict[str, dict] = {}
     daily: dict[tuple[str, str], dict] = {}
     by_settle: dict[tuple[str, str], dict] = {}
+    by_strategy_settled: dict[str, dict] = {}
     for r in rows:
         g = _group(r)
         _add(overall.setdefault(g, _blank()), r)
@@ -187,6 +190,22 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
             b["settled_fills"] += 1
             b["wins" if r.get("result") == "win" else "losses"] += 1
             b["realized_pnl"] += r["_pnl"]
+            g = _group(r)
+            sb = by_strategy_settled.setdefault(g, {"settled_fills": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0})
+            sb["settled_fills"] += 1
+            sb["wins" if r.get("result") == "win" else "losses"] += 1
+            sb["realized_pnl"] += r["_pnl"]
+    for g in ("maker", "arb"):
+        by_strategy_settled.setdefault(g, {"settled_fills": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0})
+    settled_total = {"settled_fills": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0}
+    for v in by_strategy_settled.values():
+        for k in settled_total:
+            settled_total[k] += v[k]
+    settled_by_strategy = [
+        {"strategy": g, **{k: (round(v, 2) if k == "realized_pnl" else v) for k, v in b.items()}}
+        for g, b in sorted(by_strategy_settled.items(), key=lambda kv: ({"maker": 0, "arb": 1}.get(kv[0], 2), kv[0]))]
+    settled_by_strategy.append({"strategy": "total", **{k: (round(v, 2) if k == "realized_pnl" else v)
+                                                       for k, v in settled_total.items()}})
     sstats = arbsets.set_stats(sets)
     strategies = []
     total = _blank()
@@ -209,6 +228,8 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
         "tz_used": tzname, "attribution": "fill date (local day in tz_used); realized P&L follows the fill",
         "window": {"since": arbsets.iso(since), "until": arbsets.iso(until), "generated_utc": arbsets.iso(now)},
         "strategies": strategies,
+        "settled_attribution": "settlement date (local day in tz_used)",
+        "settled_by_strategy": settled_by_strategy,
         "total": _fin(total, strategy="total"),
         "daily": [_fin(daily[k], date=k[0], strategy=k[1]) for k in ds],
         "daily_by_settlement": [{"date": k[0], "strategy": k[1], "settled_fills": v["settled_fills"],

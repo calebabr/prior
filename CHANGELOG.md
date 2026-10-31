@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased - Home rows by settlement date
+- Fix: Home By Strategy rows now use settlement-date P&L like the Total P&L headline, so Maker + Arbitrage equal the total. New ledger field `settled_by_strategy`; the Ledger tab shows fill-day and settlement-day P&L side by side.
+
 ## Unreleased - UI-1a stage 2: new navigation and readability
 - Five tabs on the phone: Home, Strategies, Performance, Activity, More. Desktop sidebar groups the same pages (Strategies: Maker, Arbitrage; Performance: All strategies, Analytics, Shadow Estimate, Periods) and More is grouped into System, You and Help.
 - Old links still work: `/markets` opens Maker Controls and `/arb` opens the Arbitrage page (query and hash kept, so notification links keep working).

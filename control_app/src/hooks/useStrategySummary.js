@@ -9,7 +9,10 @@ import { strategyShortName } from '../utils/format.js';
  * Client-side composition of the Strategies hub and the Home totals from existing endpoints (no backend change):
  *   GET /api/strategies            names, colours      (fallback: Maker and Arbitrage, built in)
  *   GET /api/status                on/off, mode, last run (skipped when the caller passes `status`)
- *   GET /api/analytics/ledger      P&L, return, open cost, fills per strategy (range: days= or period=)
+ *   GET /api/analytics/ledger      P&L, return, open cost, fills per strategy (range: days= or period=). P&L comes from
+ *                                  `settled_by_strategy` (SETTLEMENT date, the same rule as the Home headline); open
+ *                                  cost, fills and return stay on the fill-date `strategies` rows. A ledger without
+ *                                  `settled_by_strategy` (old API) gives pnl null: a dash, never the fill-date figure.
  *   GET /api/account/positions     exposure per strategy (live)
  *   GET /api/markets               Maker series enabled / paused
  * Each source degrades on its own: a failed source leaves its fields null (render "—" with title "Not available
@@ -151,6 +154,11 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     const ledger = raw.ledger && raw.ledgerFor === ledgerKey ? raw.ledger : null; // never another range's figures
     const rows = {};
     for (const r of (ledger && ledger.strategies) || []) rows[r.strategy] = r;
+    // Settlement-date P&L per strategy. null = the API did not send it (never fall back to the fill-date figure).
+    const settledList = ledger && Array.isArray(ledger.settled_by_strategy) ? ledger.settled_by_strategy : null;
+    const settled = {};
+    for (const r of settledList || []) settled[r.strategy] = r;
+    const settledPnl = (id) => (!ledger || !settledList ? null : isNum(settled[id]?.realized_pnl) ? settled[id].realized_pnl : 0);
     const positions = Array.isArray(raw.positions) ? raw.positions : null;
     const posSum = (pred, kind) =>
       positions ? sum(positions.filter((p) => (p.kind || 'position') === kind && pred(p)).map((p) => p.value)) ?? 0 : null;
@@ -175,7 +183,7 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
         lastRunAt: st.lastRunAt,
         nextRunAt: st.nextRunAt,
         lastAction,
-        pnl: row ? row.realized_pnl : ledgerOk ? 0 : null,
+        pnl: settledPnl(s.id),
         roi: row && isNum(row.roi_on_settled) ? row.roi_on_settled : null,
         openCost: row ? row.open_cost : ledgerOk ? 0 : null,
         fills: row ? row.fills : ledgerOk ? 0 : null,
@@ -209,7 +217,7 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     const manual =
       ledger || positions
         ? {
-            pnl: you ? you.realized_pnl : ledger ? 0 : null,
+            pnl: settledPnl('you'),
             fills: you ? you.fills : ledger ? 0 : null,
             openCost: you ? you.open_cost : ledger ? 0 : null,
             exposure: posSum((p) => p.source === 'you', 'position'),

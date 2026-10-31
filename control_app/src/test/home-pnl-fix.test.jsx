@@ -28,6 +28,10 @@ const LEDGER = {
     { strategy: 'maker', realized_pnl: 17.12, roi_on_settled: 0.046, open_cost: 8.2, fills: 9, settled_fills: 6, settled_cost: 372 },
     { strategy: 'arb', realized_pnl: 2.4, roi_on_settled: 0.011, open_cost: 0, fills: 2, settled_fills: 2, settled_cost: 218 },
   ],
+  settled_by_strategy: [
+    { strategy: 'maker', realized_pnl: 17.12 },
+    { strategy: 'arb', realized_pnl: 2.4 },
+  ],
 };
 
 /** Own fetch stub: a route returns { status, body, headers } or a Promise of one. Counts ledger calls. */

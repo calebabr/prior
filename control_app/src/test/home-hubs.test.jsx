@@ -23,6 +23,11 @@ const LEDGER = {
     { strategy: 'arb', realized_pnl: 2.4, roi_on_settled: 0.011, open_cost: 0, fills: 2, settled_fills: 2, settled_cost: 218 },
     { strategy: 'you', realized_pnl: -0.8, roi_on_settled: null, open_cost: 4, fills: 1, settled_fills: 1, settled_cost: 10 },
   ],
+  settled_by_strategy: [
+    { strategy: 'maker', realized_pnl: 17.12 },
+    { strategy: 'arb', realized_pnl: 2.4 },
+    { strategy: 'you', realized_pnl: -0.8 },
+  ],
 };
 const routes = (extra = {}) => ({
   'GET /api/status': RUNNING,

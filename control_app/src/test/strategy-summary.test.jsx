@@ -17,6 +17,11 @@ const LEDGER = {
     { ...Z, strategy: 'arb', fills: 2, settled_fills: 2, settled_cost: 10, realized_pnl: 0.5, open_cost: 0 },
     { ...Z, strategy: 'you', fills: 3, realized_pnl: -4, open_cost: 6.6 },
   ],
+  settled_by_strategy: [
+    { strategy: 'maker', realized_pnl: 2 },
+    { strategy: 'arb', realized_pnl: 0.5 },
+    { strategy: 'you', realized_pnl: -4 },
+  ],
   total: { ...Z, realized_pnl: -1.5 },
 };
 const POSITIONS = [

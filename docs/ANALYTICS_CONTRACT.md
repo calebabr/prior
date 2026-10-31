@@ -34,6 +34,7 @@ makes sense, filters for side, kind, status, result, price band, series and sour
 - `tz` (IANA name) on the summary and ledger; response `tz_used` (UTC when invalid). Dates are local, windows are UTC. Details in `docs/API.md`.
 - `win_rate_by_strategy`: maker per fill, arbitrage per set; the pooled `totals.win_rate` is deprecated.
 - `arb_summary`, `arb_sets`, `arb_sets_total`: distinct sets and sightings, and one row per executed set.
+- Two attribution rules in the ledger: `strategies`, `total` and `daily` count each fill on its FILL day (`attribution`); `settled_by_strategy` counts P&L on the SETTLEMENT day (`settled_attribution`). Home uses the settlement rule for its headline and its By Strategy rows, so they add up; a fill made before the window can settle inside it, so the two rules differ by design. Without `settled_by_strategy` Home shows a dash.
 - Analytics (under Performance) tabs: Ledger (strategy table, totals, reconciliation) and Scorecard (null shows "not tracked yet"; return is labelled demo, indicative only).
 - New glossary terms: `win-rate-by-strategy`, `arb-set`, `scans-since-restart`, `risk-rule-outcome`, `ledger`, `scorecard`, `shadow-capital`.
 - Shadow: when `ceiling_full` is set, the banner says Shadow is not estimating until positions settle.

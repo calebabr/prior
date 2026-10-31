@@ -23,6 +23,8 @@ Bottom tabs: **Home, Strategies, Performance, Activity, More**. On a wide screen
 
 Stop is the red button on every page.
 
+If the app looks out of date, close and reopen it, or tap the update banner ("A new version is ready").
+
 If you get "session expired" at login, all sessions were logged out; just log in again.
 
 ## Push notifications on iPhone (step by step)

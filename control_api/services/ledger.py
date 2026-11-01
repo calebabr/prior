@@ -8,12 +8,17 @@ cost (valued at cost, no mark-to-market). A second small table gives realized P&
 settlement-date attribution per strategy (every row settled inside the window, whenever it was filled; no row cap).
 Home uses `settled_by_strategy` so its rows add up to its settlement-date headline.
 
-Reconciliation: equity (cash + exposure from account snapshots) change over the window against what the books explain:
+Reconciliation (model `pair_time_v2`): equity (cash + exposure from account snapshots) change over the window against
+what the books explain:
     expected = net cash flows + realized P&L (settled in the window)
-               + fees of fills SETTLED in the window - fees of fills FILLED in the window
-(a fee leaves the cash when the fill happens, but fill_pnl books it when the market settles; the two fee terms undo
-that timing). residual = equity change - expected; flag = |residual| > tolerance. Anything that cannot be computed
-from stored data is null and explained in `notes`; nothing is invented.
+               + fees of fills SETTLED in the window - fees of fills FILLED in the window      (fee_timing)
+               + pair P&L formed in the window - pair P&L of the markets settled in the window  (pair_timing)
+A fee leaves the cash when the fill happens, but fill_pnl books it when the market settles; the two fee terms undo that
+timing. Kalshi also credits $1 to cash per matched YES / NO pair the moment the pair FORMS (the pair's cost leaves
+exposure then), while fill_pnl books that profit or loss at settlement; pair_timing moves it to the formation time
+(pairs per market in fill order, min(yes, no) matched contracts at average cost per side). residual = equity change -
+expected; flag = |residual| > tolerance. Anything that cannot be computed from stored data is null and explained in
+`notes`; nothing is invented.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ from typing import Any, Iterable
 from . import arbsets
 from . import pnl as pnlsvc
 
+MODEL = "pair_time_v2"
 TOLERANCE = 0.10                       # dollars; fee rounding and un-booked pair gains stay inside it
 STALE_GRACE = timedelta(hours=24)      # a fill whose market closed longer ago than this should have settled
 LATE_GRACE = timedelta(hours=6)        # "open past expected settlement" grace after the market close
@@ -72,31 +78,54 @@ def _fin(b: dict, **extra: Any) -> dict:
 
 def netting(open_rows: Iterable[dict]) -> dict:
     """Opposite YES / NO positions in one market are netted by Kalshi into $1 pairs. For each ticker holding both
-    sides open, pairs = min(yes, no); the cost basis of a pair is taken in fill order (oldest first) on each side.
-    Informational: NOT verified against real positions, so it never changes the ledger totals."""
-    by: dict[str, dict[str, list[list[float]]]] = {}
-    for r in sorted(open_rows, key=lambda r: r["_ts"]):
+    sides open, pairs = min(yes, no); the cost of a pair is taken at the AVERAGE cost of each side (the way Kalshi
+    reports exposure; FIFO was off by up to $0.15 against it). Informational: the open positions are not read from
+    Kalshi, so it never changes the ledger totals."""
+    by: dict[str, dict[str, list[float]]] = {}
+    for r in open_rows:
         if r.get("side") in ("yes", "no"):
-            by.setdefault(r["ticker"], {"yes": [], "no": []})[r["side"]].append(
-                [float(r.get("count") or 0), float(r.get("price") or 0)])
+            s = by.setdefault(r["ticker"], {"yes": [0.0, 0.0], "no": [0.0, 0.0]})[r["side"]]
+            c = float(r.get("count") or 0)
+            s[0] += c
+            s[1] += c * float(r.get("price") or 0)
     pairs = cost = 0.0
     tickers = 0
     for sides in by.values():
-        q = min(sum(c for c, _ in sides["yes"]), sum(c for c, _ in sides["no"]))
+        q = min(sides["yes"][0], sides["no"][0])
         if q <= 1e-9:
             continue
         tickers += 1
         pairs += q
-        for lots in (sides["yes"], sides["no"]):
-            need = q
-            for c, p in lots:
-                take = min(c, need)
-                cost += take * p
-                need -= take
-                if need <= 1e-9:
-                    break
+        cost += sum(q * s[1] / s[0] for s in sides.values())
     return {"tickers": tickers, "pairs": round(pairs, 2), "pair_cost": round(cost, 2),
-            "pair_value": round(pairs, 2), "pair_gain": round(pairs - cost, 2), "verified": False}
+            "pair_value": round(pairs, 2), "pair_gain": round(pairs - cost, 2), "cost_basis": "average",
+            "verified": False}
+
+
+def pair_events(rows: Iterable[dict], until: datetime | None = None) -> dict[str, list[tuple[datetime, float, float]]]:
+    """Pairs as they form, per market, in fill order (ts, fill_id). A fill on one side first matches the open
+    contracts of the other side (average cost of that side); each matched pair returns $1, so its P&L is
+    pairs - (cost of the matched opposite contracts) - (price x pairs). Returns {ticker: [(ts, pairs, pair_pnl)]}
+    for the fills that formed pairs; fills after `until` are ignored."""
+    ordered = sorted((r for r in rows if r.get("side") in ("yes", "no") and (until is None or r["_ts"] <= until)),
+                     key=lambda r: (r["_ts"], str(r.get("fill_id") or "")))
+    state: dict[str, dict[str, list[float]]] = {}
+    out: dict[str, list[tuple[datetime, float, float]]] = {}
+    for r in ordered:
+        st = state.setdefault(r["ticker"], {"yes": [0.0, 0.0], "no": [0.0, 0.0]})
+        mine, other = st[r["side"]], st["no" if r["side"] == "yes" else "yes"]
+        c, p = float(r.get("count") or 0), float(r.get("price") or 0)
+        pairs = min(c, other[0])
+        if pairs > 1e-9:
+            pc = other[1] * pairs / other[0]
+            other[0] -= pairs
+            other[1] -= pc
+            out.setdefault(r["ticker"], []).append((r["_ts"], pairs, pairs - pc - p * pairs))
+        else:
+            pairs = 0.0
+        mine[0] += c - pairs
+        mine[1] += p * (c - pairs)
+    return out
 
 
 def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *, since: datetime,
@@ -115,7 +144,10 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
     empty = {"tolerance": tolerance, "flag": None, "residual": None, "equity_start": None, "equity_end": None,
              "equity_change": None, "net_flows": None, "realized_pnl": None, "fee_timing": None,
              "expected_equity_change": None, "start_utc": None, "end_utc": None, "start_exact": None,
-             "open_cost": None, "pair_netting": None, "notes": notes}
+             "open_cost": None, "pair_netting": None, "pair_timing": None, "pairs_formed_in_window": None,
+             "pair_pnl_formed_in_window": None, "pairs_before_window_settled_in_window": None,
+             "pair_pnl_before_window_settled_in_window": None, "open_pair_markets": None,
+             "model": MODEL, "notes": notes}
     if len(snaps) < 2:
         notes.append("fewer than two account snapshots in the stored data: equity change cannot be computed")
         return empty
@@ -145,8 +177,27 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
         if t0 < r["_ts"] <= t1:
             fee_filled += fee
     fee_timing = fee_settled - fee_filled
+    # pair P&L is booked when the pair forms (Kalshi credits $1 per pair then), not at settlement
+    events = pair_events(rows, until=t1)
+    by_ticker: dict[str, list[dict]] = {}
+    for r in rows:
+        by_ticker.setdefault(r["ticker"], []).append(r)
+    settled_in = {tk for tk, rs in by_ticker.items()
+                  if all(r["_settled"] is not None for r in rs) and t0 < max(r["_settled"] for r in rs) <= t1}
+    pairs_win = pnl_win = pairs_old = pnl_old = pnl_settled_mkts = 0.0
+    for tk, evs in events.items():
+        for ts, q, g in evs:
+            if t0 < ts <= t1:
+                pairs_win += q
+                pnl_win += g
+            if tk in settled_in:
+                pnl_settled_mkts += g
+                if ts <= t0:
+                    pairs_old += q
+                    pnl_old += g
+    pair_timing = pnl_win - pnl_settled_mkts
     change = end[1] - start[1]
-    expected = net_flows + realized + fee_timing
+    expected = net_flows + realized + fee_timing + pair_timing
     residual = change - expected
     open_rows = [r for r in rows if r["_settled"] is None and r["_ts"] <= t1]
     open_cost = sum(r["_cost"] for r in open_rows)
@@ -155,13 +206,20 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
         notes.append("the fill read hit its row limit: totals may be incomplete")
     if any(r["_ts"] < t0 - timedelta(days=7) for r in rows if r["_settled"] is not None and t0 < r["_settled"] <= t1):
         notes.append("some settled fills were filled long before the window; their fees are counted at settlement")
+    open_pair_markets = sum(1 for tk in events if tk not in settled_in
+                            and any(r["_settled"] is None for r in by_ticker[tk]))
     if net["pairs"]:
-        notes.append("opposite YES / NO positions are open in the same market: Kalshi nets them into $1 pairs, "
-                     "which shows up as open cost above the reported exposure (netting is unverified)")
+        notes.append(f"{net['tickers']} open market(s) hold both YES and NO ({net['pairs']} matched pairs): Kalshi "
+                     "already credited $1 per pair to cash, so open cost by fills sits above the reported exposure. "
+                     "Pair P&L is counted when the pair formed (pair_timing), the rest at settlement")
     return {"tolerance": tolerance, "flag": abs(residual) > tolerance, "residual": round(residual, 2),
             "equity_start": round(start[1], 2), "equity_end": round(end[1], 2), "equity_change": round(change, 2),
             "net_flows": round(net_flows, 2), "realized_pnl": round(realized, 2),
-            "fee_timing": round(fee_timing, 2), "expected_equity_change": round(expected, 2),
+            "fee_timing": round(fee_timing, 2), "pair_timing": round(pair_timing, 2),
+            "pairs_formed_in_window": round(pairs_win, 2), "pair_pnl_formed_in_window": round(pnl_win, 2),
+            "pairs_before_window_settled_in_window": round(pairs_old, 2),
+            "pair_pnl_before_window_settled_in_window": round(pnl_old, 2), "open_pair_markets": open_pair_markets,
+            "model": MODEL, "expected_equity_change": round(expected, 2),
             "start_utc": arbsets.iso(t0), "end_utc": arbsets.iso(t1), "start_exact": exact,
             "open_cost": {"by_fills": round(open_cost, 2), "snapshot_exposure": round(end[3], 2),
                           "gap": round(open_cost - end[3], 2)},

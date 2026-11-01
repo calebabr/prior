@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased - Returns per period (app)
+- Shadow Estimate: when no market carries a maker fee, the page now says the after-fee and zero-fee estimates are the same instead of showing a fee toggle that changes nothing.
 - Analytics > Summary: a Returns card with a Day | Week | Month control, stacked Maker and Arbitrage bars per period (dollars and percent, "so far" on the running period, faded bars under 5 fills), a table view and a tap-to-see-fills sheet. Week and Month always show their own window (12 weeks, about 6 months). Read-only; Stop is untouched.
 
 ## Unreleased - Returns per period (API)

@@ -415,6 +415,11 @@ export default function Shadow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [periodId]);
   const [zeroFee, setZeroFee] = useState(false);
+  // Weather markets carry no maker fee, so the after-fee and zero-fee estimates are identical: say so instead of
+  // showing a toggle that appears to do nothing.
+  const sameFees = !!(data && data.headline && data.headline_zero_fee
+    && JSON.stringify(data.headline.pnl) === JSON.stringify(data.headline_zero_fee.pnl)
+    && JSON.stringify(data.headline.roi) === JSON.stringify(data.headline_zero_fee.roi));
 
   const st = (data && data.status) || {};
   const h = data && (zeroFee && data.headline_zero_fee ? data.headline_zero_fee : data.headline);
@@ -517,27 +522,33 @@ export default function Shadow() {
                       </div>
                     )}
                     <div className={tooEarlyNew ? 'sh-grey' : undefined} data-testid="headline-block">
-                    <div className="sh-toggle" role="group" aria-label="Fee treatment">
-                      <button type="button" className="btn small" aria-pressed={!zeroFee} onClick={() => setZeroFee(false)}>
-                        After fees
-                      </button>
-                      <button
-                        type="button"
-                        className="btn small"
-                        aria-pressed={zeroFee}
-                        onClick={() => setZeroFee(true)}
-                        disabled={!data.headline_zero_fee}
-                      >
-                        Zero fees
-                      </button>
-                    </div>
+                    {sameFees ? (
+                      <div className="notice notice-info" role="status" data-testid="fees-same">
+                        No maker fee applies to these markets, so the after-fee and zero-fee estimates are the same.
+                      </div>
+                    ) : (
+                      <div className="sh-toggle" role="group" aria-label="Fee treatment">
+                        <button type="button" className="btn small" aria-pressed={!zeroFee} onClick={() => setZeroFee(false)}>
+                          After fees
+                        </button>
+                        <button
+                          type="button"
+                          className="btn small"
+                          aria-pressed={zeroFee}
+                          onClick={() => setZeroFee(true)}
+                          disabled={!data.headline_zero_fee}
+                        >
+                          Zero fees
+                        </button>
+                      </div>
+                    )}
                     {noEstimate && (
                       <div className="notice notice-info" role="status" data-testid="no-estimate">
                         {NO_ESTIMATE_REASON}
                       </div>
                     )}
                     <Range
-                      label={zeroFee ? 'Estimated P&L, zero fees' : 'Estimated P&L, after maker fees'}
+                      label={sameFees ? 'Estimated P&L' : zeroFee ? 'Estimated P&L, zero fees' : 'Estimated P&L, after maker fees'}
                       r={h.pnl}
                       fmt={usd}
                       empty={noEstimate}

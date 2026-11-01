@@ -86,6 +86,59 @@ export default function PageTitle() {
     document.documentElement.style.removeProperty('--appbar-h');
   }, []);
 
+  // Keep the title and the page head's actions (Refresh, range buttons) from drawing on top of each other: reserve the
+  // actions' width on the right of the bar; when title + actions do not fit on one row, stack the actions below the bar.
+  // Measures real widths (title text scrollWidth is its natural width even while clipped), so it is independent of the
+  // current mode and settles in one pass. Page heads render after data loads, so it also watches the page content.
+  useLayoutEffect(() => {
+    const bar = ref.current;
+    if (!bar) return undefined;
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const head = bar.parentElement && bar.parentElement.querySelector('.page > .page-head:first-child');
+      let actionsW = 0;
+      if (head) {
+        const kids = Array.from(head.children).filter((k) => !k.matches('h1, .sr-only') && k.offsetWidth > 0);
+        if (kids.length) {
+          const rects = kids.map((k) => k.getBoundingClientRect());
+          actionsW = Math.ceil(Math.max(...rects.map((r) => r.right)) - Math.min(...rects.map((r) => r.left))) + 10;
+        }
+      }
+      const text = bar.querySelector('.page-title-text');
+      const icon = bar.querySelector('.page-title-icon');
+      const accent = bar.querySelector('.page-title-accent');
+      const cs = getComputedStyle(bar);
+      const used = (el) => (el && el.offsetWidth ? el.offsetWidth + 10 : 0);
+      const need = parseFloat(cs.paddingLeft) + used(icon) + used(accent) + (text ? text.scrollWidth : 0) + (actionsW ? actionsW + 10 : 0);
+      const stack = actionsW > 0 && need > bar.clientWidth;
+      bar.setAttribute('data-stack', stack ? 'true' : 'false');
+      bar.style.setProperty('--title-actions-w', stack || !actionsW ? '0px' : `${actionsW}px`);
+    };
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(measure);
+    };
+    measure();
+    const content = bar.parentElement;
+    let mo = null;
+    let ro = null;
+    if (typeof MutationObserver !== 'undefined' && content) {
+      mo = new MutationObserver(schedule);
+      mo.observe(content, { childList: true, subtree: true, characterData: true });
+    }
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(schedule);
+      ro.observe(bar);
+    }
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (mo) mo.disconnect();
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', schedule);
+    };
+  }, [title, pathname]);
+
   if (!title) return null;
   const cls = ['page-title', back ? 'has-back' : '', shown ? 'is-shown' : 'is-hidden', atTop ? 'at-top' : 'is-stuck', reduce ? 'no-motion' : '']
     .filter(Boolean)
@@ -105,7 +158,7 @@ export default function PageTitle() {
           <Icon />
         </span>
       )}
-      <span className="page-title-text">{title}</span>
+      <span className="page-title-text" title={title}>{title}</span>
     </div>
   );
   if (!back) return bar;

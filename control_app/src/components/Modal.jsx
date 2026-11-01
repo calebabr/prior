@@ -28,7 +28,8 @@ function unlockBody() {
   }
 }
 
-// Centered dialog (mobile-first); tracks the visual viewport so the iOS keyboard never covers it. Escape / backdrop tap call onClose
+// Centered dialog (mobile-first): a fixed header (title + dismiss) and a body that scrolls inside the card, kept inside the
+// safe-area insets by index.css (--safe-top / --safe-bottom); tracks the visual viewport so the iOS keyboard never covers it. Escape / backdrop tap call onClose
 // (pass onClose={undefined} to make it non-dismissable, e.g. while busy).
 export default function Modal({ title, onClose, children, labelledBy = 'modal-title' }) {
   const ref = useRef(null);
@@ -97,12 +98,23 @@ export default function Modal({ title, onClose, children, labelledBy = 'modal-ti
       }}
     >
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={ref}>
-        {title && (
-          <h2 id={labelledBy} className="modal-title">
-            {title}
-          </h2>
+        {(title || onClose) && (
+          <div className="modal-head">
+            {title ? (
+              <h2 id={labelledBy} className="modal-title">
+                {title}
+              </h2>
+            ) : (
+              <span />
+            )}
+            {onClose && (
+              <button type="button" className="modal-x" aria-label="Dismiss dialog" data-testid="modal-x" onClick={() => closeRef.current && closeRef.current()}>
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
+          </div>
         )}
-        {children}
+        <div className="modal-scroll">{children}</div>
       </div>
     </div>
   );

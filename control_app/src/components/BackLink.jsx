@@ -35,8 +35,9 @@ export default function BackLink({ className = '' }) {
         <span aria-hidden="true">‹</span>
       </Link>
       <Link to={parent} className="back-up" aria-label={`Up to ${parentTitle}`} data-testid="up-link">
-        <span aria-hidden="true">{parentTitle}</span>
+        <span aria-hidden="true" className="back-up-full">{parentTitle}</span>
         <span aria-hidden="true" className="back-sep">›</span>
+        <span aria-hidden="true" className="back-up-short">↑</span>
       </Link>
     </div>
   );

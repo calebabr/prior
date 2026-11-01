@@ -35,11 +35,8 @@ export default function ReturnsSheet({ period, granularity, days, env, onClose }
   const known = new Set(keys);
   const other = fills.filter((f) => !known.has(f.strategy));
   return (
-    <Modal onClose={onClose} labelledBy={titleId}>
+    <Modal title={periodTitle(period, granularity)} onClose={onClose} labelledBy={titleId}>
       <div className="rt-sheet" data-testid="returns-sheet">
-        <h2 id={titleId} className="modal-title">
-          {periodTitle(period, granularity)}
-        </h2>
         <p className="rt-sheet-fig">
           <b className={signCls(period.realized_pnl)}>{formatMoney(period.realized_pnl, { sign: true })}</b>{' '}
           {isNum(period.return_rate) ? (

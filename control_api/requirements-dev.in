@@ -3,6 +3,6 @@
 #   uv pip compile control_api/requirements-dev.in --universal --python-version 3.11 \
 #       --generate-hashes --exclude-newer <today minus 14 days> -c control_api/requirements.txt -o control_api/requirements-dev.txt
 -r requirements.in
-pytest>=8
-pytest-asyncio>=0.23
+pytest>=9.2.0
+pytest-asyncio>=1.4.1
 pytest-xdist>=3.5

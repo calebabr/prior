@@ -29,6 +29,9 @@
   --gutter: 16px;
   --tabbar-h: 60px;
   --page-title-h: 44px;
+  /* Safe-area insets as variables so one place (and the layout-collision e2e) can override them. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
   --content-max: 640px;
   --sidebar-w: 232px;
   --ease: 160ms cubic-bezier(0.2, 0, 0, 1);
@@ -102,12 +105,12 @@ a:hover { text-decoration: underline; }
   /* iOS standalone with status-bar-style "black" (index.html): the page starts BELOW the solid status bar and
      env(safe-area-inset-top) is 0, so this is one even 10px gap; if a device ever reports an inset (> 0) it is
      added once here. Nothing else adds the inset on top: the pull-to-refresh offset reads this bar's measured height. */
-  padding: calc(env(safe-area-inset-top, 0px) + 10px) var(--gutter) 10px;
+  padding: calc(var(--safe-top) + 10px) var(--gutter) 10px;
   min-height: calc(var(--tap-lg) + 20px);
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
-.appbar-title { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-weight: 600; font-size: 1rem; letter-spacing: -0.01em; white-space: nowrap; }
+.appbar-title { display: inline-flex; align-items: center; gap: 8px; min-height: var(--tap); color: var(--text); font-weight: 600; font-size: 1rem; letter-spacing: -0.01em; white-space: nowrap; }
 .appbar-name { line-height: 1; }
 .appbar-title:hover { text-decoration: none; }
 .mock-tag {
@@ -118,7 +121,7 @@ a:hover { text-decoration: underline; }
 
 .content {
   flex: 1; width: 100%; max-width: var(--content-max); margin: 0 auto; min-width: 0;
-  padding: 12px var(--gutter) calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 24px);
+  padding: 12px var(--gutter) calc(var(--tabbar-h) + var(--safe-bottom) + 24px);
 }
 .page { display: flex; flex-direction: column; gap: 4px; }
 .page > h1 { margin: 8px 0 8px; }
@@ -140,11 +143,15 @@ a:hover { text-decoration: underline; }
 .page-title ~ .page > .page-head:first-child {
   min-height: var(--page-title-h); margin-top: calc(-1 * var(--page-title-h)); margin-bottom: 0;
 }
+/* Page-head actions (Refresh, range buttons) share the title row only while the title and the actions fit
+   together (PageTitle.jsx measures and sets data-stack). Otherwise the actions drop to their own row below the
+   bar, so the two can never be drawn on top of each other. */
+.page-title[data-stack='true'] ~ .page > .page-head:first-child { margin-top: 0; margin-bottom: 4px; }
 
 .page-title {
   position: sticky; top: var(--appbar-h, 53px); z-index: 15;
   display: flex; align-items: center; gap: 10px; min-width: 0;
-  height: var(--page-title-h); margin: -12px 0 0; /* cancels .content's top padding: sits right under the header */
+  height: var(--page-title-h); margin: -12px 0 0; padding-right: var(--title-actions-w, 0px); /* cancels .content's top padding: sits right under the header */
   pointer-events: none; /* at the top it is transparent and the page-head controls show through */
   transition: opacity 220ms cubic-bezier(0.2, 0, 0, 1), transform 220ms cubic-bezier(0.2, 0, 0, 1), visibility 0s;
 }
@@ -165,6 +172,14 @@ a:hover { text-decoration: underline; }
    back + "Parent ›" up link, each 44 px tall. The bar reserves room (has-back, --back-ch = parent name length)
    and drops its accent stripe so the page name keeps the rest of the line and truncates with an ellipsis. */
 .page-title.has-back { padding-left: calc(var(--back-ch, 4) * 1ch + 4.25rem); }
+.back-up-short { display: none; }
+/* Narrow phones: the breadcrumb shrinks to an up arrow (still >= 40 px, still named "Up to <parent>"). */
+@media (max-width: 359px) {
+  .page-title.has-back { padding-left: 4.9rem; }
+  .back-up-full, .back-sep { display: none; }
+  .back-up-short { display: inline; }
+  .back-up { justify-content: center; }
+}
 .page-title.has-back .page-title-accent { display: none; }
 .page-back {
   position: sticky; top: var(--appbar-h, 53px); z-index: 16; width: fit-content;
@@ -186,7 +201,7 @@ a:hover { text-decoration: underline; }
 .page-title-icon { display: flex; flex-shrink: 0; color: var(--accent); }
 .page-title-text {
   font-size: var(--fs-lg); font-weight: 600; letter-spacing: -0.015em; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .page-title.is-hidden {
   opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-4px);
@@ -256,7 +271,7 @@ a:hover { text-decoration: underline; }
 
 .stop-btn { font-weight: 600; letter-spacing: 0.01em; }
 .stop-big { width: 100%; min-height: 56px; font-size: 1.0625rem; }
-.stop-compact { min-height: 34px; padding: 0 12px; font-size: 0.875rem; }
+.stop-compact { min-height: 40px; padding: 0 12px; font-size: 0.875rem; }
 
 /* ---------- stats ---------- */
 
@@ -387,7 +402,7 @@ a:hover { text-decoration: underline; }
 
 .toolbar { display: flex; gap: 8px; margin: 4px 0 10px; }
 .segmented { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; margin-bottom: 10px; }
-.segmented button { min-height: 38px; font: inherit; font-size: 0.875rem; color: var(--muted); background: transparent; border: 0; cursor: pointer; transition: background var(--ease), color var(--ease); }
+.segmented button { min-height: var(--tap); font: inherit; font-size: 0.875rem; color: var(--muted); background: transparent; border: 0; cursor: pointer; transition: background var(--ease), color var(--ease); }
 .segmented button.active { background: var(--surface2); color: var(--text); }
 
 .more-details { margin: 8px 0; font-size: 0.875rem; }
@@ -422,7 +437,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .change-list { margin: 0 0 8px; padding-left: 18px; font-size: 0.875rem; }
 
 .sticky-actions {
-  position: sticky; bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 8px); z-index: 5;
+  position: sticky; bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 8px); z-index: 5;
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
   padding: 10px 0; margin: 8px 0; background: var(--bg); border-top: 1px solid var(--border);
 }
@@ -436,8 +451,8 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
   display: grid; grid-template-columns: repeat(5, 1fr);
-  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
-  padding-bottom: env(safe-area-inset-bottom);
+  height: calc(var(--tabbar-h) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
   background: var(--bg); border-top: 1px solid var(--border);
 }
 .tab {
@@ -449,6 +464,8 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .tab:hover { text-decoration: none; color: var(--text); }
 .tab.active { color: var(--accent); }
 .tab-icon { display: flex; }
+.tab-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 340px) { .tab { font-size: 0.6875rem; letter-spacing: -0.02em; } }
 
 /* ---------- modal ---------- */
 
@@ -459,15 +476,28 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .modal-backdrop {
   position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); z-index: 50;
   height: var(--vv-h, 100vh); height: var(--vv-h, 100dvh);
-  display: flex; align-items: center; justify-content: center; padding: 12px var(--gutter);
+  display: flex; align-items: center; justify-content: center;
+  /* The card never starts above the safe-area inset (iOS status bar / notch) or ends below the home indicator. */
+  padding: calc(var(--safe-top) + 12px) var(--gutter) calc(var(--safe-bottom) + 12px);
   background: var(--overlay); animation: fade var(--ease);
 }
+/* Card = fixed header (title + close) + a body that scrolls inside the card. Nothing fades over the header. */
 .modal {
-  width: 100%; max-width: 480px; max-height: 100%; overflow-y: auto; overscroll-behavior: contain;
-  padding: 20px var(--gutter) 16px;
+  display: flex; flex-direction: column; overflow: hidden;
+  width: 100%; max-width: 480px;
+  max-height: calc(100vh - var(--safe-top) - var(--safe-bottom) - 24px);
+  max-height: min(100%, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 24px));
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
   animation: rise 180ms cubic-bezier(0.2, 0, 0, 1);
 }
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; flex-shrink: 0; padding: 12px 6px 0 var(--gutter); }
+.modal-head .modal-title { flex: 1; min-width: 0; margin: 8px 0 10px; overflow-wrap: anywhere; }
+.modal-x {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: var(--tap-lg); height: var(--tap-lg);
+  font: inherit; font-size: 1.5rem; line-height: 1; color: var(--muted); background: transparent; border: 0; border-radius: var(--r-md); cursor: pointer;
+}
+.modal-x:hover { color: var(--text); background: var(--surface2); }
+.modal-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 var(--gutter) 16px; }
 .modal-title { font-size: 1.125rem; margin-bottom: 10px; }
 .modal-body { margin-bottom: 12px; color: var(--text); }
 .modal-body p { margin: 0 0 6px; }
@@ -477,7 +507,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 
 .toasts {
   position: fixed; left: 0; right: 0; z-index: 60;
-  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 10px);
+  bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 10px);
   display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 var(--gutter); pointer-events: none;
 }
 .toast {
@@ -557,7 +587,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .whatsnew-actions { display: flex; gap: 8px; margin-top: 10px; }
 
 .icon-btn {
-  display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; margin: -6px -8px 0 0;
+  display: inline-flex; align-items: center; justify-content: center; width: var(--tap); height: var(--tap); margin: -6px -8px 0 0;
   color: var(--muted); background: transparent; border: 0; border-radius: var(--r-md); cursor: pointer;
 }
 .icon-btn:hover { color: var(--text); background: var(--surface2); }
@@ -704,7 +734,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 html, body { overscroll-behavior-y: contain; }
 .ptr {
   /* Below the sticky app bar (its height already includes the safe-area inset), never over it. */
-  position: fixed; top: calc(var(--appbar-h, calc(53px + env(safe-area-inset-top, 0px))) + 8px); left: 50%; margin-left: -70px; width: 140px; z-index: 40;
+  position: fixed; top: calc(var(--appbar-h, calc(53px + var(--safe-top))) + 8px); left: 50%; margin-left: -70px; width: 140px; z-index: 40;
   display: flex; align-items: center; justify-content: center; gap: 8px; height: 32px; padding: 0 12px;
   border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--muted);
   font-size: 0.75rem; pointer-events: none; transition: transform 0.18s ease-out, opacity 0.18s ease-out;

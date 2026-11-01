@@ -72,7 +72,7 @@
 .term-count { color: var(--muted); font-size: 0.75rem; line-height: 1.125rem; height: 1.125rem; margin-top: 6px; }
 
 .term-jump { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 8px; font-size: 0.8125rem; }
-.term-jump a { color: var(--muted); padding: 6px 0; }
+.term-jump a { display: inline-flex; align-items: center; min-height: var(--tap); color: var(--muted); padding: 0; }
 .term-jump a:hover { color: var(--accent); }
 
 .term-group { padding-top: 14px; scroll-margin-top: calc(var(--sticky-top, 51px) + var(--term-filter-h, 85px)); }

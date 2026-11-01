@@ -41,6 +41,23 @@ describe('Shadow estimate page', () => {
     expect(screen.getByText(/zero fees/i, { selector: 'h3' })).toBeInTheDocument();
   });
 
+  it('says the estimates are the same, with no dead toggle, when no market carries a maker fee', async () => {
+    const same = SUMMARY().headline;
+    base(SUMMARY({ headline_zero_fee: JSON.parse(JSON.stringify(same)) }));
+    renderApp('/shadow');
+    expect(await screen.findByTestId('fees-same')).toHaveTextContent(/No maker fee applies/i);
+    expect(screen.queryByRole('button', { name: 'Zero fees' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'After fees' })).toBeNull();
+    expect(screen.getByText('Estimated P&L', { selector: 'h3' })).toBeInTheDocument();
+  });
+
+  it('keeps the fee toggle when after-fee and zero-fee estimates differ', async () => {
+    base(SUMMARY());
+    renderApp('/shadow');
+    expect(await screen.findByRole('button', { name: 'Zero fees' })).toBeInTheDocument();
+    expect(screen.queryByTestId('fees-same')).toBeNull();
+  });
+
   it('warns on the stand-in and explains the too-early state', async () => {
     base(SUMMARY({ standin: true, status: { ...SUMMARY().status, too_early: true } }));
     renderApp('/shadow');

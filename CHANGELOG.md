@@ -4,6 +4,7 @@
 - Fix: the Analytics reconciliation now books YES / NO pair P&L when the pair forms (as Kalshi credits it) instead of at settlement, so open pair markets no longer show a false residual; new `pair_timing` fields, `model: pair_time_v2`, and pair netting uses average cost. Tolerance unchanged; read-only.
 
 ## Unreleased - Returns per period (app)
+- Shadow Estimate: when no market carries a maker fee, the page now says the after-fee and zero-fee estimates are the same instead of showing a fee toggle that changes nothing.
 - Analytics > Summary: a Returns card with a Day | Week | Month control, stacked Maker and Arbitrage bars per period (dollars and percent, "so far" on the running period, faded bars under 5 fills), a table view and a tap-to-see-fills sheet. Week and Month always show their own window (12 weeks, about 6 months). Read-only; Stop is untouched.
 
 ## Unreleased - Returns per period (API)

@@ -312,7 +312,7 @@ def test_ledger_rows_are_by_local_fill_day_and_fills_net_to_settlements():
     assert ("2026-10-28", "maker") in {(r["date"], r["strategy"]) for r in utc_out["daily"]}
 
 
-def test_ledger_pair_netting_is_informational_and_fifo():
+def test_ledger_pair_netting_is_informational():
     t = datetime(2026, 10, 28, 3, 0, tzinfo=UTC)
     rs = rows_of([fill("y1", t, ticker="KXDEMOB-26OCT29-B1", side="yes", price=0.60, count=4, taker=True),
                   fill("n1", t + timedelta(minutes=1), ticker="KXDEMOB-26OCT29-B1", side="no", price=0.30,

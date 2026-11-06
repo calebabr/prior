@@ -39,7 +39,28 @@ async def test_positions_read_error_fails_closed(demo_env, status):
 
 
 @pytest.mark.parametrize("err", [503, 429, PAUSED_409])
-async def test_place_error_on_the_first_leg_trips_the_kill_switch_and_stops_arb(demo_env, err):
+async def test_place_error_on_the_first_leg_trips_the_kill_switch_and_stops_arb(demo_env, err, monkeypatch):
+    """Stand-in scanner: a first-leg error raises, so the runner records ERROR and trips the kill switch.
+    The real scanner (first-leg retry) skips the set instead, because nothing filled:
+    a 5xx after its retries (order state unconfirmed here: this fake's get_orders cannot be called that way, so a
+    normal-priority alert), a 4xx at once ("order rejected"). Neither trips the kill switch."""
+    from control_api.services import arb as arbsvc
+    sc = arbsvc.scanner()
+    import kalshi_bot
+    if not getattr(kalshi_bot, "IS_STANDIN", True):
+        if hasattr(sc, "_sleep"):
+            monkeypatch.setattr(sc, "_sleep", lambda s: None)          # no real retry spacing in tests
+        demo_env.trader.fail["create_order"] = err
+        await arb_on(demo_env)
+        r = demo_env.runner
+        await r.arb_scan()
+        executed = (await last_opps(demo_env))[0]["executed"]
+        assert executed.startswith("skipped: ")
+        assert not r.arb_kill_switch() and r.arb_desired == "running"
+        assert not any(a["priority"] == "urgent" for a in r.alerter.sent)
+        if "order state unconfirmed" in executed:
+            assert any(a["title"] == "Arbitrage order state unconfirmed" for a in r.alerter.sent)
+        return
     demo_env.trader.fail["create_order"] = err
     await arb_on(demo_env)
     r = demo_env.runner

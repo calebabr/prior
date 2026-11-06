@@ -1,0 +1,9 @@
+.marker-list { list-style: none; margin: 0; padding: 0; }
+.marker-row { padding: 10px 0; border-bottom: 1px solid var(--border); display: grid; gap: 4px; min-width: 0; }
+.marker-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.marker-kind { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.marker-when { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.marker-body { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 0.9375rem; min-width: 0; }
+.marker-detail { color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.marker-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.marker-tags:empty { display: none; }

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
 from ..auth.ratelimit import get_limiter
+from ..services import markers as M
 from ..services import periods as P
 from ..services import pnl as pnlsvc
 
@@ -60,8 +61,15 @@ async def payload(request: Request) -> dict:
     markers = await _store(store.list_periods())
     flows = await _store(store.list_cash_flows())
     flows = sorted(flows, key=lambda f: P.utc(f.get("ts")) or datetime.min.replace(tzinfo=timezone.utc))
-    return {"periods": [P.public_period(p) for p in P.timeline(markers)],
-            "cash_flows": [P.public_flow(f) for f in flows]}
+    tl = P.timeline(markers)
+    try:       # additive and best effort: a slow or failing audit read never breaks the periods list
+        marks = M.build_markers(await _store(store.list_audit(M.AUDIT_SCAN)), tl)
+    except Exception:  # noqa: BLE001
+        marks = []
+    body = {"periods": [P.public_period(p) for p in tl], "cash_flows": [P.public_flow(f) for f in flows]}
+    if marks:      # present only when there is something to show: the body is unchanged for an empty audit log
+        body["markers"] = marks
+    return body
 
 
 async def window_for(request: Request, spec: str | None) -> dict | None:
@@ -86,7 +94,7 @@ def _name(user: dict) -> str:
 @router.get("/periods")
 async def list_periods(request: Request, user: dict = Depends(current_user)) -> dict:
     """{periods: [{id, name, started_at, ended_at, note, current, implicit}], cash_flows: [{id, ts, kind, amount,
-    note, created_by}]}. Oldest first. Period 1 is implicit (`started_at` null = the beginning of data)."""
+    note, created_by}], markers: [{ts, kind, label, detail, changes_trading, period_id}] (newest first, max 100)}. Oldest first. Period 1 is implicit (`started_at` null = the beginning of data)."""
     return await payload(request)
 
 

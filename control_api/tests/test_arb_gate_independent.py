@@ -76,6 +76,7 @@ class Trader:
         self.orders: list[dict] = []
         self.fills: list[float] = []
         self.book_reads: list[str] = []
+        self.pre_reads: list[str] = []
         self.seen: set[str] = set()
         self.raise_on_completion = False
         self.book_hook = None
@@ -102,7 +103,8 @@ class Trader:
         return {}
 
     def get_orderbook(self, ticker, depth=None, **kw):
-        self.book_reads.append(ticker)
+        # completion reads only: the overlaid scanner also re-reads the thinnest legs BEFORE the first order
+        (self.book_reads if self.orders else self.pre_reads).append(ticker)
         if self.book_hook:
             self.book_hook(ticker)
         return {"orderbook_fp": self.books[ticker]}

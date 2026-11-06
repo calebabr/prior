@@ -78,8 +78,12 @@ async def test_get_arb_defaults_log_only_off(arb_env):
     assert b["status"]["state"] == "stopped" and b["status"]["live_allowed"] is False
     assert set(b["schema"]) == {"arb_max_contracts", "arb_min_profit", "arb_series", "arb_poll_seconds",
                                 "arb_scan_cap", "arb_day_cap", "arb_series_cap_frac", "arb_demo_execute",
-                                "arb_complete_legs"}
+                                "arb_complete_legs", "arb_set_loss_frac", "arb_scan_cap_frac", "arb_day_cap_frac",
+                                "max_event_frac"}
     s = b["settings"]
+    # Sprint 2B items 3, 4, 8: optional shares of equity, OFF (None) by default
+    assert all(s[k] is None for k in ("arb_set_loss_frac", "arb_scan_cap_frac", "arb_day_cap_frac",
+                                      "max_event_frac"))
     assert s["arb_scan_cap"] == 15 and s["arb_day_cap"] == 45 and s["arb_series_cap_frac"] == 0.35
     assert s["arb_demo_execute"] is False and b["status"]["demo_execute"] is False
     assert b["pnl"] is None and b["pnl_demo_execute"] is None and "expectation" in b

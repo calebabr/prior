@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from collections import deque
 
 from .db import schemas
 from .services import arb as arbsvc
+from .services import arbcontain
 from .services import botfiles
 from .services import journalsync
 from .services import closetime as ctsvc
@@ -80,6 +82,7 @@ ARB_HELD_READ_MAX = 20000           # executed-opportunity rows read to rebuild 
 ARB_SENT_PREFIXES = ("FILLED", "PARTIAL", "ERROR")   # executed values whose cost counts toward the day's arb spend
 ARB_SKIP_PERSIST_EVERY = timedelta(hours=1)          # a repeated skip (same event + reason kind) is stored once/hour
 ARB_SKIP_SEEN_MAX = 2000
+ARB_EQUITY_SNAPSHOT_MAX_AGE = timedelta(hours=6)     # item 4: an older account snapshot is not used for equity
 # grouped order-error alerts from the strategy's write_errors:/trading_paused lines (one per pass, throttled)
 ORDER_ERROR_ALERT_EVERY = timedelta(minutes=30)
 PAUSED_ALERT_EVERY = timedelta(hours=1)
@@ -368,8 +371,9 @@ class ArbCompletionGate:
         try:
             body = self.client.get_positions() if callable(getattr(self.client, "get_positions", None)) else None
             truncated = isinstance(body, dict) and body.get("truncated") is True
-            by_series = riskgate.exposure_by_series((body or {}).get("market_positions")
-                                                    if isinstance(body, dict) else None)
+            positions = (body or {}).get("market_positions") if isinstance(body, dict) else None
+            by_series = riskgate.exposure_by_series(positions)
+            ev_exp = riskgate.exposure_of_event(positions, self.event)
         except Exception:  # noqa: BLE001
             return "gate positions unreadable"
         if truncated:
@@ -378,9 +382,11 @@ class ArbCompletionGate:
         day = (self.budget or {}).get("day")
         if day is None:
             return "gate day spend unknown"
+        caps = arbsvc.effective_caps(r.arb_settings(),
+                                     r._arb_equity_of("demo-execute", cash, sum(by_series.values())))
         with r._arb_budget_lock:
             ok, why = riskgate.check_arb(extra, riskgate.series_of(self.event), by_series, cash, self.frac,
-                                         self.budget["scan"], day["amount"], arbsvc.gate_caps(r.arb_settings()))
+                                         self.budget["scan"], day["amount"], caps, event_exposure=ev_exp)
             if not ok:
                 return f"gate {why}"
             if not self.ok():
@@ -390,12 +396,17 @@ class ArbCompletionGate:
         return None
 
 
-def _scanner_can_complete(scanner: Any) -> bool:
-    """The installed arb_scanner.execute takes `complete` (an older overlay without it never completes)."""
+def _scanner_takes(scanner: Any, name: str) -> bool:
+    """The installed arb_scanner.execute takes keyword `name` (an older overlay may not)."""
     try:
-        return "complete" in inspect.signature(scanner.execute).parameters
+        return name in inspect.signature(scanner.execute).parameters
     except (TypeError, ValueError, AttributeError):
         return False
+
+
+def _scanner_can_complete(scanner: Any) -> bool:
+    """The installed arb_scanner.execute takes `complete` (an older overlay without it never completes)."""
+    return _scanner_takes(scanner, "complete")
 
 
 class Runner:
@@ -474,6 +485,11 @@ class Runner:
         self._arb_held: dict[str, dict] = {}
         self._arb_budget_lock = threading.Lock()
         self._arb_skip_seen: dict[tuple[str, str], datetime] = {}   # (event, reason kind) -> last stored skip
+        # item 3 contain-and-degrade: per kind, {mark, records: [contained partials, last 48 h]}; rebuilt from the
+        # stored arbitrage log after a restart or a leadership change (see _arb_contain_state, services/arbcontain)
+        self._arb_contain: dict[str, dict] = {}
+        # item 4: latest account snapshot per env ("demo" / "live"): {equity, ts}, from the journal's account rows
+        self._arb_equity: dict[str, dict] = {}
         # strategy write-path results of the last pass (write_errors: / series_capped: / trading_paused lines)
         self.last_write_report: dict | None = None
         self._order_alert_utc: datetime | None = None
@@ -1395,6 +1411,37 @@ class Runner:
             log.warning("write report handling failed: %s", type(e).__name__)
         return rep
 
+    def _note_equity(self, snap: dict) -> None:
+        """Item 4: keep the latest account snapshot's equity (cash + exposure) per env in memory. Never raises."""
+        try:
+            eq = float(snap.get("cash")) + float(snap.get("exposure") or 0)
+            ts = snap.get("ts")
+            if not math.isfinite(eq) or eq <= 0 or not isinstance(ts, datetime):
+                return
+            ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            env = str(snap.get("env"))
+            cur = self._arb_equity.get(env)
+            if cur is None or ts >= cur["ts"]:
+                self._arb_equity[env] = {"equity": eq, "ts": ts}
+        except (TypeError, ValueError, AttributeError):
+            return
+
+    def _arb_equity_of(self, kind: str, cash: Any, total_exposure: Any) -> float | None:
+        """Equity for the item-3/4 shares: the latest account snapshot of the exchange the set goes to (recent ones
+        only), capped by the gate's own fresh read (cash + open exposure): the smaller of the two, so a stale or
+        other-exchange figure can never raise a cap. None if neither is usable (the dollar caps then apply)."""
+        vals = []
+        try:
+            fresh = float(cash) + float(total_exposure)
+            if math.isfinite(fresh) and fresh > 0:
+                vals.append(fresh)
+        except (TypeError, ValueError):
+            pass
+        snap = self._arb_equity.get("live" if kind == "live" else "demo")
+        if snap is not None and utcnow() - snap["ts"] <= ARB_EQUITY_SNAPSHOT_MAX_AGE:
+            vals.append(float(snap["equity"]))
+        return min(vals) if vals else None
+
     async def _sync_journal(self, mode: str | None = None) -> int:
         if self._tail is None:
             self._tail = botfiles.JournalTail(self.journal_path)
@@ -1413,11 +1460,13 @@ class Runner:
                         info = json.loads(r.get("note") or "{}")
                     except ValueError:
                         info = {}
-                    await self.store.add_account_snapshot({
+                    snap = {
                         "ts": datetime.fromisoformat(r["utc"]) if r.get("utc") else utcnow(),
                         "cash": info.get("cash"), "exposure": info.get("exposure"),
                         "headroom": info.get("headroom", 0.0),
-                        "env": "live" if (mode or self.mode) == "live" else "demo"})
+                        "env": "live" if (mode or self.mode) == "live" else "demo"}
+                    self._note_equity(snap)
+                    await self.store.add_account_snapshot(snap)
             return n
         except BaseException as e:  # noqa: BLE001   (a cancelled write must not lose rows either)
             if not stored:
@@ -2519,23 +2568,35 @@ class Runner:
         try:
             body = client.get_positions() if callable(getattr(client, "get_positions", None)) else None
             truncated = isinstance(body, dict) and body.get("truncated") is True
-            by_series = riskgate.exposure_by_series((body or {}).get("market_positions")
-                                                    if isinstance(body, dict) else None)
+            positions = (body or {}).get("market_positions") if isinstance(body, dict) else None
+            by_series = riskgate.exposure_by_series(positions)
+            ev_exp = riskgate.exposure_of_event(positions, op.event)
         except Exception:  # noqa: BLE001
             return "skipped: gate positions unreadable"
         if truncated:
             return "skipped: gate positions truncated"     # S2: a partial read understates exposure (fail closed)
         if budget is None or budget.get("day") is None:
             return "skipped: gate day spend unknown"
+        cfg = self.arb_settings()
+        equity = self._arb_equity_of(kind, cash, sum(by_series.values()))
+        caps = arbsvc.effective_caps(cfg, equity)          # item 4 shares (OFF: exactly the dollar caps)
+        loss_cap = arbsvc.set_loss_cap(cfg, equity) if _scanner_takes(scanner, "loss_cap") else None
+        series = riskgate.series_of(op.event)
         with self._arb_budget_lock:
             day = budget["day"]
             held = budget.get("held")
             if held is None:
                 return "skipped: gate held sets unknown"
+            contain = budget.get("contain")
+            if contain is None:
+                return "skipped: gate partial history unknown"
+            pz = arbcontain.paused(contain["records"], utcnow()).get(series)
+            if pz is not None:
+                return f"skipped: series paused until {pz['until_date']} after a contained partial"
             if riskgate.opposite_set_held(op.event, op.kind, held):
                 return "skipped: gate opposite set held on event"
-            ok, why = riskgate.check_arb(op.cost, riskgate.series_of(op.event), by_series, cash, frac,
-                                         budget["scan"], day["amount"], arbsvc.gate_caps(self.arb_settings()))
+            ok, why = riskgate.check_arb(op.cost, series, by_series, cash, frac,
+                                         budget["scan"], day["amount"], caps, event_exposure=ev_exp)
             if not ok:
                 return f"skipped: gate {why}"
             if not ok_now(gen):
@@ -2552,23 +2613,79 @@ class Runner:
         kw: dict = {}
         if demo and self._arb_complete_wanted() and _scanner_can_complete(scanner):
             kw["complete"] = ArbCompletionGate(self, client, op.event, gen, budget, frac)   # H3-B, demo only
+        if loss_cap is not None:
+            kw["loss_cap"] = loss_cap                    # item 3: None (OFF) is never passed: today's behaviour
         try:
-            out = str(scanner.execute(client, op, **kw))  # arb_scanner trips its own kill switch on a partial set
-            if out.startswith(riskgate.HELD_PREFIXES):
-                with self._arb_budget_lock:
-                    budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
-            return out
+            # arb_scanner trips its own kill switch on an uncontained partial set (not on a contained one)
+            out = str(scanner.execute(client, op, **kw))
         except Exception as e:  # noqa: BLE001
             # an order error mid-set may leave a leg filled: legging risk, so trip the arb kill switch
-            try:
-                self.arb_kill_path.write_text(json.dumps({"reason": "legging risk: order error mid-set",
-                                                          "event": op.event, "error": type(e).__name__,
-                                                          "utc": utcnow().isoformat()}), encoding="utf-8")
-            except OSError:
-                pass
+            self._arb_write_kill("legging risk: order error mid-set", op.event, error=type(e).__name__)
             with self._arb_budget_lock:                  # H3S-1: an errored set may hold legs
                 budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
             return f"ERROR {type(e).__name__}"
+        try:
+            self._arb_after_execute(scanner, op, out, budget, loss_cap)
+        except Exception as e:  # noqa: BLE001   (bookkeeping must never hide a result: fail toward the kill switch)
+            log.error("arb result handling failed: %s", type(e).__name__)
+            if not out.startswith(("FILLED", "skipped")):
+                self._arb_write_kill("legging risk: partial result not handled", op.event, error=type(e).__name__)
+        return out
+
+    def _arb_write_kill(self, reason: str, event: Any, **extra: Any) -> None:
+        """Writes the arb kill switch (legging kind: restart needs the owner's acknowledgement). Never raises."""
+        try:
+            self.arb_kill_path.parent.mkdir(parents=True, exist_ok=True)
+            self.arb_kill_path.write_text(json.dumps({"reason": reason, "event": str(event), **extra,
+                                                      "utc": utcnow().isoformat()}), encoding="utf-8")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _arb_after_execute(self, scanner: Any, op: Any, out: str, budget: dict, loss_cap: float | None) -> None:
+        """Item 3 and the part-1 follow-ups, after arb_scanner.execute returned `out` (worker thread).
+        * skipped: nothing was bought, so this set's scan and day reservation is given back; an "order state
+          unconfirmed" skip keeps it, counts the set as held and is alerted (a first leg may have filled unseen).
+        * contained partial: pause only its series until the next market day, or trip the global kill switch when
+          the rules in services/arbcontain say so. Recorded in the arbitrage log (budget["notes"]).
+        * uncontained partial: the scanner wrote the kill switch; it is written here too if missing."""
+        res = arbcontain.parse(out, scanner)
+        notes = budget.setdefault("notes", {})
+        cost = float(op.cost)
+        if res["kind"] == "skipped":
+            if arbcontain.is_unconfirmed_skip(out):
+                with self._arb_budget_lock:
+                    budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
+                notes[id(op)] = {"type": "unconfirmed"}
+                return
+            with self._arb_budget_lock:                  # follow-up (a): nothing bought, give the reservation back
+                budget["scan"] = max(0.0, budget["scan"] - cost)
+                budget["day"]["amount"] = round(max(0.0, budget["day"]["amount"] - cost), 6)
+            return
+        if out.startswith(riskgate.HELD_PREFIXES):
+            with self._arb_budget_lock:
+                budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
+        if res["kind"] == "contained":
+            now = utcnow()
+            loss = res["loss"]
+            with self._arb_budget_lock:
+                contain = budget["contain"]
+                why = arbcontain.must_trip(contain["records"], loss, loss_cap, now)
+                rec = arbcontain.record(op.event, max(0.0, loss) if isinstance(loss, float) else 0.0, now,
+                                        uuid.uuid4().hex, res["how"])
+                contain["records"] = arbcontain.prune(arbcontain.merge(contain["records"], [rec]), now)
+            if why:
+                self._arb_write_kill(f"legging risk: {why}", op.event, loss=loss)
+            until = arbcontain.pause_until(now)
+            notes[id(op)] = {"type": "contained", "trip": why, "contain": {
+                "id": rec["id"], "ts": now, "how": res["how"], "loss": loss, "loss_cap": loss_cap,
+                # [ticker, filled] pairs, not a dict: tickers can contain dots, awkward as MongoDB keys
+                "series": rec["series"], "fills": [[str(k), v] for k, v in dict(res["fills"] or {}).items()],
+                "paused_until": until.isoformat(),
+                "paused_until_date": until.astimezone(arbcontain.MARKET_TZ).date().isoformat(),
+                "global_kill": why}}
+            return
+        if res["kind"] in ("partial", "error") and not self.arb_kill_switch():
+            self._arb_write_kill("legging risk: partial set (kill file missing)", op.event)
 
     def _arb_scan_sync(self, cfg: dict, live: Any, gen: int, data_env: str,
                        budget: dict | None = None) -> list[tuple[Any, str]]:
@@ -2639,6 +2756,54 @@ class Runner:
         self._arb_held[kind] = {"date": today, "mark": mark, "events": events}
         return events
 
+    async def _arb_contain_state(self, kind: str) -> dict | None:
+        """Item 3: {mark, records} of contained partials of `kind` over the last 48 h, in memory. Rebuilt from the
+        stored arbitrage log (docs with a `contain` block) the first time it is needed after a restart or a
+        leadership change and merged with memory, so a series pause and the 24 h counts survive a restart. None if
+        the store cannot be read or the read hits its row limit (every set is then refused: fail closed)."""
+        now = utcnow()
+        mark = (self.lease.generation, self.lease.transitions)
+        cur = self._arb_contain.get(kind)
+        if cur is not None and cur["mark"] == mark:
+            with self._arb_budget_lock:
+                cur["records"] = arbcontain.prune(cur["records"], now)
+            return cur
+        try:
+            docs = await asyncio.wait_for(self.store.list_arb_opportunities(
+                since=now - arbcontain.REBUILD_LOOKBACK, limit=ARB_HELD_READ_MAX, executed_only=True), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("arb partial history rebuild failed: %s", type(e).__name__)
+            return None
+        if not isinstance(docs, list) or len(docs) >= ARB_HELD_READ_MAX:
+            log.warning("arb partial history rebuild unusable (truncated or bad)")
+            return None
+        recs = arbcontain.records_from_docs(docs, kind)
+        if cur is not None:
+            recs = arbcontain.merge(cur["records"], recs)      # never forget a partial seen by this process
+        state = {"mark": mark, "records": arbcontain.prune(recs, now)}
+        self._arb_contain[kind] = state
+        return state
+
+    def arb_contain_status(self) -> dict:
+        """Status fields (additive): series paused after a contained partial and the 24 h counts, per kind known to
+        this process. Memory only (rebuilt from the store on the first executing scan after a restart). Never
+        raises."""
+        now = utcnow()
+        paused: list[dict] = []
+        window: dict[str, dict] = {}
+        try:
+            for kind, st in list(self._arb_contain.items()):
+                recs = list(st.get("records") or [])
+                for ser, pz in sorted(arbcontain.paused(recs, now).items()):
+                    paused.append({"series": ser, "kind": kind, "until_utc": iso(pz["until_utc"]),
+                                   "until_date": pz["until_date"], "event": pz["event"], "loss": pz["loss"]})
+                n, loss = arbcontain.window(recs, now)
+                window[kind] = {"count": n, "loss": loss}
+        except Exception as e:  # noqa: BLE001
+            log.warning("arb contain status failed: %s", type(e).__name__)
+        return {"paused_series": paused, "contained_24h": window,
+                "pause_rule": "a contained partial pauses its series until 00:00 America/New_York"}
+
     def _arb_skip_persist_ok(self, event: Any, executed: str, now: datetime) -> bool:
         """S2A1-1: a `skipped: ...` result is stored at most once per (event, reason kind) per ARB_SKIP_PERSIST_EVERY,
         so a stale book seen on every scan cannot flood the store (or push real sets out of a rebuild). Everything
@@ -2677,7 +2842,8 @@ class Runner:
             budget = None
             if kind is not None:
                 budget = {"scan": 0.0, "day": await self._arb_day_state(kind),
-                          "held": await self._arb_held_state(kind)}
+                          "held": await self._arb_held_state(kind),
+                          "contain": await self._arb_contain_state(kind), "notes": {}}
             self.arb_running_scan = True
             try:
                 # CA-2: own 1-worker pool. A scan abandoned at the timeout keeps that worker until it ends, so the
@@ -2700,16 +2866,39 @@ class Runner:
                 self.arb_last_scan_utc = utcnow()
             self.arb_scans += 1
             self.arb_found += len(results)
+            notes = (budget or {}).get("notes") or {}
             for op, executed in results:
                 doc = arbsvc.opportunity_doc(op, executed, kind or "log-only")
                 doc["ts"] = utcnow()
+                note = notes.get(id(op)) or {}
+                if note.get("type") == "contained":
+                    doc["contain"] = dict(note["contain"])        # item 3: legs (doc), loss, pause, kill decision
                 self.arb_recent.appendleft(doc)
-                if self._arb_skip_persist_ok(op.event, executed, doc["ts"]):
+                stored = self._arb_skip_persist_ok(op.event, executed, doc["ts"])
+                if stored:
                     try:
                         await asyncio.wait_for(self.store.add_arb_opportunity(dict(doc)), timeout=5)
                     except Exception as e:  # noqa: BLE001
                         log.error("arb log write failed: %s", type(e).__name__)
-                if executed.startswith(("PARTIAL", "ERROR")):
+                if note.get("type") == "contained":
+                    c = note["contain"]
+                    loss = c.get("loss")
+                    loss_s = f"${loss:.2f}" if isinstance(loss, (int, float)) else "unknown"
+                    if note.get("trip"):
+                        await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
+                                                f"{op.event}: {executed} ({note['trip']})", priority="urgent")
+                    else:
+                        await self.alerter.send(
+                            "Arbitrage partial set contained: series paused",
+                            f"{op.event}: fills {c.get('fills')}, {c.get('how')}, loss {loss_s}. Series "
+                            f"{c.get('series')} paused until {c.get('paused_until_date')} (00:00 New York); "
+                            "other series keep running.", priority="urgent")
+                elif note.get("type") == "unconfirmed":
+                    if stored:                       # at most once per event and reason per hour, like its log row
+                        await self.alerter.send("Arbitrage order state unconfirmed",
+                                                f"{op.event}: {executed}. A first leg may have filled; check "
+                                                "positions.")
+                elif executed.startswith(("PARTIAL", "ERROR")):
                     await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
                                             f"{op.event}: {executed}", priority="urgent")
                 elif executed.startswith("FILLED"):
@@ -2780,7 +2969,9 @@ class Runner:
                 "last_error": self.arb_last_error, "live_allowed": self.live_allowed(), "scans": self.arb_scans,
                 "found": self.arb_found, "since_restart_utc": iso(self.started_utc),
                 # demo-execute (additive): true while sets would be placed on the DEMO exchange
-                "demo_execute": self.arb_state() != "stopped" and self.arb_exec_kind() == "demo-execute"}
+                "demo_execute": self.arb_state() != "stopped" and self.arb_exec_kind() == "demo-execute",
+                # item 3 (additive): series paused after a contained partial, and the 24 h contained counts
+                **self.arb_contain_status()}
 
     # ---- controls
     async def stop(self, by: str) -> dict:

@@ -9,6 +9,10 @@ Definitions shared with the maker side:
 
 Arbitrage adds two spend caps: the spend of one scan and the spend of one UTC day.
 
+Optional per-event limit (Sprint 2B item 8, ``caps["max_event_frac"]``; None = off): the open exposure already held
+on the set's event (every position whose ticker starts with ``<EVENT>-``, maker and arbitrage together) plus the
+set's cost may not exceed ``max_event_frac * (cash + open_exposure)``.
+
 Every check fails closed: a missing, negative or non-finite input refuses the set.
 """
 from __future__ import annotations
@@ -56,14 +60,34 @@ def exposure_by_series(positions: Iterable[Mapping[str, Any]] | None) -> dict[st
     return out
 
 
+def exposure_of_event(positions: Iterable[Mapping[str, Any]] | None, event: Any) -> float:
+    """Sum |market_exposure_dollars| over positions on `event` (ticker == event or starts with "<event>-"). Raises
+    ValueError on a malformed list or a missing event, so a caller can fail closed."""
+    if positions is None or not isinstance(event, str) or not event:
+        raise ValueError("positions unreadable")
+    total = 0.0
+    for p in positions:
+        if not isinstance(p, Mapping):
+            raise ValueError("positions unreadable")
+        x = _num(p.get("market_exposure_dollars") or 0)
+        if x is None:
+            raise ValueError("positions unreadable")
+        t = p.get("ticker") or p.get("market_ticker")
+        if isinstance(t, str) and (t == event or t.startswith(event + "-")):
+            total += abs(x)
+    return round(total, 6)
+
+
 def ceiling(cash: float, total_exposure: float, max_open_frac: float) -> float:
     return max(0.0, max_open_frac * (cash + total_exposure))
 
 
 def check_arb(op_cost: Any, op_series: Any, positions_exposure_by_series: Mapping[str, Any] | None, cash: Any,
               max_open_frac: Any, scan_spent: Any, day_spent: Any,
-              caps: Mapping[str, Any] | None) -> tuple[bool, str]:
-    """(ok, reason). reason is "ok" when allowed, else a short plain-English why (no secrets, no keys)."""
+              caps: Mapping[str, Any] | None, *, event_exposure: Any = None) -> tuple[bool, str]:
+    """(ok, reason). reason is "ok" when allowed, else a short plain-English why (no secrets, no keys).
+    event_exposure: open exposure already on the set's event; required (else "bad input") only when
+    caps["max_event_frac"] is set."""
     caps = {**DEFAULT_CAPS, **(caps or {})}
     cost, c, frac = _num(op_cost), _num(cash), _num(max_open_frac)
     scan, day = _num(scan_spent), _num(day_spent)
@@ -96,6 +120,14 @@ def check_arb(op_cost: Any, op_series: Any, positions_exposure_by_series: Mappin
         return False, f"scan cap {scan:.2f} + {cost:.2f} > {scan_cap:.2f}"
     if day + cost > day_cap + 1e-9:
         return False, f"day cap {day:.2f} + {cost:.2f} > {day_cap:.2f}"
+    ev_frac_raw = caps.get("max_event_frac")
+    if ev_frac_raw is not None:
+        ev_frac, ev_exp = _num(ev_frac_raw), _num(event_exposure)
+        if ev_frac is None or not 0 < ev_frac <= 1 or ev_exp is None or ev_exp < 0:
+            return False, "bad input"
+        ev_cap = ev_frac * (c + total)
+        if ev_exp + cost > ev_cap + 1e-9:
+            return False, f"event cap {ev_exp:.2f} + {cost:.2f} > {ev_cap:.2f}"
     return True, "ok"
 
 

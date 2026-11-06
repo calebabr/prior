@@ -26,6 +26,7 @@ class Trader:
         self.cash_cents = cash_cents
         self.orders = []
         self.book_reads = []
+        self.pre_reads: list[str] = []
         self.books = {}
         self.on_book = None
 
@@ -36,7 +37,8 @@ class Trader:
         return {"market_positions": []}
 
     def get_orderbook(self, ticker, depth=None):
-        self.book_reads.append(ticker)
+        # completion reads only: the overlaid scanner also re-reads the thinnest legs BEFORE the first order
+        (self.book_reads if self.orders else self.pre_reads).append(ticker)
         if self.on_book:
             self.on_book(ticker)
         return {"orderbook_fp": self.books.get(ticker, BOOK)}

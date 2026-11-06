@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any, Iterable
 
+from ..db import schemas
 from . import pnl as pnlsvc
 from . import strategies as strat
 
@@ -191,13 +192,14 @@ def _strategy_ids(rows: Iterable[dict]) -> list[str]:
 # ---------------------------------------------------------------- build
 def build(rows: list[dict], snapshots: list[dict], flows: list[dict], *, zone: tzinfo, tzname: str,
           granularity: str, days: int, env: str, env_is_current: bool, now: datetime,
-          truncated: bool = False, notes: list[str] | None = None) -> dict:
+          truncated: bool = False, notes: list[str] | None = None,
+          snapshot_env: str | None = None) -> dict:
     """The /api/analytics/returns body (see the module doc). `rows` are trade rows with `_settled`, `_pnl`."""
     notes = list(notes or [])
     window_start = now - timedelta(days=days)
     periods = enumerate_periods(now, zone, granularity, window_start)
     ids = _strategy_ids(rows)
-    snaps, fl = _snapshots(snapshots), _flows(flows)
+    snaps, fl = _snapshots(schemas.filter_snapshots(snapshots, snapshot_env)), _flows(flows)   # None = all
     buckets: dict[date, dict] = {p["start"]: {"pnl": dict.fromkeys(ids, 0.0), "n": dict.fromkeys(ids, 0),
                                               "you_n": 0, "you_pnl": 0.0} for p in periods}
     for r in _settled_rows(rows, window_start, now):

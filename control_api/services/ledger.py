@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Iterable
 
 from . import arbsets
+from ..db import schemas
 from . import pnl as pnlsvc
 
 MODEL = "pair_time_v2"
@@ -129,13 +130,14 @@ def pair_events(rows: Iterable[dict], until: datetime | None = None) -> dict[str
 
 
 def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *, since: datetime,
-                   now: datetime, tolerance: float = TOLERANCE, truncated: bool = False) -> dict:
+                   now: datetime, tolerance: float = TOLERANCE, truncated: bool = False,
+                   snapshot_env: str | None = None) -> dict:
     """The reconciliation object (see module doc). `rows` are ALL trade rows read (any fill date), `snapshots` any
     order, `flows` the stored cash-flow docs. The window runs from the snapshot at or before `since` (else the
     first one after it) to the newest snapshot."""
     notes: list[str] = []
     snaps = []
-    for s in snapshots:
+    for s in schemas.filter_snapshots([x for x in snapshots if isinstance(x, dict)], snapshot_env):
         t = arbsets._ts(s.get("ts")) if isinstance(s, dict) else None
         cash, expo = pnlsvc._f(s.get("cash")), pnlsvc._f(s.get("exposure"))
         if t is not None and cash is not None and expo is not None:
@@ -228,7 +230,7 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
 
 def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, since: datetime, until: datetime | None,
           snapshots: list[dict], flows: list[dict], now: datetime, all_rows: list[dict] | None = None,
-          truncated: bool = False) -> dict:
+          truncated: bool = False, snapshot_env: str | None = None) -> dict:
     """The ledger body. `rows` = trade rows filled inside the window (attribution by fill date), `all_rows` = every
     row read (the reconciliation needs fills that settled inside the window whenever they were filled)."""
     notes: list[str] = []
@@ -295,7 +297,8 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
                                 for k, v in sorted(by_settle.items(), reverse=True)[:DAILY_MAX]],
         "netting": netting(open_rows),
         "reconciliation": reconciliation(all_rows if all_rows is not None else rows, snapshots, flows,
-                                         since=since, now=now, truncated=truncated),
+                                         since=since, now=now, truncated=truncated,
+                                         snapshot_env=snapshot_env),
         "notes": notes,
     }
 

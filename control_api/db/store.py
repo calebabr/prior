@@ -86,8 +86,24 @@ class Store(abc.ABC):
     async def add_account_snapshot(self, doc: dict) -> None: ...
 
     @abc.abstractmethod
-    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000) -> list[dict]:
-        """Newest first (reverse for a chart)."""
+    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000,
+                                     env: str | None = None) -> list[dict]:
+        """Newest first (reverse for a chart). Every returned doc carries `env` ('demo' | 'live'); a stored row
+        without one reads as 'demo' (schemas.snapshot_env, the backfill rule). `env` filters to one env
+        (None = both, the old behaviour)."""
+
+    # ---- ops monitor (read-only; item 19). Non-abstract so other Store implementations keep working.
+    async def storage_stats(self) -> dict | None:
+        """{used_bytes, limit_bytes} for the store, or None when the store cannot say."""
+        return None
+
+    async def ttl_index_report(self) -> dict | None:
+        """{collection: bool} - whether each TTL index in schemas.TTL_INDEXES exists, or None when not applicable."""
+        return None
+
+    async def server_time(self) -> datetime | None:
+        """The database server's clock (aware UTC), or None when not available."""
+        return None
 
     # ---- fills
     @abc.abstractmethod
@@ -574,9 +590,10 @@ class MemoryStore(Store):
     async def add_account_snapshot(self, doc: dict) -> None:
         self._snapshots.append(self._stamp(S.prepare_ts_doc(doc)))
 
-    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000) -> list[dict]:
-        docs = [d for d in self._snapshots if _since_ok(d, since)]
-        return [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
+    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000,
+                                     env: str | None = None) -> list[dict]:
+        docs = [d for d in self._snapshots if _since_ok(d, since) and (env is None or S.snapshot_env(d) == env)]
+        return [S.with_snapshot_env(self._clean(d)) for d in self._newest_seq(docs)[:max(0, int(limit))]]
 
     # ---- fills
     async def upsert_fills(self, fills: Iterable[dict]) -> int:

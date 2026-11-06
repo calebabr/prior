@@ -27,6 +27,7 @@ from collections import deque
 from .db import schemas
 from .services import arb as arbsvc
 from .services import botfiles
+from .services import journalsync
 from .services import closetime as ctsvc
 from .services import fillquality as fq
 from .services import pnl as pnlsvc
@@ -1042,6 +1043,7 @@ class Runner:
         await self._check_schema()                   # R4: newer stored schema -> standby (alerted)
         config_ok = await self._load_config()
         try:
+            await journalsync.replay_local(self.journal_path, self.store)   # rows written locally but never synced (idempotent)
             rows = await self.store.list_journal(since=utcnow() - timedelta(days=JOURNAL_REHYDRATE_DAYS),
                                                  limit=200000)
             if rows:
@@ -1396,6 +1398,7 @@ class Runner:
     async def _sync_journal(self, mode: str | None = None) -> int:
         if self._tail is None:
             self._tail = botfiles.JournalTail(self.journal_path)
+        before, stored = self._tail.offset, False
         try:
             rows = self._tail.read_new()
             if not rows:
@@ -1403,6 +1406,7 @@ class Runner:
             self._capture_queue_rows(rows, mode or self.mode)
             self._index_journal(rows)
             n = await self.store.add_journal_rows(rows)
+            stored = True
             for r in rows:
                 if r.get("event") == "account":
                     try:
@@ -1412,9 +1416,14 @@ class Runner:
                     await self.store.add_account_snapshot({
                         "ts": datetime.fromisoformat(r["utc"]) if r.get("utc") else utcnow(),
                         "cash": info.get("cash"), "exposure": info.get("exposure"),
-                        "headroom": info.get("headroom", 0.0)})
+                        "headroom": info.get("headroom", 0.0),
+                        "env": "live" if (mode or self.mode) == "live" else "demo"})
             return n
-        except Exception as e:  # noqa: BLE001
+        except BaseException as e:  # noqa: BLE001   (a cancelled write must not lose rows either)
+            if not stored:
+                self._tail.offset = before           # the store has no copy yet: read the same rows again next time
+            if not isinstance(e, Exception):
+                raise
             log.error("journal sync failed: %s", type(e).__name__)
             return 0
 

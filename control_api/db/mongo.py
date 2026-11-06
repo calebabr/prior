@@ -5,7 +5,7 @@ MongoStore never touches the network. The URI comes only from settings.mongodb_u
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument, UpdateOne
@@ -205,11 +205,43 @@ class MongoStore(Store):
     async def add_account_snapshot(self, doc: dict) -> None:
         await self._c(S.ACCOUNT_SNAPSHOTS).insert_one(S.prepare_ts_doc(doc))
 
-    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000) -> list[dict]:
+    async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000,
+                                     env: str | None = None) -> list[dict]:
         if limit <= 0:
             return []
         q = {} if since is None else {"ts": {"$gte": S.norm_dt(since)}}
-        return await self._c(S.ACCOUNT_SNAPSHOTS).find(q, NO_ID).sort(NEWEST).limit(int(limit)).to_list()
+        q.update(S.snapshot_env_query(env))
+        rows = await self._c(S.ACCOUNT_SNAPSHOTS).find(q, NO_ID).sort(NEWEST).limit(int(limit)).to_list()
+        return [S.with_snapshot_env(r) for r in rows]
+
+    # ---- ops monitor (read-only)
+    async def storage_stats(self) -> dict | None:
+        try:
+            st = await self._db.command("dbStats")
+            used = float(st.get("storageSize", 0)) + float(st.get("indexSize", 0))
+            return {"used_bytes": int(used), "limit_bytes": S.ATLAS_M0_LIMIT_BYTES}
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    async def ttl_index_report(self) -> dict | None:
+        try:
+            out = {}
+            for coll in S.TTL_COLLECTIONS:
+                idx = await self._c(coll).index_information()
+                out[coll] = any(v.get("expireAfterSeconds") is not None for v in idx.values())
+            return out
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    async def server_time(self) -> datetime | None:
+        try:
+            r = await self._client.admin.command("hello")
+            t = r.get("localTime")
+            if isinstance(t, datetime):
+                return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        except Exception:                                    # noqa: BLE001
+            pass
+        return None
 
     # ---- fills
     async def upsert_fills(self, fills: Iterable[dict]) -> int:

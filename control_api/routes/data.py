@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.deps import current_user
+from ..services import ops_monitor as opsmon
 from ..services import strategies as strat
 from .periods import window_for
 
@@ -147,15 +148,26 @@ async def history(request: Request, days: int = Query(30, ge=1, le=180), since: 
                           for s in snaps]}
 
 
+async def _ops(request: Request) -> dict | None:
+    """Storage / TTL index / clock-skew report (cached 60 s); raises an alert through the existing alerter."""
+    try:
+        rep = await opsmon.ops_report(request.app.state.store)
+        opsmon.maybe_alert(getattr(request.app.state.runner, "alerter", None), rep)
+        return rep
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @router.get("/health")
 async def health(request: Request, user: dict = Depends(current_user)) -> dict:
     doc = await _call(request.app.state.store.last_monitor_summary())
+    ops = await _ops(request)                           # additive, read-only (item 19); never fails the route
     if not doc:
-        return {"summary": None, "report_text": None}
+        return {"summary": None, "report_text": None, "ops": ops}
     summary = doc.get("summary")
     if isinstance(summary, dict):
         summary = dict(summary, ts=doc["ts"].isoformat() if isinstance(doc.get("ts"), datetime) else doc.get("ts"))
-    return {"summary": summary, "report_text": doc.get("report_text")}
+    return {"summary": summary, "report_text": doc.get("report_text"), "ops": ops}
 
 
 @router.get("/logs")

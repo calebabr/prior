@@ -65,3 +65,15 @@ These numbers are uncompressed and include indexes. WiredTiger compression makes
 | config_versions, monitor_summaries, others | KB | rare | <1 MB |
 
 **Typical total: about 85 MB.** Worst case is `poll_minutes=5` with about 15 rows per pass, which comes to roughly 350 MB for the journal. That is still under 512 MB, but if `db.stats()` gets past about 300 MB, shorten `RETENTION_DAYS` in `schemas.py`, then drop and recreate the `ts_ttl` index (or use `collMod`).
+
+## Account snapshot env tag (2B part 1)
+
+`account_snapshots` docs carry `env` ('demo' | 'live', the runner mode when the snapshot was taken). Backfill rule, in
+one place (`schemas.snapshot_env`): a row without `env` reads as `demo` (all history before the live switch is demo).
+`list_account_snapshots(env=...)` filters on it (None = both); every returned doc has `env`. No migration or index.
+
+## Ops monitor (read-only)
+
+`Store.storage_stats()` (Mongo: dbStats storage+index size vs the 512 MB M0 cap), `ttl_index_report()` (TTL index on
+heartbeats / journal_rows / account_snapshots) and `server_time()` (Mongo `hello.localTime`) feed
+`services/ops_monitor.py` and the `ops` block of `GET /api/health`. MemoryStore returns None for all three.

@@ -112,7 +112,8 @@ async def seed(store: Store, *, now: datetime | None = None, rng_seed: int = 7) 
         exposure = round(rng.uniform(35, 100), 2)
         cash = round(cash + rng.gauss(0.03, 0.6), 2)
         headroom = round(max(0.0, min(40, 0.5 * (cash + exposure) - exposure, cash)), 2)
-        await store.add_account_snapshot({"ts": t, "cash": cash, "exposure": exposure, "headroom": headroom})
+        await store.add_account_snapshot({"ts": t, "cash": cash, "exposure": exposure, "headroom": headroom,
+                                         "env": "demo"})
         t += timedelta(hours=1)
         n += 1
     counts["account_snapshots"] = n

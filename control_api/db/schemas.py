@@ -233,6 +233,40 @@ def normalize(obj: Any) -> Any:
     return copy.deepcopy(obj)
 
 
+ATLAS_M0_LIMIT_BYTES = 512 * 1024 * 1024  # Atlas M0 storage cap
+TTL_COLLECTIONS = (HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS)   # collections whose ts_ttl index must exist (read-only check)
+
+SNAPSHOT_ENVS = ("demo", "live")
+SNAPSHOT_ENV_DEFAULT = "demo"             # backfill rule: rows stored before the env tag existed are demo (no live before 11/24)
+
+
+def snapshot_env(doc: dict | None) -> str:
+    """The env of an account snapshot. THE one place the backfill rule lives: a missing or unknown env reads as demo."""
+    e = (doc or {}).get("env")
+    return e if e in SNAPSHOT_ENVS else SNAPSHOT_ENV_DEFAULT
+
+
+def snapshot_env_query(env: str | None) -> dict:
+    """Mongo filter for an env (None = no filter). 'demo' also matches rows with no env field (the backfill rule)."""
+    if env is None:
+        return {}
+    if env == SNAPSHOT_ENV_DEFAULT:
+        return {"$or": [{"env": env}, {"env": {"$exists": False}}, {"env": {"$nin": list(SNAPSHOT_ENVS)}}]}
+    return {"env": env}
+
+
+def with_snapshot_env(doc: dict) -> dict:
+    """Copy of a snapshot doc whose env is always set (backfill applied on read)."""
+    out = dict(doc)
+    out["env"] = snapshot_env(doc)
+    return out
+
+
+def filter_snapshots(snaps: Iterable[dict], env: str | None) -> list[dict]:
+    """Snapshots of one env (None = all). Works on docs from any source; rows without env count as demo."""
+    return [s for s in snaps if env is None or snapshot_env(s) == env]
+
+
 def strip_id(doc: dict | None) -> dict | None:
     if doc is None:
         return None

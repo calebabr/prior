@@ -23,8 +23,7 @@ const GROUPS = [
 ];
 
 /** Why arming is not possible right now, or null. Disarming is never blocked by these. */
-export function armBlockReason({ demo, liveAllowed, ready, hasPreflight }) {
-  if (demo) return 'Demo mode: checks only. Arming applies to live mode.';
+export function armBlockReason({ liveAllowed, ready, hasPreflight }) {
   if (!liveAllowed) return 'The server does not allow live trading.';
   if (!hasPreflight) return 'Run the checks first.';
   if (!ready) return 'Not ready: fix the items under "Needs fixing" first.';
@@ -35,9 +34,9 @@ export default function Arming() {
   const { status } = useStatus();
   const { confirm, twoFactor, notify } = useDialogs();
   const demo = !(status && status.mode === 'live');
-  const target = demo ? 'demo' : 'live';
 
-  const pre = useResource(() => api.getPreflight(target), `/api/preflight?target=${target}`);
+  // Arming only gates live trading, so the checks are always the live ones (also while the bot is in demo).
+  const pre = useResource(() => api.getPreflight('live'), '/api/preflight?target=live');
   const arm = useResource(() => api.getArming(), '/api/arming');
   const [busy, setBusy] = useState(null);
   const { reload: reloadPre } = pre;
@@ -52,35 +51,46 @@ export default function Arming() {
   const ready = !!(pre.data && pre.data.ready);
   const hasPreflight = !!pre.data;
   const liveAllowed = !!(arm.data && arm.data.live_allowed);
-  const block = armBlockReason({ demo, liveAllowed, ready, hasPreflight });
+  const block = armBlockReason({ liveAllowed, ready, hasPreflight });
 
   async function change(s, next) {
     if (busy) return;
     const name = s.name;
+    if (!next) {
+      // Disarming is the safe direction: one tap, no confirm, no 2FA.
+      setBusy(s.id);
+      try {
+        await api.setArming(s.id, false);
+        notify({ kind: 'ok', title: `${name} is now disarmed` });
+      } catch (err) {
+        notify({ kind: 'error', title: `${name} not changed`, text: err.message, details: err.details });
+      } finally {
+        setBusy(null);
+        reloadArm();
+        reloadPre();
+      }
+      return;
+    }
     const ok = await confirm({
-      title: next ? `Arm ${name}?` : `Disarm ${name}?`,
-      message: next ? (
+      title: `Arm ${name}?`,
+      message: (
         <>
           <p>Arming lets this strategy trade in live mode.</p>
+          {demo && <p>This arms the strategy for live. It does not start live trading.</p>}
           <p className="hint">Stop still works at any time. You will need a 2FA code next.</p>
-        </>
-      ) : (
-        <>
-          <p>Disarming stops {name} from trading in live mode until you arm it again.</p>
-          <p className="hint">You will need a 2FA code next.</p>
         </>
       ),
       confirmLabel: 'Continue',
-      danger: next,
+      danger: true,
     });
     if (!ok) return;
     setBusy(s.id);
     try {
       const r = await twoFactor({
-        title: next ? `Arm ${name}` : `Disarm ${name}`,
-        message: next ? 'Enter your code to let this strategy trade in live mode.' : 'Enter your code to disarm.',
-        confirmLabel: next ? 'Arm' : 'Disarm',
-        danger: next,
+        title: `Arm ${name}`,
+        message: 'Enter your code to let this strategy trade in live mode.',
+        confirmLabel: 'Arm',
+        danger: true,
         action: (code) => api.setArming(s.id, next, code),
       });
       if (r) notify({ kind: 'ok', title: `${name} is now ${next ? 'armed' : 'disarmed'}` });
@@ -112,7 +122,7 @@ export default function Arming() {
       {hasPreflight && (
         <>
           <div
-            className={`arm-banner ${demo ? 'is-demo' : ready ? 'is-ready' : 'is-notready'}`}
+            className={`arm-banner ${ready ? 'is-ready' : 'is-notready'}`}
             role="status"
             data-testid="arm-banner"
           >
@@ -120,14 +130,16 @@ export default function Arming() {
             <div>
               <h2 className="arm-banner-title">{ready ? 'READY' : 'NOT READY'}</h2>
               <p className="arm-banner-sub">
-                {demo
-                  ? 'Demo mode: checks only. Nothing here can start live trading.'
-                  : ready
-                    ? 'Every check passed. You can arm a strategy below.'
-                    : 'Fix the items below before arming a strategy.'}
+                {ready
+                  ? 'Every check passed. You can arm a strategy below.'
+                  : 'Fix the items below before arming a strategy.'}
               </p>
             </div>
           </div>
+          <p className="hint" data-testid="arm-note">
+            Arming only takes effect when live mode is on. You can arm now while in demo mode, then switch to live.
+            {demo ? ' Checks are for live.' : ''}
+          </p>
           <div className="arm-meta">
             <span className="hint">
               Last checked <Time value={pre.data.ts} withDate />

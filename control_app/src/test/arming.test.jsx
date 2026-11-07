@@ -33,10 +33,9 @@ function base(extra = {}) {
 }
 
 describe('armBlockReason', () => {
-  it('orders demo, live-not-allowed, no-data, not-ready, ok', () => {
-    const ok = { demo: false, liveAllowed: true, ready: true, hasPreflight: true };
+  it('orders live-not-allowed, no-data, not-ready, ok (demo does not block)', () => {
+    const ok = { liveAllowed: true, ready: true, hasPreflight: true };
     expect(armBlockReason(ok)).toBeNull();
-    expect(armBlockReason({ ...ok, demo: true })).toMatch(/demo mode: checks only/i);
     expect(armBlockReason({ ...ok, liveAllowed: false })).toMatch(/does not allow live/i);
     expect(armBlockReason({ ...ok, hasPreflight: false })).toMatch(/run the checks/i);
     expect(armBlockReason({ ...ok, ready: false })).toMatch(/not ready/i);
@@ -79,10 +78,31 @@ describe('Arming page', () => {
     expect(screen.getByRole('switch', { name: /maker/i })).toBeDisabled();
   });
 
-  it('demo mode is labelled checks only and cannot arm', async () => {
-    base({ 'GET /api/status': STATUS, 'GET /api/preflight': PRE({ ready: true, target: 'demo', checks: [CHECKS[0]] }) });
+  it('demo mode: asks for the live preflight, shows the note, switches enabled, confirm says it does not start live', async () => {
+    const user = userEvent.setup();
+    const calls = base({
+      'GET /api/status': STATUS,
+      'GET /api/preflight': PRE({ ready: true, checks: [CHECKS[0]] }),
+      'PUT /api/arming': ARM({ maker: { armed: true, mode: 'demo' } }),
+    });
     renderApp('/arming');
-    expect((await screen.findByTestId('arm-banner')).textContent).toMatch(/demo mode: checks only/i);
+    await screen.findByTestId('arm-banner');
+    expect(calls.find((c) => c.key === 'GET /api/preflight').path).toContain('target=live');
+    expect(screen.getByTestId('arm-note')).toHaveTextContent(/arming only takes effect when live mode is on/i);
+    expect(screen.getByTestId('arm-note')).toHaveTextContent(/checks are for live/i);
+    expect(document.body.textContent).not.toMatch(/demo mode: checks only/i);
+    await user.click(screen.getByRole('switch', { name: /maker/i }));
+    expect(await screen.findByText(/does not start live trading/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.type(await screen.findByLabelText('6-digit code'), '123456');
+    await user.click(screen.getByRole('button', { name: 'Arm' }));
+    await screen.findByText('Maker is now armed');
+  });
+
+  it('demo mode with a not-ready live preflight still blocks arming', async () => {
+    base({ 'GET /api/status': STATUS });
+    renderApp('/arming');
+    expect(await screen.findByTestId('arm-block')).toHaveTextContent(/not ready/i);
     expect(screen.getByRole('switch', { name: /maker/i })).toBeDisabled();
   });
 
@@ -128,7 +148,7 @@ describe('Arming page', () => {
     expect(calls.some((c) => c.key === 'PUT /api/arming')).toBe(false);
   });
 
-  it('an armed strategy can be disarmed (2FA) even when not ready', async () => {
+  it('an armed strategy is disarmed in one tap (no confirm, no 2FA) even when not ready', async () => {
     const user = userEvent.setup();
     const calls = base({
       'GET /api/arming': ARM({ maker: { armed: true, mode: 'live' } }),
@@ -139,11 +159,11 @@ describe('Arming page', () => {
     expect(sw).toBeEnabled();
     expect(sw).toHaveAttribute('aria-checked', 'true');
     await user.click(sw);
-    await user.click(await screen.findByRole('button', { name: 'Continue' }));
-    await user.type(await screen.findByLabelText('6-digit code'), '111222');
-    await user.click(screen.getByRole('button', { name: 'Disarm' }));
     await screen.findByText('Maker is now disarmed');
-    expect(calls.find((c) => c.key === 'PUT /api/arming').body).toEqual({ strategy: 'maker', armed: false });
+    const put = calls.find((c) => c.key === 'PUT /api/arming');
+    expect(put.body).toEqual({ strategy: 'maker', armed: false });
+    expect(put.headers['X-2FA-Code']).toBeUndefined();
+    expect(screen.queryByLabelText('6-digit code')).toBeNull();
   });
 
   it('a server rejection of the change is shown and nothing is assumed', async () => {

@@ -1,0 +1,30 @@
+/* Live-arming checklist (/arming). Tokens only; status is carried by an icon shape plus words, not colour alone. */
+.arm-banner { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 10px; margin: 8px 0 12px; }
+.arm-banner.is-ready { border-left-color: var(--ok); }
+.arm-banner.is-notready { border-left-color: var(--danger); }
+.arm-banner.is-demo { border-left-color: var(--accent); }
+.arm-banner-title { font-size: 1.125rem; font-weight: 700; margin: 0; letter-spacing: 0.02em; }
+.arm-banner-sub { margin: 2px 0 0; color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+.arm-glyph { flex: none; width: 24px; height: 24px; }
+.arm-glyph.pass { color: var(--ok); }
+.arm-glyph.warn { color: var(--warn); }
+.arm-glyph.fail { color: var(--danger); }
+.arm-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 12px; }
+.arm-meta .hint { margin: 0; }
+.arm-group-title { display: inline-flex; align-items: center; gap: 8px; }
+.arm-checks { list-style: none; margin: 0; padding: 0; }
+.arm-check { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.arm-check:last-child { border-bottom: 0; }
+.arm-check-body { min-width: 0; flex: 1; }
+.arm-check-label { font-weight: 600; overflow-wrap: anywhere; }
+.arm-check-detail { color: var(--muted); font-size: 0.875rem; margin-top: 2px; overflow-wrap: anywhere; }
+.arm-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.arm-switch-row:last-of-type { border-bottom: 0; }
+.arm-switch-text { min-width: 0; }
+.arm-switch-name { font-weight: 600; }
+.arm-switch-reason { color: var(--muted); font-size: 0.8125rem; margin-top: 2px; overflow-wrap: anywhere; }
+.arm-switch { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; min-width: 96px; padding: 0 12px; border-radius: 22px; border: 1px solid var(--border); background: transparent; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.arm-switch[aria-checked='true'] { border-color: var(--ok); color: var(--ok); }
+.arm-switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.arm-switch-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; box-sizing: border-box; }
+.arm-switch[aria-checked='true'] .arm-switch-dot { background: currentColor; }

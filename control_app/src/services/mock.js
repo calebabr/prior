@@ -275,6 +275,7 @@ function initialState() {
     logs: [],
     lastCode: null,
     resting: 9,
+    arming: { maker: { armed: true, mode: 'demo' }, arbitrage: { armed: false, mode: 'demo' } },
     arb: {
       settings: { enabled: true, live: false, arb_max_contracts: 100, arb_min_profit: 0.05, arb_series: [...ARB_SERIES], arb_poll_seconds: 15, arb_scan_cap: 15, arb_day_cap: 45, arb_series_cap_frac: 0.35, arb_demo_execute: false },
       kill_switch: false,
@@ -960,6 +961,29 @@ async function route(method, url, headers, body) {
   }
   if (method === 'GET' && p === '/api/pnl/by-source') {
     return reply(200, { period: null, env: 'demo', by_source: { maker: 5.1, arb: 0.9, you: 0.4, bot: 6.0, total: 6.4, settled_fills: 18 } });
+  }
+  if (method === 'GET' && p === '/api/preflight') {
+    const target = q.get('target') === 'live' ? 'live' : 'demo';
+    const checks = [
+      { id: 'heartbeat', label: 'The bot is checking in', status: 'pass', detail: 'Last heartbeat 30 seconds ago.' },
+      { id: 'store', label: 'The database is reachable', status: 'pass', detail: 'Reads and writes work.' },
+      { id: 'alerts', label: 'Phone alerts are set up', status: 'warn', detail: 'No phone is registered for alerts yet.' },
+      { id: 'live_key', label: 'Live exchange key is installed', status: S.live_allowed ? 'pass' : 'fail', detail: S.live_allowed ? 'Present on the server.' : 'Missing on the server.' },
+    ];
+    return reply(200, { ready: checks.every((c) => c.status !== 'fail'), target, ts: iso(now()), checks });
+  }
+  if (method === 'GET' && p === '/api/arming') {
+    return reply(200, { maker: S.arming.maker, arbitrage: S.arming.arbitrage, live_allowed: S.live_allowed, updated: iso(now()) });
+  }
+  if (method === 'PUT' && p === '/api/arming') {
+    const bad = check2fa(headers);
+    if (bad) return bad;
+    const st = body && body.strategy;
+    if ((st !== 'maker' && st !== 'arbitrage') || typeof body.armed !== 'boolean') return reply(400, { detail: ['strategy and armed are required'] });
+    if (body.armed && !S.live_allowed) return reply(409, { detail: 'live_not_allowed' });
+    S.arming[st] = { ...S.arming[st], armed: body.armed };
+    audit('arming', true, { strategy: st, armed: body.armed });
+    return reply(200, { maker: S.arming.maker, arbitrage: S.arming.arbitrage, live_allowed: S.live_allowed, updated: iso(now()) });
   }
   if (method === 'GET' && p === '/api/arb') return reply(200, arbResponse());
   if (method === 'GET' && p === '/api/arb/opportunities') {

@@ -79,7 +79,7 @@ describe('More page', () => {
     const nav = await screen.findByRole('navigation', { name: 'More pages' });
     const links = within(nav).getAllByRole('link');
     expect(links.map((l) => l.getAttribute('href'))).toEqual([
-      '/health', '/server', '/mode', '/logs', '/account', '/settings', '/alerts', '/terminology',
+      '/health', '/server', '/mode', '/arming', '/logs', '/account', '/settings', '/alerts', '/terminology',
     ]);
     expect(within(nav).getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual(['System', 'You', 'Help']);
     expect(links.map((l) => within(l).getByText(/./, { selector: '.menu-label' }).textContent)).toEqual(
@@ -118,7 +118,7 @@ describe('sidebar (>= 1024 px)', () => {
     const links = within(side).getAllByRole('link');
     expect(links.map((l) => l.textContent)).toEqual([
       'Home', 'Strategies', 'Maker', 'Arbitrage', 'Performance', 'All Strategies', 'Analytics', 'Shadow Estimate', 'Periods',
-      'Activity', 'Health', 'Server', 'Mode', 'Logs', 'Account', 'Settings', 'Alerts', 'Terminology',
+      'Activity', 'Health', 'Server', 'Mode', 'Arming', 'Logs', 'Account', 'Settings', 'Alerts', 'Terminology',
     ]);
     expect(within(side).getByRole('link', { name: 'Home' })).toHaveClass('active');
     expect(within(side).getByRole('button', { name: /sign out/i })).toBeInTheDocument();

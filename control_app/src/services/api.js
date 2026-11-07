@@ -411,6 +411,11 @@ export const api = {
   pushTest: () => request('POST', '/api/push/test', { cache: false }),
   getAccountPositions: () => request('GET', '/api/account/positions').then((d) => (Array.isArray(d) ? d : (d && d.positions) || [])),
 
+  // Live-arming checklist (Sprint 2B part 3). Reads need a login; changing arming needs fresh 2FA.
+  getPreflight: (target = 'live') => request('GET', `/api/preflight${query({ target })}`, { cache: false }),
+  getArming: () => request('GET', '/api/arming', { cache: false }),
+  setArming: (strategy, armed, code) => request('PUT', '/api/arming', { body: { strategy, armed }, code, cache: false }),
+
   // Server / keep-awake
   getCloud: () => request('GET', '/api/cloud'),
   putCloud: (patch, code) => request('PUT', '/api/cloud', { body: patch, code }),

@@ -30,6 +30,7 @@ import Analytics from './pages/Analytics.jsx';
 import More from './pages/More.jsx';
 import Account from './pages/Account.jsx';
 import Alerts from './pages/Alerts.jsx';
+import Arming from './pages/Arming.jsx';
 import './styles/nav.css';
 
 // An old path (/markets, /arb) forwards to its new page, keeping the query string and hash
@@ -72,6 +73,7 @@ function SignedIn() {
               <Route path="/health" element={<Health />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/mode" element={<Mode />} />
+              <Route path="/arming" element={<Arming />} />
               <Route path="/server" element={<Server />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/shadow" element={<Shadow />} />

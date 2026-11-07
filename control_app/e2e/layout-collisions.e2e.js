@@ -332,6 +332,10 @@ for (const theme of THEMES) {
             await go('/settings');
             await page.locator('button.help-icon').first().click();
           }],
+          ['arming-confirm', async () => {
+            await go('/arming');
+            await page.getByRole('switch', { name: /maker/i }).click();
+          }],
           ['live-confirm', async () => {
             await go('/strategies/arb/controls');
             await page.getByRole('button', { name: /go live/i }).first().click();

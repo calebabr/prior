@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from control_api.tests.conftest import preflight_ready
+
 pytestmark = pytest.mark.asyncio
 
 LIVE_ENV = {"KALSHI_PROD_API_KEY_ID": "prod-id", "KALSHI_PROD_PRIVATE_KEY": "not-a-real-key",
@@ -18,6 +20,7 @@ def _arm_live(env, monkeypatch):
     monkeypatch.setattr(env.settings, "prod_keys_present", True)
     monkeypatch.setattr(env.settings, "live_confirm_ok", True)
     env.runner.arming["arbitrage"] = True       # S3 item 10: live arbitrage also needs the strategy armed
+    preflight_ready(monkeypatch)                 # S3 L-1: switching arbitrage live re-runs the preflight
 
 
 class FakePublic:

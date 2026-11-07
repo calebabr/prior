@@ -280,3 +280,173 @@ def test_normalize_fails_closed():
         armsvc.check_strategy("arb")
 
 
+# ------------------------------------------------------------------ security review 2B fixes
+async def test_m1_disarm_during_an_in_flight_arm_write_is_never_undone(live_ok):
+    """M-1 (a): maker armed; arming arbitrage is mid store write when the maker is disarmed. The maker stays
+    disarmed in memory AND in the store, and the arbitrage arm keeps only its own flag."""
+    r, st = live_ok.runner, live_ok.store
+    r.arming = {**r.arming, "maker": True}
+    await st.save_cloud_settings({armsvc.CLOUD_KEY: {"maker": True, "arbitrage": False}}, by="owner")
+    orig = st.save_cloud_settings
+    gate, calls = asyncio.Event(), []
+
+    async def slow(doc, *, by):
+        calls.append(doc)
+        if len(calls) == 1:                         # the arm(arbitrage) write is slow
+            await gate.wait()
+        return await orig(doc, by=by)
+    st.save_cloud_settings = slow
+    arm = asyncio.create_task(r.set_armed("arbitrage", True, by="owner"))
+    await asyncio.sleep(0.05)
+    dis = asyncio.create_task(r.set_armed("maker", False, by="owner"))
+    await asyncio.sleep(0.05)
+    assert r.armed("maker") is False                # in force at once, before the lock
+    gate.set()
+    await arm
+    res = await dis
+    assert res["persisted"] is True
+    stored = (await st.get_cloud_settings())[armsvc.CLOUD_KEY]
+    assert r.armed("maker") is False and stored["maker"] is False
+    assert r.armed("arbitrage") is True and stored["arbitrage"] is True
+
+
+async def test_m1_disarm_during_the_arm_preflight_refuses_the_arm(live_ok, monkeypatch):
+    """M-1 (b): Arm maker, then Disarm while its preflight runs: the arm is refused (409 disarmed_meanwhile)."""
+    gate = asyncio.Event()
+
+    async def slowpf(target, **kw):
+        await gate.wait()
+        return {"ready": True, "target": target, "ts": "x", "checks": []}
+    monkeypatch.setattr(pf, "run_preflight", slowpf)
+    h = await live_ok.h2fa()
+    arm = asyncio.create_task(live_ok.client.put("/api/arming", json={"strategy": "maker", "armed": True},
+                                                 headers=h))
+    await asyncio.sleep(0.05)
+    d = await live_ok.client.put("/api/arming", json={"strategy": "maker", "armed": False}, headers=live_ok.auth)
+    assert d.status_code == 200
+    gate.set()
+    a = await arm
+    assert a.status_code == 409 and a.json()["detail"] == "disarmed_meanwhile"
+    assert live_ok.runner.armed("maker") is False
+    assert (await live_ok.store.get_cloud_settings())[armsvc.CLOUD_KEY]["maker"] is False
+
+
+async def test_m1_disarm_landing_during_the_arm_write_gets_a_compensating_write(live_ok):
+    """The disarm lands while the arm write is in flight and the disarm store write then fails: the arm undoes
+    its True itself, so the store never ends armed after a disarm."""
+    r, st = live_ok.runner, live_ok.store
+    orig = st.save_cloud_settings
+    gate, n = asyncio.Event(), []
+
+    async def flaky(doc, *, by):
+        n.append(doc)
+        if len(n) == 1:
+            await gate.wait()                       # the arm write
+            return await orig(doc, by=by)
+        if by == "owner2":
+            raise RuntimeError("atlas down")        # the disarm write fails
+        return await orig(doc, by=by)
+    st.save_cloud_settings = flaky
+    arm = asyncio.create_task(r.set_armed("maker", True, by="owner"))
+    await asyncio.sleep(0.05)
+    dis = asyncio.create_task(r.set_armed("maker", False, by="owner2"))
+    await asyncio.sleep(0.05)
+    gate.set()
+    with pytest.raises(PermissionError, match="disarmed_meanwhile"):
+        await arm
+    res = await dis
+    assert res["persisted"] is False and r.armed("maker") is False
+    assert (await st.get_cloud_settings())[armsvc.CLOUD_KEY]["maker"] is False
+
+
+async def test_m1_arm_changes_only_its_own_flag_against_the_latest_store_doc(live_ok):
+    r, st = live_ok.runner, live_ok.store
+    r.arming = {**r.arming, "maker": True}          # stale memory: the store says the maker was disarmed elsewhere
+    await st.save_cloud_settings({armsvc.CLOUD_KEY: {"maker": False, "arbitrage": False}}, by="other")
+    await r.set_armed("arbitrage", True, by="owner")
+    stored = (await st.get_cloud_settings())[armsvc.CLOUD_KEY]
+    assert stored["maker"] is False and stored["arbitrage"] is True
+
+
+async def test_m1_failed_disarm_write_leaves_memory_disarmed_and_a_later_arm_works(live_ok, monkeypatch):
+    r, st = live_ok.runner, live_ok.store
+    await r.set_armed("maker", True, by="owner")
+    orig = st.save_cloud_settings
+
+    async def boom(*a, **k):
+        raise RuntimeError("atlas down")
+    monkeypatch.setattr(st, "save_cloud_settings", boom)
+    res = await r.set_armed("maker", False, by="owner")
+    assert res["persisted"] is False and r.armed("maker") is False
+    monkeypatch.setattr(st, "save_cloud_settings", orig)
+    assert (await r.set_armed("maker", True, by="owner"))["armed"] is True
+
+
+async def test_l1_live_mode_rechecks_the_preflight(live_ok, monkeypatch):
+    monkeypatch.setattr(pf, "run_preflight", _ready(failed=("reconciliation",)))
+    r = await live_ok.client.put("/api/mode", headers=await live_ok.h2fa(), json={"mode": "live", "confirm": "LIVE"})
+    assert r.status_code == 409 and [d["id"] for d in r.json()["detail"]] == ["reconciliation"]
+    assert live_ok.runner.mode == "demo"
+    monkeypatch.setattr(pf, "run_preflight", _ready())
+    r = await live_ok.client.put("/api/mode", headers=await live_ok.h2fa(), json={"mode": "live", "confirm": "LIVE"})
+    assert r.status_code == 200 and live_ok.runner.mode == "live"
+
+
+async def test_l1_live_start_rechecks_but_ignores_kill_switch_and_snapshot(live_ok, monkeypatch):
+    r = live_ok.runner
+    r.mode = "live"
+    r.arming = {**r.arming, "maker": True}
+    monkeypatch.setattr(pf, "run_preflight", _ready(failed=("release",)))
+    res = await live_ok.client.post("/api/bot/start", headers=await live_ok.h2fa())
+    assert res.status_code == 409 and [d["id"] for d in res.json()["detail"]] == ["release"]
+    assert r.desired == "stopped"
+    monkeypatch.setattr(pf, "run_preflight", _ready(failed=("kill_switch", "snapshot")))
+    res = await live_ok.client.post("/api/bot/start", headers=await live_ok.h2fa())
+    assert res.status_code == 200, res.text
+
+
+async def test_l1_arbitrage_live_rechecks_the_preflight(live_ok, monkeypatch):
+    live_ok.runner.arming = {**live_ok.runner.arming, "arbitrage": True}
+    monkeypatch.setattr(pf, "run_preflight", _ready(failed=("clock",)))
+    r = await live_ok.client.put("/api/arb", json={"enabled": True, "live": True, "confirm": "LIVE"},
+                                 headers=await live_ok.h2fa())
+    assert r.status_code == 409 and live_ok.runner.arb_mode == "demo"
+
+
+async def test_l1_demo_mode_stop_and_disarm_are_never_rechecked(live_ok, monkeypatch):
+    called = []
+
+    async def spy(target, **kw):
+        called.append(target)
+        return {"ready": False, "checks": []}
+    monkeypatch.setattr(pf, "run_preflight", spy)
+    assert (await live_ok.client.put("/api/mode", headers=await live_ok.h2fa(),
+                                     json={"mode": "demo"})).status_code == 200
+    assert (await live_ok.client.post("/api/bot/stop", headers=live_ok.auth)).status_code == 200
+    assert (await _put(live_ok, {"strategy": "maker", "armed": False}, two_fa=False)).status_code == 200
+    assert called == []
+
+
+async def test_disarm_rate_limit_is_generous_and_separate_from_stop(live_ok):
+    for _ in range(30):
+        assert (await _put(live_ok, {"strategy": "arbitrage", "armed": False}, two_fa=False)).status_code == 200
+    r = await _put(live_ok, {"strategy": "arbitrage", "armed": False}, two_fa=False)
+    assert r.status_code == 429
+    assert (await live_ok.client.post("/api/bot/stop", headers=live_ok.auth)).status_code == 200
+
+
+async def test_l3_repeated_disarm_alerts_are_not_grouped(env):
+    r = env.runner
+    for _ in range(2):
+        await r.set_armed("maker", False, by="owner")
+        for t in list(r._bg):
+            await t
+    assert sum(1 for a in r.alerter.sent if a["title"] == "Maker disarmed") == 2
+
+
+async def test_l3_unconfirmed_alerts_for_two_events_are_both_sent(env):
+    r = env.runner
+    for ev in ("KXDEMOA-1", "KXDEMOA-2"):
+        await r._send_throttled("Arbitrage order state unconfirmed", f"{ev}: x", priority="default",
+                                key=f"unconfirmed@{ev}")
+    assert sum(1 for a in r.alerter.sent if a["title"] == "Arbitrage order state unconfirmed") == 2

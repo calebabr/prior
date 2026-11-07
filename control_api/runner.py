@@ -564,6 +564,8 @@ class Runner:
         self.arming: dict = armsvc.default()
         self._disarm_pending: set[str] = set()
         self._disarm_cancel: asyncio.Future | None = None
+        self._disarm_gen: dict[str, int] = {x: 0 for x in armsvc.STRATEGIES}   # M-1: bumped by every disarm
+        self._arming_lock = asyncio.Lock()                                       # M-1: serializes arming writes
         # item 14: daily Kalshi reconciliation (local date of the last run; also kept in alerts_state)
         self._recon_day: str | None = None
         self._recon_task: asyncio.Task | None = None
@@ -3063,9 +3065,11 @@ class Runner:
                     await self._send_legging_alert(op, executed, note)
                 elif note.get("type") == "unconfirmed":
                     if stored:                       # at most once per event and reason per hour, like its log row
-                        await self.alerter.send("Arbitrage order state unconfirmed",
-                                                f"{op.event}: {executed}. A first leg may have filled; check "
-                                                "positions.")
+                        # L-3: keyed per event, so another event's alert is never held back by the grouper
+                        await self._send_throttled("Arbitrage order state unconfirmed",
+                                                   f"{op.event}: {executed}. A first leg may have filled; check "
+                                                   "positions.", priority="default",
+                                                   key=f"unconfirmed@{str(op.event)[:80]}")
                 elif executed.startswith(("PARTIAL", "ERROR")):
                     await self._send_legging_alert(op, executed, None)
                 elif executed.startswith("FILLED"):
@@ -3435,52 +3439,97 @@ class Runner:
                 self.arming = {**self.arming, s: False, "updated": stored["updated"], "by": stored["by"]}
                 log.warning("%s disarmed in the store (by %s): adopted", s, (stored["by"] or "?")[:64])
 
-    async def set_armed(self, strategy: str, armed: bool, *, by: str) -> dict:
-        """Arm or disarm one strategy for LIVE. Arming: runner enabled + live gates, then the store write, then
-        memory (fail safe: a store error raises and nothing is armed). The route has already checked fresh 2FA and
-        the preflight. Disarming: memory first (in force at once), then the store write (bounded), then the maker's
-        resting mm- orders in LIVE are cancelled on Stop's pool. Disarm never raises (ValueError for a bad name)."""
+    def disarm_generation(self, strategy: str) -> int:
+        """M-1: bumped by every disarm of `strategy`. The arming route reads it BEFORE its preflight and passes it to
+        set_armed, so a disarm at any point after that refuses the arm."""
+        return int(self._disarm_gen.get(armsvc.check_strategy(strategy), 0))
+
+    async def _stored_arming(self) -> dict:
+        cs = await asyncio.wait_for(self.store.get_cloud_settings(), 5)
+        return armsvc.normalize((cs or {}).get(armsvc.CLOUD_KEY))
+
+    def _arming_alert(self, title: str, body: str, priority: str, key: str) -> None:
+        """L-3: arming alerts carry a per-send group key, so a repeat (a second disarm) is never held back."""
+        with contextlib.suppress(Exception):
+            self._spawn(self._send_throttled(title, body, priority=priority, key=key))
+
+    async def set_armed(self, strategy: str, armed: bool, *, by: str, disarm_gen: int | None = None) -> dict:
+        """Arm or disarm one strategy for LIVE (the route has already checked fresh 2FA and the preflight).
+
+        M-1 (security review 2B): every store write of the arming doc is serialized by `_arming_lock` and is a
+        read-modify-write of the LATEST stored doc that changes only this strategy's flag.
+        * Arm: refused (PermissionError "disarmed_meanwhile") when this strategy was disarmed since `disarm_gen`
+          (the route's value from before its preflight), checked under the lock before the write and again after
+          it; a disarm that landed during the write gets a compensating "not armed" write. Memory changes only for
+          this strategy and only after the write. A store error raises: nothing is armed.
+        * Disarm: in force in memory at once (before any lock or await), the maker's resting LIVE mm- orders are
+          cancelled on Stop's pool (single-flight) while the store write waits for the lock. A failed write leaves
+          the flag disarmed here (re-applied over later reads). Never raises (ValueError for a bad name)."""
         s = armsvc.check_strategy(strategy)
         who = str(by or "user")[:armsvc.BY_MAX]
         now = iso(utcnow())
         if armed:
+            gen0 = self.disarm_generation(s) if disarm_gen is None else int(disarm_gen)
             if not self.settings.runner_enabled:
                 raise RunnerDisabled("runner_disabled")
             if not self.live_allowed():
                 raise PermissionError(self.live_block_reason() or "live_not_allowed")
-            doc = {**self._arming_doc(), s: True, "updated": now, "by": who}
-            await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: doc}, by=who), 5)
-            self._disarm_pending.discard(s)
-            self._apply_arming(doc)
-            with contextlib.suppress(Exception):
-                self._spawn(self.alerter.send(f"{s.capitalize()} armed for LIVE",
-                                              f"{s} may trade in live mode; armed by {who}", priority="urgent"))
+            async with self._arming_lock:
+                if self.disarm_generation(s) != gen0:
+                    raise PermissionError("disarmed_meanwhile")
+                stored = await self._stored_arming()            # raises: not armed (fail safe)
+                doc = {x: (stored[x] and x not in self._disarm_pending) for x in armsvc.STRATEGIES}
+                doc.update({s: True, "updated": now, "by": who})
+                await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: doc}, by=who), 5)
+                if self.disarm_generation(s) != gen0:           # a disarm landed during our write: undo ours
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self.store.save_cloud_settings(
+                            {armsvc.CLOUD_KEY: {**doc, s: False, "by": "disarm-wins"}}, by="disarm-wins"), 5)
+                    raise PermissionError("disarmed_meanwhile")
+                self._disarm_pending.discard(s)
+                self.arming = {**self.arming, s: True, "updated": now, "by": who}
+            self._arming_alert(f"{s.capitalize()} armed for LIVE", f"{s} may trade in live mode; armed by {who}",
+                               "urgent", f"arming@{s}@{now}")
             return {"strategy": s, "armed": self.armed(s), "persisted": True, "cancelled": 0, "errors": []}
-        errors: list[str] = []
+        # ---- disarm: memory first, no await before this point
+        self._disarm_gen[s] = self.disarm_generation(s) + 1
+        gen = self._disarm_gen[s]
         self._disarm_pending.add(s)
         self.arming = {**self.arming, s: False, "updated": now, "by": who}
-        persisted = False
-        try:
-            await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: self._arming_doc()}, by=who), 5)
-            self._disarm_pending.discard(s)
-            persisted = True
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"store: {type(e).__name__} (disarmed in this process)")
-            log.error("disarm not persisted: %s", type(e).__name__)
-        cancelled = 0
+        errors: list[str] = []
+        cancel = None
         if s == "maker" and self.mode == "live":
             # the same cancel Stop makes (Stop's own pool, bounded); arbitrage sets are immediate-or-cancel.
             # Single-flight: repeated disarms never hold more than one of Stop's workers, so Stop is never slowed.
             if self._disarm_cancel is None or self._disarm_cancel.done():
                 self._disarm_cancel = asyncio.ensure_future(
                     self._best_effort_cancel("live", f"maker disarmed by {who}"))
-                cancelled = await asyncio.shield(self._disarm_cancel)
+                cancel = self._disarm_cancel
             else:
                 errors.append("cancel: already running")
-        with contextlib.suppress(Exception):
-            self._spawn(self.alerter.send(f"{s.capitalize()} disarmed",
-                                          f"{s} will not trade in live mode; disarmed by {who}; cancelled "
-                                          f"{cancelled}" + (f"; errors {errors}" if errors else ""), priority="high"))
+        persisted = False
+        try:
+            async with self._arming_lock:                       # behind an in-flight arm (bounded); memory is set
+                try:
+                    stored = await self._stored_arming()
+                except Exception:  # noqa: BLE001   (write what this process knows; this flag is False either way)
+                    stored = armsvc.normalize(self._arming_doc())
+                doc = {x: (stored[x] and x not in self._disarm_pending) for x in armsvc.STRATEGIES}
+                doc.update({s: False, "updated": now, "by": who})
+                await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: doc}, by=who), 5)
+                if self.disarm_generation(s) == gen:
+                    self._disarm_pending.discard(s)
+                persisted = True
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"store: {type(e).__name__} (disarmed in this process)")
+            log.error("disarm not persisted: %s", type(e).__name__)
+        cancelled = 0
+        if cancel is not None:
+            with contextlib.suppress(Exception):
+                cancelled = await asyncio.shield(cancel)
+        self._arming_alert(f"{s.capitalize()} disarmed",
+                           f"{s} will not trade in live mode; disarmed by {who}; cancelled {cancelled}"
+                           + (f"; errors {errors}" if errors else ""), "high", f"arming@{s}@{now}@{gen}")
         return {"strategy": s, "armed": False, "persisted": persisted, "cancelled": cancelled, "errors": errors}
 
     def status(self) -> dict:

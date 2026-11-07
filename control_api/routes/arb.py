@@ -145,6 +145,10 @@ async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> 
         why = r.live_block_reason() or "live_not_allowed"     # strategy_not_installed on the public stand-in
         await audit(request, "arb.live", ok=False, user=user, details={"error": why})
         raise HTTPException(409, why)
+    if live is True and r.arb_mode != "live":
+        # L-1: switching arbitrage live re-runs the go-live preflight (409 with the failing checks)
+        from .arming import live_recheck
+        await live_recheck(request, user=user, action="arb.live")
 
     if new_cfg is not None and new_cfg != r.arb_settings():
         before = dict(r.config or {})

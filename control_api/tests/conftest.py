@@ -261,3 +261,14 @@ class BrokenStore:
         async def boom(*a, **k):
             raise RuntimeError("atlas down")
         return boom
+
+
+async def ready_preflight(target, **kw):
+    """A go-live preflight that is ready (S3 L-1 recheck at live mode / live Start / arbitrage live)."""
+    return {"ready": True, "target": target, "ts": "test",
+            "checks": [{"id": "keys", "label": "Keys", "status": "pass", "detail": ""}]}
+
+
+def preflight_ready(monkeypatch):
+    from control_api.services import preflight as pf
+    monkeypatch.setattr(pf, "run_preflight", ready_preflight)

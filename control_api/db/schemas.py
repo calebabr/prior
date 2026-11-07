@@ -36,6 +36,7 @@ QUOTE_EPISODES = "quote_episodes"
 ALERT_HISTORY = "alert_history"
 PERIODS = "periods"
 CASH_FLOWS = "cash_flows"
+RECON_REPORTS = "recon_reports"
 PUSH_SUBSCRIPTIONS = "push_subscriptions"
 # Release process (Sprint 1): leader lease, signed-handover replay guard, schema marker, pending releases.
 RUNNER_LEASE = "runner_lease"
@@ -52,7 +53,13 @@ RELEASE_DECISIONS = ("approved", "rejected")
 COLLECTIONS = (STATE, CLOUD_SETTINGS, CONFIG_VERSIONS, HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS,
                FILLS, MONITOR_SUMMARIES, AUDIT_LOG, USERS, REVOKED_TOKENS, SETTLEMENTS, ARB_OPPORTUNITIES,
                QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES,
-               SHADOW_EPISODES, SHADOW_PASSES, PERIODS, CASH_FLOWS)
+               SHADOW_EPISODES, SHADOW_PASSES, PERIODS, CASH_FLOWS, RECON_REPORTS)
+
+# Daily reconciliation against Kalshi (services/kalshi_recon.py): one report per (mode, local day), replaced when the
+# same day is checked again. Read-only data about the books; no secrets. Additive change: SCHEMA_VERSION stays 1.
+RECON_RETENTION_DAYS = 90
+RECON_RETENTION_SECONDS = RECON_RETENTION_DAYS * 24 * 3600
+RECON_DIFFS_MAX = 500                     # differences kept per report (the rest is counted, not stored)
 
 # Performance periods and cash flows (Sprint 2A-1). Both small, permanent (no TTL), append-style.
 # Period 1 is IMPLICIT (id "p1", from the start of data to the first marker) and is never stored: a stored marker
@@ -493,6 +500,25 @@ def prepare_alert(doc: dict) -> dict:
     return out
 
 
+def prepare_recon_report(doc: dict) -> dict:
+    """recon_reports doc: the report as given plus `ts` (from `checked_at`, else now). Keyed on (mode, day).
+    ValueError for a bad mode or day, or a secret-looking top-level field. Differences beyond RECON_DIFFS_MAX are
+    dropped (`differences_truncated` counts them)."""
+    import re
+    if doc.get("mode") not in MODE_VALUES:
+        raise ValueError(f"recon report mode must be one of {MODE_VALUES}")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(doc.get("day") or "")):
+        raise ValueError("recon report day must be YYYY-MM-DD")
+    check_no_secrets(doc)
+    out = prepare_ts_doc(dict(doc), ts_fallbacks=("checked_at",))
+    diffs = out.get("differences")
+    diffs = diffs if isinstance(diffs, list) else []
+    out["differences"] = diffs[:RECON_DIFFS_MAX]
+    out["differences_truncated"] = max(0, len(diffs) - RECON_DIFFS_MAX)
+    out["ok"] = bool(out.get("ok"))
+    return out
+
+
 def push_sub_id(endpoint: str) -> str:
     return hashlib.sha256(str(endpoint).encode("utf-8")).hexdigest()
 
@@ -536,6 +562,9 @@ PERIOD_DOC = {"id": "str (unique)", "name": "str 1-60", "started_at": "datetime 
               "note": "str <= 200 | None", "created_by": "str"}
 CASH_FLOW_DOC = {"id": "str (unique)", "ts": "datetime (indexed; no TTL)", "kind": "deposit|withdrawal",
                  "amount": "float, 0 < x <= 100000", "note": "str <= 200 | None", "created_by": "str"}
+RECON_REPORT_DOC = {"mode": "demo|live", "day": "YYYY-MM-DD (local day checked)", "ts": "datetime (checked_at; TTL 90 d)",
+                    "ok": "bool", "checked_at": "iso str", "differences": "[{kind, id, store_value, kalshi_value, delta, "
+                    "severity}] (<= 500)", "differences_truncated": "int", "totals": "dict", "...": "tz, tolerance"}
 PUSH_SUBSCRIPTION_DOC = {"sub_id": "sha256(endpoint) (unique)", "endpoint": "https URL (sensitive)",
                          "p256dh": "b64url (sensitive)", "auth": "b64url (sensitive)", "ua": "str",
                          "created_utc": "datetime"}

@@ -260,6 +260,23 @@ class Store(abc.ABC):
         """Remove one cash flow (typo undo). True if it existed."""
         raise NotImplementedError
 
+    # ---- daily Kalshi reconciliation (services/kalshi_recon.py). Not abstract; the defaults store nothing, so older
+    # test fakes keep working. MemoryStore and MongoStore implement them.
+    async def save_recon_report(self, doc: dict) -> dict | None:
+        """Replace the report for (doc['mode'], doc['day']) (schemas.prepare_recon_report; upsert, so a rerun of the
+        same day+mode never adds a second one). Returns the stored doc, or None when the store keeps no reports.
+        ValueError on a bad mode/day."""
+        return None
+
+    async def latest_recon_report(self, mode: str | None = None) -> dict | None:
+        """The report with the newest day (ties: newest check), optionally for one mode. None if there is none."""
+        return None
+
+    async def list_recon_reports(self, *, since_day: str | None = None, mode: str | None = None,
+                                 limit: int = 100) -> list[dict]:
+        """Reports with day >= since_day ('YYYY-MM-DD'), optionally one mode, newest day first (ties: newest check)."""
+        return []
+
     async def save_push_subscription(self, doc: dict) -> bool:
         """Upsert on sub_id (= sha256(endpoint)). Returns True if new. Raises ValueError when the
         PUSH_SUBSCRIPTIONS_MAX cap would be exceeded by a new one."""
@@ -476,6 +493,7 @@ class MemoryStore(Store):
         self._alerts: list[dict] = []
         self._periods: dict[str, dict] = {}          # id -> doc
         self._cash_flows: dict[str, dict] = {}       # id -> doc
+        self._recon: dict[tuple[str, str], dict] = {}   # (mode, day) -> report
         self._shadow_eps: dict[str, dict] = {}       # ep_id -> doc
         self._shadow_passes: list[dict] = []
         self._shadow_summary: dict | None = None
@@ -862,6 +880,25 @@ class MemoryStore(Store):
     async def delete_cash_flow(self, id: str) -> bool:
         async with self._lock:
             return self._cash_flows.pop(str(id), None) is not None
+
+    async def save_recon_report(self, doc: dict) -> dict | None:
+        d = S.prepare_recon_report(doc)
+        async with self._lock:
+            self._recon[(d["mode"], d["day"])] = self._stamp(d)
+        return self._clean(d)
+
+    def _recon_sorted(self, mode: str | None, since_day: str | None) -> list[dict]:
+        docs = [d for d in self._recon.values() if (mode is None or d["mode"] == mode)
+                and (since_day is None or d["day"] >= since_day)]
+        return sorted(docs, key=lambda d: (d["day"], d["ts"], d.get("\x00seq", 0)), reverse=True)
+
+    async def latest_recon_report(self, mode: str | None = None) -> dict | None:
+        docs = self._recon_sorted(mode, None)
+        return self._clean(docs[0]) if docs else None
+
+    async def list_recon_reports(self, *, since_day: str | None = None, mode: str | None = None,
+                                 limit: int = 100) -> list[dict]:
+        return [self._clean(d) for d in self._recon_sorted(mode, since_day)[:max(0, int(limit))]]
 
     async def save_push_subscription(self, doc: dict) -> bool:
         d = S.prepare_push_subscription(doc)

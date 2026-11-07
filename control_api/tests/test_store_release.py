@@ -434,7 +434,7 @@ def _no_naive(o):
 
 async def test_fixture_files_exist_for_every_pre_release_collection():
     new = {S.RUNNER_LEASE, S.HANDOVER_NONCES, S.META, S.RELEASES, S.SHADOW_EPISODES, S.SHADOW_PASSES,
-           S.PERIODS, S.CASH_FLOWS}
+           S.PERIODS, S.CASH_FLOWS, S.RECON_REPORTS}
     for name in set(S.COLLECTIONS) - new:
         assert (FIX / f"{name}.json").is_file(), name
     text = "".join(p.read_text(encoding="utf-8") for p in FIX.glob("*.json"))

@@ -61,7 +61,9 @@ def release_timing_from(g) -> dict:
     return {"lease_ttl_s": ttl,
             "lease_renew_s": _num(g("LEASE_RENEW_S"), 20.0, 1.0, ttl / 3),
             "pass_budget_s": _num(g("PASS_BUDGET_S"), 25.0, 1.0, ttl / 2 - 1),
-            "shutdown_delay_s": _num(g("SHUTDOWN_DELAY_S"), 120.0, 30.0, 300.0),
+            # Render's default SIGTERM-to-SIGKILL window is 30 s and the free plan cannot raise it (item 11). Set
+            # SHUTDOWN_DELAY_S only on a paid plan whose maxShutdownDelaySeconds really is larger.
+            "shutdown_delay_s": _num(g("SHUTDOWN_DELAY_S"), 30.0, 10.0, 300.0),
             "handover_max_age_s": _num(g("HANDOVER_MAX_AGE_S"), 300.0, 30.0, 900.0)}
 
 
@@ -94,7 +96,7 @@ class Settings:
     lease_ttl_s: float = 60.0
     lease_renew_s: float = 20.0
     pass_budget_s: float = 25.0
-    shutdown_delay_s: float = 120.0          # Render's maxShutdownDelaySeconds (render.yaml); informational here
+    shutdown_delay_s: float = 30.0           # Render's shutdown window (default 30 s; free plan): sizes the runner's shutdown
     handover_max_age_s: float = 300.0
     handover_hmac_key: str | None = None     # < 32 bytes or missing: signed handover disabled (always demo)
     deploy_status_key: str | None = None     # GET /api/deploy/status; unset -> 401

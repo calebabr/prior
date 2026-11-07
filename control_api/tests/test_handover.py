@@ -291,8 +291,13 @@ async def test_overrunning_pass_keeps_the_lease(settings, bot_paths, kalshi, mon
 
 @pytest.mark.asyncio
 async def test_shutdown_budget_inside_render_delay(settings):
+    """Item 11: the default window is Render's 30 s (free plan); uvicorn's drain and a margin come out of it."""
+    from control_api import runner as rn
     r = Runner(settings, MemoryStore())
-    assert r.shutdown_budget_s() <= settings.shutdown_delay_s - 30
+    assert settings.shutdown_delay_s == rn.RENDER_SHUTDOWN_WINDOW_S == 30
+    assert r.shutdown_budget_s() + rn.UVICORN_GRACEFUL_S + rn.SHUTDOWN_MARGIN_S <= 30
+    assert r.shutdown_budget_s() == 22
+    assert r.shutdown_order_wait_s() + rn.SHUTDOWN_STORE_TIMEOUT_S + rn.SHUTDOWN_RESERVE_S <= r.shutdown_budget_s()
     assert r.pass_budget_s == 25 and r.lease.ttl_s == 60 and r.lease.renew_s == 20
 
 

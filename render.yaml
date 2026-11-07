@@ -24,13 +24,14 @@ services:
     # workflow (.github/workflows/release.yml), which calls this service's deploy hook with the approved commit.
     autoDeployTrigger: "off"
     # Render's free plan rejects maxShutdownDelaySeconds (it is a paid-plan setting), so the old instance gets Render's
-    # default window after SIGTERM. A slower shutdown is covered by the successor's takeover cancel; planned LIVE
-    # handover needs a paid plan with maxShutdownDelaySeconds: 120 (see docs/RELEASE_PROCESS.md).
+    # default 30 s window after SIGTERM. The runner's shutdown is sized to fit it (runner.RENDER_SHUTDOWN_WINDOW_S):
+    # uvicorn drains requests for at most 5 s (--timeout-graceful-shutdown, = runner.UVICORN_GRACEFUL_S), then the
+    # runner finishes the order step, flushes the journal and releases the lease within 22 s (docs/RELEASE_PROCESS.md).
     # scripts/render_build.sh: hash-pinned pip install (pip refuses any file whose sha256 is not in
     # requirements.txt), then the optional private-strategy overlay (only when PRIVATE_REPO_TOKEN is set; without
     # it the build succeeds as a demo-only build and live mode is refused), then prints IS_STANDIN=True/False.
     buildCommand: "bash scripts/render_build.sh"
-    startCommand: uvicorn control_api.main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-graceful-shutdown 30
+    startCommand: uvicorn control_api.main:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-graceful-shutdown 5
     healthCheckPath: /healthz
     # Only matters if auto-deploy is ever switched back on: don't redeploy for docs-only commits.
     buildFilter:

@@ -104,6 +104,7 @@ async def test_arb_execution_is_fenced(settings, bot_paths, kalshi, real_strateg
     r = _runner(settings, MemoryStore(), kalshi)
     await r.rehydrate()
     r.arb_desired, r.arb_mode = "running", "live"
+    r.arming["arbitrage"] = True                 # S3 item 10: live arbitrage needs arming
     gen = r._stop_gen
     assert r._arb_live_ok(gen)
     r.lease.last_renew_mono -= r.lease.ttl_s

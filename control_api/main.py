@@ -47,7 +47,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
             yield
         finally:
             # R2: on SIGTERM uvicorn runs this; the runner finishes its order step, persists, hands over and
-            # releases the lease well inside Render's 120 s shutdown delay. Never raises.
+            # releases the lease inside Render's default 30 s window (runner.shutdown_budget_s). Never raises.
             await runner.shutdown()
             with contextlib.suppress(Exception):
                 await store.close()
@@ -81,6 +81,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
         app.include_router(mod.router)
     app.include_router(__import__("control_api.routes.preflight", fromlist=["router"]).router)
     app.include_router(__import__("control_api.routes.dayview", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.arming", fromlist=["router"]).router)
     return app
 
 

@@ -376,3 +376,55 @@ async def test_unit_release_match_rules():
 async def test_unit_unknown_target_raises():
     with pytest.raises(ValueError):
         await pf.run_preflight("prod", runner=None, store=None, settings=None)
+
+
+# ------------------------------------------------------------------ lead decision 2026-11-07: arming while in demo
+async def test_live_target_in_demo_mode_warns_on_a_fresh_demo_snapshot(ready_env):
+    ready_env.runner.mode = "demo"
+    ready_env.store._snapshots.clear()
+    await ready_env.store.add_account_snapshot({"ts": datetime.now(timezone.utc), "cash": 1.0, "exposure": 0.0,
+                                                "env": "demo"})
+    body = (await _get(ready_env, "live")).json()
+    snap = _by_id(body)["snapshot"]
+    assert snap["status"] == "warn", snap
+    assert snap["detail"].startswith(pf.LIVE_SNAPSHOT_PENDING)
+    assert pf.LIVE_SNAPSHOT_PENDING == "live-tagged snapshot appears after the first live pass; verify then"
+    assert body["ready"] is True, [c for c in body["checks"] if c["status"] == "fail"]
+
+
+@pytest.mark.parametrize("mins,tag", [(30, "demo"), (21, "live")])     # untagged: unit test (the store tags)
+async def test_live_target_in_demo_mode_still_needs_a_fresh_tagged_snapshot(ready_env, mins, tag):
+    ready_env.runner.mode = "demo"
+    ready_env.store._snapshots.clear()
+    await ready_env.store.add_account_snapshot({"ts": datetime.now(timezone.utc) - timedelta(minutes=mins),
+                                                "cash": 1.0, "exposure": 0.0, "env": tag})
+    body = (await _get(ready_env, "live")).json()
+    assert _by_id(body)["snapshot"]["status"] == "fail" and body["ready"] is False
+
+
+async def test_live_target_in_demo_mode_with_no_snapshot_fails(ready_env):
+    ready_env.runner.mode = "demo"
+    ready_env.store._snapshots.clear()
+    body = (await _get(ready_env, "live")).json()
+    assert _by_id(body)["snapshot"]["status"] == "fail" and body["ready"] is False
+
+
+@pytest.mark.parametrize("mins,tag", [(30, "live"), (2, "demo")])
+async def test_live_target_in_live_mode_fails_on_stale_or_demo_snapshot(ready_env, mins, tag):
+    ready_env.store._snapshots.clear()
+    await ready_env.store.add_account_snapshot({"ts": datetime.now(timezone.utc) - timedelta(minutes=mins),
+                                                "cash": 1.0, "exposure": 0.0, "env": tag})
+    body = (await _get(ready_env, "live")).json()
+    assert ready_env.runner.mode == "live"
+    assert _by_id(body)["snapshot"]["status"] == "fail" and body["ready"] is False
+
+
+def test_unit_check_snapshot_rules():
+    now = datetime.now(timezone.utc)
+    fresh = {"ts": now - timedelta(minutes=1)}
+    assert pf.check_snapshot({**fresh, "env": "demo"}, "demo", "live", now)[0] == "warn"
+    assert pf.check_snapshot({**fresh, "env": "live"}, "live", "live", now)[0] == "pass"
+    assert pf.check_snapshot({**fresh, "env": "demo"}, "live", "live", now)[0] == "fail"
+    assert pf.check_snapshot({**fresh, "env": "demo"}, "demo", "demo", now)[0] == "pass"
+    assert pf.check_snapshot({**fresh, "env": "live"}, "demo", "demo", now)[0] == "fail"
+    assert pf.check_snapshot({**fresh}, "demo", "live", now)[0] == "fail"

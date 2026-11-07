@@ -17,6 +17,7 @@ def _arm_live(env, monkeypatch):
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(env.settings, "prod_keys_present", True)
     monkeypatch.setattr(env.settings, "live_confirm_ok", True)
+    env.runner.arming["arbitrage"] = True       # S3 item 10: live arbitrage also needs the strategy armed
 
 
 class FakePublic:

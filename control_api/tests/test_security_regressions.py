@@ -37,6 +37,8 @@ NO_2FA = {
     ("DELETE", "/api/push/subscriptions"): "S-33: only stops notifications to every device; defensive, no trading effect",
     ("POST", "/api/push/test"): "UX 45: sends a test notification; rate limited",
     ("PUT", "/api/trades/{fill_id}/note"): "UX Y5: display-only journal note on a fill; rate limited, audited",
+    ("PUT", "/api/arming"): "S3 item 10: disarming only removes risk (no 2FA, like Stop); armed=true demands fresh "
+                            "2FA inside the route (test_arming.py)",
 }
 
 

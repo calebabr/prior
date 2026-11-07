@@ -218,6 +218,7 @@ async def test_never_in_live_mode(cenv, monkeypatch, real_strategy):
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(cenv.settings, "prod_keys_present", True)
     monkeypatch.setattr(cenv.settings, "live_confirm_ok", True)
+    cenv.runner.arming["arbitrage"] = True     # S3 item 10: live arbitrage needs arming
     r = await _put(cenv, {"enabled": True, "live": True, "confirm": "LIVE", "arb_complete_legs": True})
     assert r.status_code == 200
     cenv.trader.base_url = PROD_URL

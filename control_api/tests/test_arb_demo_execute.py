@@ -379,6 +379,7 @@ async def test_live_arb_goes_through_the_same_gate(demo_env, monkeypatch, real_s
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(demo_env.settings, "prod_keys_present", True)
     monkeypatch.setattr(demo_env.settings, "live_confirm_ok", True)
+    demo_env.runner.arming["arbitrage"] = True     # S3 item 10: live arbitrage needs arming
     r = await _put(demo_env, {"enabled": True, "live": True, "confirm": "LIVE", "arb_scan_cap": 2})
     assert r.status_code == 200 and r.json()["status"]["demo_execute"] is False
     demo_env.trader.base_url = PROD_URL

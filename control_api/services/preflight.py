@@ -205,6 +205,9 @@ def check_clock(kalshi_skew_local_minus_server: float | None, store_time: dateti
     return _res(PASS, f"skew {skew:+.1f} s against the {source} clock")
 
 
+LIVE_SNAPSHOT_PENDING = "live-tagged snapshot appears after the first live pass; verify then"
+
+
 def check_snapshot(snap: dict | None, expected_env: str, target: str, now: datetime) -> tuple[str, str]:
     if not snap:
         return _res(FAIL, "no account snapshot stored")
@@ -216,6 +219,12 @@ def check_snapshot(snap: dict | None, expected_env: str, target: str, now: datet
     parts = [f"latest snapshot {int(age // 60)} min old, env tag {env}"]
     if age > SNAPSHOT_FRESH_S:
         return _res(FAIL, parts[0] + "; older than 20 min (is the bot running?)")
+    if env not in TARGETS:
+        return _res(FAIL, parts[0] + "; the snapshot carries no env tag")
+    if target == "live" and expected_env == "demo" and env != "live":
+        # lead decision 2026-11-07: arming happens while the mode is still demo, so no live-tagged snapshot can exist
+        # yet. A fresh, tagged snapshot is required; the live tag is verified once the mode is live (then: fail).
+        return _res(WARN, LIVE_SNAPSHOT_PENDING + f" ({parts[0]})")
     if env != expected_env:
         return _res(FAIL, parts[0] + f"; expected {expected_env} (the current mode)")
     if expected_env != target:

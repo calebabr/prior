@@ -436,6 +436,7 @@ async def test_never_in_live_even_with_the_setting_on(denv, monkeypatch, real_st
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(denv.settings, "prod_keys_present", True)
     monkeypatch.setattr(denv.settings, "live_confirm_ok", True)
+    denv.runner.arming["arbitrage"] = True     # S3 item 10: live arbitrage needs arming
     r = await _put(denv, {"enabled": True, "live": True, "confirm": "LIVE", "arb_complete_legs": True,
                           "arb_demo_execute": True})
     assert r.status_code == 200 and r.json()["status"]["state"] == "live"
@@ -730,6 +731,7 @@ async def test_opposite_gate_applies_to_live(denv, monkeypatch, real_strategy):
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(denv.settings, "prod_keys_present", True)
     monkeypatch.setattr(denv.settings, "live_confirm_ok", True)
+    denv.runner.arming["arbitrage"] = True     # S3 item 10: live arbitrage needs arming
     await denv.store.add_arb_opportunity(_doc(EV0, "YES", "FILLED {}", mode="live"))
     r = await _put(denv, {"enabled": True, "live": True, "confirm": "LIVE"})
     assert r.status_code == 200

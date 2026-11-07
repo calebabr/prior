@@ -74,7 +74,8 @@ CASH_FLOW_MAX = 100000.0
 # No secrets (title/body are redacted before they get here); body capped at ALERT_BODY_MAX chars.
 ALERT_RETENTION_DAYS = 90
 ALERT_RETENTION_SECONDS = ALERT_RETENTION_DAYS * 24 * 3600
-ALERT_TYPES = ("fill", "settled", "daily", "error", "stop", "breaker", "test", "system")
+ALERT_TYPES = ("fill", "settled", "daily", "error", "stop", "breaker", "test", "system",
+               "weekly", "arb_legging")    # S3 item 18 weekly summary, item 5 urgent legging alert (additive)
 ALERT_TITLE_MAX = 120
 ALERT_BODY_MAX = 200
 # Web push subscriptions (item 45): sensitive (the endpoint is a bearer capability for pushing to the device).

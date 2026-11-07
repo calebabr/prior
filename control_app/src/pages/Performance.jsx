@@ -9,6 +9,7 @@ import useStrategySummary from '../hooks/useStrategySummary.js';
 import { DASH, NA_TITLE, formatMoney, formatReturn } from '../utils/format.js';
 import { rangeLabel } from '../utils/range.js';
 import { PERFORMANCE_ANALYSIS_PATH } from '../utils/routes.js';
+import { dayPath, todayString } from '../utils/day.js';
 import '../styles/overview.css';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -29,6 +30,7 @@ const plain = (v) => formatMoney(v);
 
 // Links to the other views. Analytics holds the Ledger and Scorecard tabs.
 const LINKS = [
+  { to: null, label: 'Today', blurb: 'Fills, settlements and realized P&L for today', today: true },
   { to: '/analytics', label: 'Analytics', blurb: 'Edge, execution, trades, ledger, scorecard' },
   { to: '/shadow', label: 'Shadow Estimate', blurb: 'Simulated results, no orders' },
   { to: '/performance/periods', label: 'Periods', blurb: 'Periods and cash flows' },
@@ -46,7 +48,9 @@ export default function Performance() {
   const summary = useStrategySummary({ range, status });
   const { strategies, total, manual, errors } = summary;
   const first = summary.loading && strategies.every((s) => s.pnl == null) && !errors.ledger;
-  const links = SHOW_ANALYSIS ? [...LINKS, { to: PERFORMANCE_ANALYSIS_PATH, label: 'Analysis', blurb: '' }] : LINKS;
+  const links = (SHOW_ANALYSIS ? [...LINKS, { to: PERFORMANCE_ANALYSIS_PATH, label: 'Analysis', blurb: '' }] : LINKS).map((l) =>
+    l.today ? { ...l, to: dayPath(todayString()) } : l,
+  );
 
   return (
     <div className="page">

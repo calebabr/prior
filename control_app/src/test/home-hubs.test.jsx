@@ -73,7 +73,9 @@ describe('Performance hub', () => {
     expect(within(table).getByTestId('perf-total')).toHaveTextContent('+$19.52');
     expect(within(table).getByTestId('perf-row-you')).toHaveTextContent('not in the total');
     const links = within(screen.getByTestId('perf-links')).getAllByRole('link');
-    expect(links.map((a) => a.getAttribute('href'))).toEqual(['/analytics', '/shadow', '/performance/periods']);
+    // The first link is the Day view's "Today" row (/performance/day/<today>).
+    expect(links.map((a) => a.getAttribute('href')).slice(1)).toEqual(['/analytics', '/shadow', '/performance/periods']);
+    expect(links[0].getAttribute('href')).toMatch(/^\/performance\/day\/\d{4}-\d{2}-\d{2}$/);
     expect(screen.queryByRole('link', { name: /Analysis/ })).toBeNull();
     expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Performance']);
   });

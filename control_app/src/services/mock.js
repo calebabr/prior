@@ -9,6 +9,7 @@
 //   - any other 6-digit code            -> accepted
 
 import { MOCK_CELLS, mockLedger, mockScorecard, mockArbSummary, analyticsSummary, analyticsTrades, analyticsTradesCsv, mockReturns, mockReturnsFills, mockMyTrades, mockTradeNote } from './mockAnalytics.js';
+import { mockDay } from './mockDay.js';
 import { decorateActivity, resetMockUx, uxRoute } from './mockUx.js';
 
 const SERIES = ['KXDEMOA', 'KXDEMOB', 'KXDEMOC', 'KXDEMOD', 'KXDEMOE', 'KXDEMOF'];
@@ -811,6 +812,10 @@ async function route(method, url, headers, body) {
     const [st, data] = mockReturns(q, { mode: S.mode });
     return reply(st, data);
   }
+  if (method === 'GET' && p === '/api/analytics/day') {
+    const [st, data] = mockDay(q, { mode: S.mode });
+    return reply(st, data);
+  }
   if (method === 'GET' && p === '/api/analytics/returns/fills') {
     const [st, data] = mockReturnsFills(q, { mode: S.mode });
     return reply(st, data);
@@ -976,7 +981,7 @@ async function route(method, url, headers, body) {
     return reply(200, { maker: S.arming.maker, arbitrage: S.arming.arbitrage, live_allowed: S.live_allowed, updated: iso(now()) });
   }
   if (method === 'PUT' && p === '/api/arming') {
-    const bad = check2fa(headers);
+    const bad = body && body.armed === false ? null : check2fa(headers); // disarming needs no 2FA
     if (bad) return bad;
     const st = body && body.strategy;
     if ((st !== 'maker' && st !== 'arbitrage') || typeof body.armed !== 'boolean') return reply(400, { detail: ['strategy and armed are required'] });

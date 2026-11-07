@@ -89,3 +89,8 @@
 @media (prefers-reduced-motion: no-preference) {
   .rt-segs rect { transition: height 120ms ease, y 120ms ease; }
 }
+
+/* Day view entry: Details and Open day sit side by side, 40 px targets */
+.rt-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 6px; }
+.rt-actions .rt-details { margin-top: 0; display: inline-flex; align-items: center; min-height: var(--tap); text-decoration: none; }
+.rt-table th[scope="row"] a { display: inline-flex; align-items: center; min-height: var(--tap); }

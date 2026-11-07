@@ -18,6 +18,7 @@ import Strategies from './pages/Strategies.jsx';
 import StrategyPage from './pages/strategy/StrategyPage.jsx';
 import Performance from './pages/Performance.jsx';
 import PerformancePeriods from './pages/PerformancePeriods.jsx';
+import Day from './pages/Day.jsx';
 import Activity from './pages/Activity.jsx';
 import Health from './pages/Health.jsx';
 import Settings from './pages/Settings.jsx';
@@ -64,6 +65,7 @@ function SignedIn() {
               <Route path="/strategies/:id/controls" element={<StrategyPage view="controls" />} />
               <Route path="/performance" element={<Performance />} />
               <Route path="/performance/periods" element={<PerformancePeriods />} />
+              <Route path="/performance/day/:date" element={<Day />} />
               {/* Reserved slot for the Analysis page (not built): no tab, no link; falls back to the hub. */}
               <Route path={PERFORMANCE_ANALYSIS_PATH} element={<Navigate to="/performance" replace />} />
               {LEGACY_REDIRECTS.map((r) => (

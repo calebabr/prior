@@ -462,6 +462,9 @@ export const api = {
     request('GET', `/api/analytics/returns${query({ granularity, days, env, tz: viewerTimeZone() })}`, { signal }),
   analyticsReturnsFills: ({ granularity = 'day', start, end, days = 30, env, limit = 50, offset = 0 } = {}, { signal } = {}) =>
     request('GET', `/api/analytics/returns/fills${query({ granularity, start, end, days, env, limit, offset, tz: viewerTimeZone() })}`, { signal }),
+  // Day view: one local day of filled / settled / realized. Read-only, no 2FA.
+  analyticsDay: ({ date, strategy, env } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/day${query({ date, strategy: strategy && strategy !== 'all' ? strategy : undefined, env, tz: viewerTimeZone() })}`, { signal }),
   // params: days, env, series, side, kind, status, band, cell, result, limit, offset
   analyticsTrades: (params = {}, { signal } = {}) =>
     request('GET', `/api/analytics/trades${query(params)}`, { signal }),

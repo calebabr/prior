@@ -32,6 +32,12 @@ const SMALL_OK = ['help-icon', 'rt-hit'];
 // Findings accepted as not fixed in this pass, as `${kind}|${route}|${selector prefix}` prefixes. Empty on purpose.
 const KNOWN = [];
 
+function localDate(offsetDays) {
+  const d = new Date(Date.now() + offsetDays * 86400000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 const routes = [
   ...ROUTE_TITLES.map((r) => ({ path: r.path, label: r.path })),
   ...LEGACY_REDIRECTS.map((r) => ({ path: r.from, label: `${r.from} (legacy)` })),
@@ -39,6 +45,9 @@ const routes = [
   { path: '/analytics', label: '/analytics#returns-week', returns: 'Week' },
   { path: '/analytics', label: '/analytics#returns-month', returns: 'Month' },
   { path: '/performance/analysis', label: '/performance/analysis (reserved)' },
+  // Day view: today, and a past day (what a bar tap opens). Home carries the Today card (scanned as '/').
+  { path: `/performance/day/${localDate(0)}`, label: '/performance/day/:date (today)' },
+  { path: `/performance/day/${localDate(-3)}`, label: '/performance/day/:date (past)' },
 ];
 
 /** Runs in the page. Returns raw findings for the current scroll position. */
@@ -309,7 +318,7 @@ for (const theme of THEMES) {
         const tag = `safe${safeTop}`;
         if (safeTop) {
           // page chrome with an inset: the pages that carry actions in the title row
-          for (const p of ['/shadow', '/analytics', '/performance', '/strategies/maker/controls']) {
+          for (const p of ['/shadow', '/analytics', '/performance', '/strategies/maker/controls', `/performance/day/${localDate(0)}`]) {
             await go(p);
             await page.evaluate(() => window.scrollTo(0, 0));
             await page.waitForTimeout(200);
@@ -334,7 +343,7 @@ for (const theme of THEMES) {
           }],
           ['arming-confirm', async () => {
             await go('/arming');
-            await page.getByRole('switch', { name: /maker/i }).click();
+            await page.getByRole('switch', { name: /arbitrage/i }).click();
           }],
           ['live-confirm', async () => {
             await go('/strategies/arb/controls');

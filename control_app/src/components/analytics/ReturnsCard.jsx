@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import Card from '../Card.jsx';
 import Empty from '../Empty.jsx';
 import HelpIcon from '../HelpIcon.jsx';
@@ -12,6 +13,7 @@ import ReturnsTable, { ReturnCell } from './ReturnsTable.jsx';
 import { GRANULARITIES, daysFor, useReturns } from '../../hooks/useReturns.js';
 import { signCls } from '../../utils/analytics.js';
 import { formatMoney, num } from '../../utils/format.js';
+import { dayPath } from '../../utils/day.js';
 import { SMALL_SAMPLE_DEFAULT, isSmall, periodTitle, strategyColor, strategyLabel } from '../../utils/returns.js';
 import '../../styles/returns.css';
 
@@ -48,10 +50,19 @@ function Readout({ period, granularity, onOpen }) {
         {period.partial && period.elapsed_hours != null && <> · {(period.elapsed_hours / 24).toFixed(1)} days elapsed</>}
       </p>
       {isSmall(period) && <p className="hint rt-smallnote">Small sample: fewer than {SMALL_SAMPLE_DEFAULT} settled fills.</p>}
-      {period.settled_fills > 0 && (
-        <button type="button" className="btn small rt-details" onClick={onOpen}>
-          Details
-        </button>
+      {(period.settled_fills > 0 || granularity === 'day') && (
+        <div className="rt-actions">
+          {period.settled_fills > 0 && (
+            <button type="button" className="btn small rt-details" onClick={onOpen}>
+              Details
+            </button>
+          )}
+          {granularity === 'day' && period.start_local && (
+            <Link to={dayPath(period.start_local)} className="btn small rt-details" data-testid="returns-open-day">
+              Open day
+            </Link>
+          )}
+        </div>
       )}
     </div>
   );
@@ -67,6 +78,7 @@ export default function ReturnsCard({ days, env, onUseDays }) {
   const [selected, setSelected] = useState(null);
   const [asTable, setAsTable] = useState(false);
   const [open, setOpen] = useState(null); // period index
+  const navigate = useNavigate();
   const reqDays = daysFor(granularity, days);
   const { data, error, loading, staleAt, reload } = useReturns({ granularity, days: reqDays, env });
 
@@ -113,9 +125,16 @@ export default function ReturnsCard({ days, env, onUseDays }) {
             <>
               {current && <Readout period={current} granularity={granularity} onOpen={() => setOpen(idx)} />}
               {asTable ? (
-                <ReturnsTable periods={periods} granularity={granularity} onOpen={setOpen} />
+                <ReturnsTable periods={periods} granularity={granularity} onOpen={setOpen} dayLink />
               ) : (
-                <ReturnsBars periods={periods} granularity={granularity} selected={idx} onSelect={setSelected} onOpen={setOpen} />
+                <ReturnsBars
+                  periods={periods}
+                  granularity={granularity}
+                  selected={idx}
+                  onSelect={setSelected}
+                  onOpen={setOpen}
+                  onOpenDay={granularity === 'day' ? (i) => periods[i] && navigate(dayPath(periods[i].start_local)) : undefined}
+                />
               )}
               {!asTable && (
                 <ul className="rt-legend" aria-label="Chart key">

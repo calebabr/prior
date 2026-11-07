@@ -80,6 +80,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow, periods, recon):
         app.include_router(mod.router)
     app.include_router(__import__("control_api.routes.preflight", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.dayview", fromlist=["router"]).router)
     return app
 
 

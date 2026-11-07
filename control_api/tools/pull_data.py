@@ -13,7 +13,8 @@ strings redacted) as a second line of defence.
 Output (all datetimes ISO-8601 UTC; read DATA_DICTIONARY.md first):
   SUMMARY.md, DATA_DICTIONARY.md, state.json, journal.csv, fills.csv, fill_pnl.csv, settlements.csv,
   account_snapshots.csv, heartbeats.csv, quote_episodes.csv, arb_opportunities.csv, monitor_summaries.json,
-  config_versions.json, audit.csv, and analytics_summary.json when control_api.services.analytics exists.
+  config_versions.json, audit.csv, decisions.csv (decision recording, one row per pass when it is on), and
+  analytics_summary.json when control_api.services.analytics exists.
   With --shadow also: shadow_episodes.csv and shadow_passes.csv (scrubbed Shadow-mode rows; read-only).
 """
 from __future__ import annotations
@@ -78,6 +79,13 @@ HISTORY_KEYS = {
     "quote_episodes": ("order_id",), "arb_opportunities": ("sig", "ts"), "account_snapshots": ("ts",),
     "heartbeats": ("ts",),
 }
+# Decision recording (strategy config `record_decisions`, off by default): journal rows with event "decision_pass"
+# carry a compact JSON note; decisions.csv flattens it, one row per pass, and keeps its own history file.
+DECISION_EVENT = "decision_pass"
+DECISION_HISTORY_KEYS = {"decisions": ("row_hash",)}
+DECISION_FLAT = ("reasons", "cfg", "caps", "state", "orders", "write_errors", "other")   # -> "<parent>.<child>"
+DECISION_SCALARS = ("v", "t0", "live", "n_markets", "n_cand", "n_items", "dropped", "rec_errors", "overflow")
+DECISION_JSON = ("series_failed", "ttc", "by_series", "items")                         # -> JSON strings
 ARCHIVE_KEEP = 90                          # dated archive folders kept
 _ARCHIVE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Nested dicts flattened one level into "parent.child" columns (everything else nested -> JSON string).
@@ -259,6 +267,39 @@ def fill_pnl_rows(fills: list[dict], settlements: list[dict]) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- derived: decision recording
+def decision_rows(journal: list[dict]) -> list[dict]:
+    """One flat row per `decision_pass` journal row: the JSON note's scalar fields, its small objects as
+    "<parent>.<child>" columns (reason counts, parameters, caps, state, order counts) and its lists as JSON strings.
+    A note that is not a JSON object is kept as `parse_error` = true with no other fields. Pure; never raises."""
+    out = []
+    for r in journal:
+        if str(r.get("event") or "") != DECISION_EVENT:
+            continue
+        row = {"ts": r.get("ts") or r.get("utc"), "row_hash": r.get("row_hash")}
+        try:
+            note = json.loads(r.get("note") or "")
+        except (TypeError, ValueError):
+            note = None
+        if not isinstance(note, dict):
+            row["parse_error"] = True
+            out.append(row)
+            continue
+        for k in DECISION_SCALARS:
+            if k in note and not isinstance(note[k], (dict, list)):
+                row[k] = note[k]
+        for parent in DECISION_FLAT:
+            sub = note.get(parent)
+            if isinstance(sub, dict):
+                for ck, cv in sub.items():
+                    row[f"{parent}.{ck}"] = json.dumps(cv) if isinstance(cv, (dict, list)) else cv
+        for k in DECISION_JSON:
+            if k in note:
+                row[k] = json.dumps(note[k], separators=(",", ":"))
+        out.append(row)
+    return sorted(out, key=lambda d: str(_iso(d.get("ts")) or ""))
+
+
 # ---------------------------------------------------------------- SUMMARY.md
 def _pnl_block(rows: list[dict], kind: str) -> list[str]:
     rs = [r for r in rows if r["kind"] == kind and r["status"] == "settled" and r["pnl"] is not None]
@@ -428,14 +469,16 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
         return list(r.fieldnames or []), list(r)
 
 
-def merge_history(out: Path, names=tuple(HISTORY_KEYS)) -> dict[str, list[str]]:
+def merge_history(out: Path, names=tuple(HISTORY_KEYS), keys_by_name: dict | None = None) -> dict[str, list[str]]:
     """Upsert this pull's CSVs (already scrubbed) into history/<name>.csv by natural key. Returns {path: header}.
-    Values are re-scrubbed on the way through, so history written by an older version is cleaned too."""
+    Values are re-scrubbed on the way through, so history written by an older version is cleaned too.
+    `keys_by_name` defaults to HISTORY_KEYS (decisions.csv passes DECISION_HISTORY_KEYS)."""
     hist = out / "history"
     hist.mkdir(exist_ok=True)
     headers: dict[str, list[str]] = {}
+    keys_by_name = HISTORY_KEYS if keys_by_name is None else keys_by_name
     for name in names:
-        keys = HISTORY_KEYS[name]
+        keys = keys_by_name[name]
         old_h, old = _read_csv(hist / f"{name}.csv")
         new_h, new = _read_csv(out / f"{name}.csv")
         new_h = [c for c in new_h if c != "empty"]
@@ -523,7 +566,8 @@ FILES_DOC = {
     }),
     "journal.csv": ("The bot's journal (maker_strategy writes one row per event), rows with ts in the window.", {
         "utc": "Event time as written by the bot (" + TS + ").",
-        "event": "Event type: account (balance snapshot), quote (resting bid placed), cancel, error, skip, etc.",
+        "event": "Event type: account (balance snapshot), quote (resting bid placed), cancel, error, skip, "
+                 "decision_pass (one per pass when decision recording is on; flattened in decisions.csv), etc.",
         "ticker": "Kalshi market ticker (series-date-bracket), empty for account rows.",
         "side": "Side bought: yes | no.",
         "price": "Bid price in dollars for the side bought.",
@@ -647,9 +691,66 @@ FILES_DOC = {
                                "7/30/90/180 not above --days (min 7); fills from 7 days before the window are included "
                                "so fills settled inside it count.", {}),
 }
+_REASON = "Candidates (market sides with a best bid) this pass classified as "
+FILES_DOC["decisions.csv"] = (
+    "Decision recording, one row per trading pass, flattened from the journal's decision_pass rows (written only "
+    "when the strategy config has record_decisions = true; empty otherwise). Observation only: recording never "
+    "changes what is quoted or ordered. Every candidate gets exactly one reason code, so the reasons.* columns add "
+    "up to n_cand. Join to fills, quote_episodes and config_versions by time and ticker.", {
+        "ts": "Row time (" + TS + "), end of the pass.", "row_hash": "Journal row hash (dedupe key, joins journal.csv).",
+        "parse_error": "true if the note was not a JSON object (no other columns then).",
+        "v": "Note schema version.", "t0": "Pass start, the decision time (" + TS + ").",
+        "live": "true if the pass could place orders (false = log-only).",
+        "n_markets": "Open markets listed this pass, across the configured series.",
+        "n_cand": "Candidates: market sides with a readable best bid.",
+        "n_items": "Quoted plus kept markets in the pass (before the size cap).",
+        "dropped": "Items left out of `items` to keep the note under its size cap (new quotes are kept first).",
+        "rec_errors": "Recorder errors swallowed in the pass (the pass itself is unaffected).",
+        "overflow": "true if even the counts did not fit the size cap (only counts are kept).",
+        "reasons.quoted": _REASON + "quoted: a new resting order was placed.",
+        "reasons.kept": _REASON + "kept: the order already resting was kept (queue spot kept).",
+        "reasons.skipped:not_in_cell": _REASON + "outside every strategy cell (price, time to close, side).",
+        "reasons.skipped:series_cap": _REASON + "stopped by the per-series open-exposure cap.",
+        "reasons.skipped:market_cap": _REASON + "stopped by the per-market open-exposure cap.",
+        "reasons.skipped:ceiling": _REASON + "stopped because the open-exposure ceiling or cash cut the run budget "
+                                            "below its setting and that budget was used up.",
+        "reasons.skipped:run_budget": _REASON + "stopped because the run budget (per series share) was used up.",
+        "reasons.skipped:other": _REASON + "wanted but not placed for another reason (see other.*).",
+        "other.unread_markets": "Markets whose order book could not be read (not counted as candidates).",
+        "other.blocked": "Wanted, not placed: a cancel failed on that market this pass.",
+        "other.no_new": "Wanted, not placed: no new orders this pass (positions read truncated, or an unreadable "
+                        "resting order in the series).",
+        "other.paused": "Wanted, not placed: the exchange paused trading during the pass.",
+        "other.place_failed": "Wanted: the order call failed.",
+        "other.held": "Wanted only to keep an order that was not kept (hysteresis hold).",
+        "cfg.hash": "Short hash of the trading settings in force (same settings, same hash).",
+        "cfg.run_budget": "Run budget setting, USD.", "cfg.max_order": "Max order setting, USD.",
+        "cfg.max_open_frac": "Open-exposure ceiling setting, fraction of equity.",
+        "cfg.poll_minutes": "Pass interval setting, minutes.", "cfg.n_series": "Series configured.",
+        "caps.series_frac": "Per-series cap as a share of the ceiling.",
+        "caps.market_frac": "Per-market cap as a share of the ceiling.",
+        "caps.ceiling": "Open-exposure ceiling this pass, USD.", "caps.headroom": "Run budget left after caps, USD.",
+        "caps.series_cap": "Per-series cap this pass, USD (empty: positions unreadable).",
+        "caps.market_cap": "Per-market cap this pass, USD (empty: positions unreadable).",
+        "caps.per_series": "Run budget share per series, USD.",
+        "state.cash": "Cash at decision time, USD.", "state.exposure": "Open position cost, USD.",
+        "state.equity": "cash + exposure, USD.", "state.n_events": "Distinct events with open positions.",
+        "state.n_city_days": "Strategy-defined count of simultaneous correlated event groups with open positions.",
+        "state.truncated": "true if the positions read hit its page limit.",
+        "state.positions_read": "true if positions were readable (caps applied).",
+        "orders.kept": "Resting orders kept.", "orders.cancelled": "Orders cancelled.", "orders.placed": "Orders placed.",
+        "write_errors.cancel": "Failed cancels.", "write_errors.place": "Failed placements.",
+        "write_errors.paused": "1 if the exchange paused trading during the pass.",
+        "series_failed": "JSON list of series whose market list could not be read.",
+        "ttc": "JSON {hours-to-close bucket: [candidates, quoted + kept]}; buckets 0-2, 2-6, 6-12, 12-24, 24-48, 48+.",
+        "by_series": "JSON {series: [markets, candidates, quoted, kept]}.",
+        "items": "JSON [[ticker, side, price, contracts, cell index, q (quoted) | k (kept)], ...]; new quotes "
+                 "first; see `dropped`.",
+    })
 FILES_DOC["history/"] = ("Append-only history, one CSV per table (fills, fill_pnl, settlements, journal, quote_episodes, "
-                          "arb_opportunities, account_snapshots, heartbeats). Every pull upserts its rows by natural "
-                          "key (fill_id; fill_id; ticker; row_hash; order_id; sig+ts; ts; ts): the newest pull wins for "
+                          "arb_opportunities, account_snapshots, heartbeats, decisions). Every pull upserts its rows by "
+                          "natural key (fill_id; fill_id; ticker; row_hash; order_id; sig+ts; ts; ts; row_hash): the "
+                          "newest pull wins for "
                           "a key, and rows are never removed, so history keeps data after it ages out of Atlas "
                           "(TTL 45 d for quote episodes/arb, 180 d for the rest). Columns mean the same as in the "
                           "top-level file of the same name; columns added later are empty on older rows. Not "
@@ -760,7 +861,10 @@ def write_all(data: dict, out: Path, days: int, source: str) -> dict:
         headers[fname] = write_csv(out / fname, tables[name], AUDIT_KEYS if name == "audit" else None,
                                    FLATTEN.get(name, ()))
         counts[fname] = len(tables[name])
-    if "shadow_episodes" in data:                             # --shadow: scrubbed, fixed field list for episodes
+    decisions = decision_rows(data["journal"])
+    headers["decisions.csv"] = write_csv(out / "decisions.csv", decisions)
+    counts["decisions.csv"] = len(decisions)
+    if "shadow_episodes" in data:                            # --shadow: scrubbed, fixed field list for episodes
         headers["shadow_episodes.csv"] = write_csv(out / "shadow_episodes.csv", data["shadow_episodes"],
                                                    SHADOW_EPISODE_KEYS)
         counts["shadow_episodes.csv"] = len(data["shadow_episodes"])
@@ -781,6 +885,7 @@ def write_all(data: dict, out: Path, days: int, source: str) -> dict:
                                     encoding="utf-8")
     counts["SUMMARY.md"] = 1
     hist_headers = merge_history(out)
+    hist_headers.update(merge_history(out, tuple(DECISION_HISTORY_KEYS), DECISION_HISTORY_KEYS))
     for k, h in hist_headers.items():
         headers[k] = h
         counts[k] = len(_read_csv(out / k)[1])

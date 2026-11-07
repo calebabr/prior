@@ -162,8 +162,14 @@ def diff(mine: dict, theirs: dict) -> list[str]:
         _cmp3(out, f"{hk}.pnl", e["pnl"], g["pnl"])
         _cmp3(out, f"{hk}.roi", e["roi"], g["roi"], True)
         _cmp3(out, f"{hk}.fill_rate", e["fill_rate"], g["fill_rate"], True)
-        for k in ("break_even_win_rate", "observed_win_rate", "return_on_held"):
+        for k in ("break_even_win_rate", "observed_win_rate"):
             _cmp(out, f"{hk}.{k}", e[k], g.get(k), True)
+        # the model divides by the peak held capital already rounded to the cent, so a small peak moves the ratio by
+        # up to (half a cent / peak) of itself; the verifier divides by the unrounded peak
+        rg, rh = e["return_on_held"], g.get("return_on_held")
+        slack = 0.005 / e["peak_held_capital"] * abs(rg) if rg is not None and e["peak_held_capital"] > 0 else 0.0
+        if rg is None or rh is None or abs(float(rg) - float(rh)) > TOL_RATE + slack:
+            _cmp(out, f"{hk}.return_on_held", rg, rh, True)
         for k in ("peak_held_capital", "peak_capital"):
             _cmp(out, f"{hk}.{k}", e[k], g.get(k))
         for k in ("n_settled_fills", "ci_reliable", "headline_status"):
@@ -513,6 +519,15 @@ def test_run_cycle_never_commits_more_than_the_ceiling(request, seed):
         request.applymarker(pytest.mark.xfail(strict=True, reason="verifier finding V1: a continuing bid the caps "
                                               "cancel is not counted as held when the new bids are sized"))
     v, cfg = _limit_violations(seed)
+    assert v == [], (cfg, v[:4])
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_run_cycle_never_commits_more_than_the_series_cap(seed):
+    """The series limit sizes each bid to the room left: held + resting per series never exceed limit x ceiling."""
+    eps, snaps, cfg, _now = _simulate(seed)
+    v = V.series_funding_violations(snaps, eps, ceiling=cfg["capital"] * cfg["max_open_frac"],
+                                    series_cap=cfg["series_cap"])
     assert v == [], (cfg, v[:4])
 
 

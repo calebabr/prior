@@ -802,14 +802,20 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
             tk = str(u.get("ticker") or "")
             unseen_ticker[tk] = unseen_ticker.get(tk, 0.0) + _cost(u)
 
-    def _size_with_market_cap(sk: str, usable: list, sbooks: dict, budget: float) -> tuple[dict, dict]:
-        """H2 (the strategy's budget flow): the installed strategy is asked one market at a time with the budget
-        left; each quote is sized down to its market's room (0.01-contract floor) and the series budget is debited
-        by the cost actually taken, so what a capped market cannot use flows to the later markets (bounded by
-        their own caps, the series budget and max order). A quote with room for under one contract is refused and
-        debits nothing. Sizing stops once less than $1 is left. Returns (sized quotes, refused quotes) by key."""
+    s_hit: set[str] = set()                                     # series whose limit sized a bid away this round
+
+    def _size_with_room(sk: str, usable: list, sbooks: dict, budget: float,
+                        sroom: float | None) -> tuple[dict, dict]:
+        """The strategy's budget flow with the room limits: the installed strategy is asked one market at a time with
+        the budget left; each quote is sized down to the SMALLER of its market's room (H2, only with a market cap) and
+        the series' room (`sroom`: series limit x ceiling minus the series' held cost, unseen bids and what this pass
+        has already taken; None = no series limit), in 0.01-contract steps, and the series budget is debited by the
+        cost actually taken, so what a capped market cannot use flows to the later markets (bounded by their own
+        caps, the series budget and max order). A quote with room for under one contract is refused and debits
+        nothing. Sizing stops once less than $1 is left. Returns (sized quotes, {refused key: cap reason})."""
         left, out, refused = float(budget), {}, {}
         used: dict[str, float] = {}
+        used_series = 0.0
         for m in usable:
             if left < 1.0 - 1e-9:
                 break
@@ -825,19 +831,27 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 if k is None or k in out or k in refused:
                     continue
                 f["series"] = sk
-                room = market_room(mcap, held_ticker.get(tk, 0.0) + extra_ticker.get(tk, 0.0)
-                                   + unseen_ticker.get(tk, 0.0) + used.get(tk, 0.0))
+                m_room = (market_room(mcap, held_ticker.get(tk, 0.0) + extra_ticker.get(tk, 0.0)
+                                      + unseen_ticker.get(tk, 0.0) + used.get(tk, 0.0))
+                          if mcap is not None else math.inf)
+                s_room = math.inf if sroom is None else max(0.0, sroom - used_series)
+                room = min(m_room, s_room)
                 if f["count"] * f["price"] > room + CAP_TOL:
-                    market_capped.add(tk)
+                    why = "market_cap" if m_room <= s_room else "series_cap"
+                    if why == "market_cap":
+                        market_capped.add(tk)
                     n = sized_to_room(f["count"], f["price"], room)
                     if n < 1:
-                        refused[k] = f
+                        refused[k] = why
+                        if why == "series_cap":
+                            s_hit.add(sk)
                         continue
                     f = {**f, "count": n}
                 cost = f["count"] * f["price"]
                 debit = min(cost, cont_cost[k]) if k in cont_cost else cost
                 out[k] = f
                 used[tk] = used.get(tk, 0.0) + debit
+                used_series += debit
                 left -= round(debit, 2)
         return out, refused
 
@@ -860,19 +874,38 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
         h_series = {k: held_series.get(k, 0.0) + extra_series.get(k, 0.0)
                     for k in set(held_series) | set(extra_series)}
         headroom = max(0.0, min(run_budget, ceiling - h_total, capital - h_total))
-        series_capped = sorted(s for s in series if sfrac is not None and h_series.get(s, 0.0) > 0
-                               and h_series[s] >= sfrac * ceiling - 1e-9)
+        # F1 + series room: the series may hold, rest and be quoted up to limit x ceiling in all, so a new bid is
+        # sized to what is left of that after the series' held cost (a cancelled bid's unknown fill included) and its
+        # unseen resting bids; bids that continue and new ones are debited as they are sized (see _size_with_room).
+        # A series with under a cent of room cannot take even one 1-cent contract: it is series-capped
+        cap_amt = sfrac * ceiling if sfrac is not None else None
+
+        def series_room0(s: str) -> float | None:
+            if cap_amt is None:
+                return None
+            return max(0.0, cap_amt - h_series.get(s, 0.0) - unseen.get(s, 0.0))
+
+        s_hit.clear()
+        series_capped = sorted(s for s in series if sfrac is not None
+                               and h_series.get(s, 0.0) + unseen.get(s, 0.0) > 0 and series_room0(s) < 0.01 - 1e-9)
         capped_per_series = headroom / n
         limited = headroom < run_budget - 1e-9
 
         allowed: dict[tuple[str, str, str], dict] = {}
-        m_refused: dict[tuple[str, str, str], dict] = {}        # H2: refused for want of market room (budget debit 0)
+        m_refused: dict[tuple[str, str, str], str] = {}         # refused for want of room: key -> cap reason
         budgets: dict[str, float] = {}
         reason_of: dict[str, str] = {}
         for s in series:
-            b = 0.0 if s in series_capped else capped_per_series
-            budgets[s] = b
-            reason_of[s] = "series_cap" if s in series_capped else ("open_cap" if limited else "run_budget")
+            sroom = series_room0(s)
+            if s in series_capped:
+                b = bud = 0.0
+            else:
+                b = capped_per_series if sroom is None else min(capped_per_series, sroom)
+                bud = capped_per_series if cap_amt is None else min(capped_per_series,
+                                                                    max(0.0, cap_amt - h_series.get(s, 0.0)))
+            budgets[s] = bud                                    # `spent` starts at the unseen bids
+            series_binds = s in series_capped or (sroom is not None and sroom < capped_per_series - 1e-9)
+            reason_of[s] = "series_cap" if series_binds else ("open_cap" if limited else "run_budget")
             if s not in seen_series:
                 continue
             if mcap is None and b >= per_series - 1e-9:         # no limit binds: the uncapped answer stands
@@ -884,8 +917,8 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 continue
             usable, sbooks = seen_series[s]
             check_deadline()
-            if mcap is not None:                                # H2: size market by market, debiting what is taken
-                got, refused = _size_with_market_cap(s, usable, sbooks, b)
+            if mcap is not None or sroom is not None:           # size market by market, debiting what is taken
+                got, refused = _size_with_room(s, usable, sbooks, capped_per_series, sroom)
                 allowed.update(got)
                 m_refused.update(refused)
                 continue
@@ -938,9 +971,10 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
             continue                                            # an uncapped bid already rests at this key
         ok = k in allowed and fits(f["series"], f["count"] * f["price"], f["ticker"])
         reason = reason_of.get(f["series"], "run_budget")
-        if not ok and k in m_refused:                           # H2: no room for one contract in its market
-            reason = "market_cap"
-            market_capped.add(f["ticker"])
+        if not ok and k in m_refused:                           # no room for one contract in its market / series
+            reason = m_refused[k]
+            if reason == "market_cap":
+                market_capped.add(f["ticker"])
         elif not ok and mcap is not None and k in allowed:
             # H2: only the market cap refused it (the series budget takes the whole cost): size it down to the room
             # left (0.01-contract floor, like the strategy); below one contract it stays refused as "market_cap"
@@ -953,6 +987,8 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                     ok = fits(f["series"], f["count"] * f["price"], f["ticker"])
                 if not ok:
                     reason = "market_cap"
+        if not ok and reason == "series_cap":
+            s_hit.add(f["series"])
         if prev is not None and not ok:
             continue                                            # still refused: the capped episode continues
         if inp.new_today + new_eps >= min(SHADOW_DAILY_NEW_CAP, int(inp.new_cap)):
@@ -991,7 +1027,8 @@ def run_cycle(md: Any, strategy: Any, inp: CycleInput, *, deadline: float | None
                 "errors": list(dict.fromkeys(errors)),
                 # 2A-3 F1
                 "capped_new": capped_new, "held_cost": round(held_for_doc, 4), "held_markets": len(held_markets),
-                "ceiling": round(ceiling, 4), "headroom": round(headroom, 4), "series_capped": series_capped,
+                "ceiling": round(ceiling, 4), "headroom": round(headroom, 4),
+                "series_capped": sorted(set(series_capped) | s_hit),
                 "held_stale_ignored": held_stale_ignored, "held_stale_cost": round(held_stale_cost, 4)}
     if mcap is not None:                                        # H2: additive, only when a market cap is in force
         pass_doc["market_capped"] = sorted(market_capped)[:PASS_MARKET_CAPPED_MAX]

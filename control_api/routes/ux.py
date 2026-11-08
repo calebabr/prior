@@ -150,10 +150,8 @@ async def since_view(request: Request, ts: datetime = Query(...), period: str | 
 
 # ---------------------------------------------------------------- account positions (Y3)
 def _f(v: Any) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    """A finite float, else None (Kalshi "inf" / "nan" strings are unknown, never a huge position)."""
+    return pnlsvc._f(v)
 
 
 def _dollars(d: dict, key: str) -> float | None:

@@ -28,6 +28,7 @@ from collections import deque
 from .db import schemas
 from .services import arb as arbsvc
 from .services import arbcontain
+from .services import arbguard
 from .services import botfiles
 from .services import journalsync
 from .services import closetime as ctsvc
@@ -506,6 +507,8 @@ class Runner:
         # item 3 contain-and-degrade: per kind, {mark, records: [contained partials, last 48 h]}; rebuilt from the
         # stored arbitrage log after a restart or a leadership change (see _arb_contain_state, services/arbcontain)
         self._arb_contain: dict[str, dict] = {}
+        # L-2: {kind, event} while arb_scanner.execute is sending a set (worker thread sets/clears it), else None
+        self._arb_set_inflight: dict | None = None
         # item 4: latest account snapshot per env ("demo" / "live"): {equity, ts}, from the journal's account rows
         self._arb_equity: dict[str, dict] = {}
         # strategy write-path results of the last pass (write_errors: / series_capped: / trading_paused lines)
@@ -772,6 +775,7 @@ class Runner:
         st = dict(st or schemas.DEFAULT_STATE)
         if reload_config:
             config_ok = await self._load_config()
+        await self._sync_arb_guard(why="leadership")   # best effort here; the contain rebuild fails closed on it
         desired = st.get("desired", "stopped") if config_ok else "stopped"
         arb_desired = st.get("arb_desired", "stopped") if config_ok else "stopped"
         desired, arb_desired = self._apply_local_stop_rules(desired, arb_desired, gen=gen,
@@ -1001,6 +1005,7 @@ class Runner:
         while (self._strategy_running or self.arb_running_scan) and loop.time() < wait_until:
             await asyncio.sleep(0.05)
         overran = self._strategy_running or self.arb_running_scan
+        maker_step, arb_set = self._strategy_running, self._arb_set_inflight   # L-2: what was still running
         tail = min(loop.time() + SHUTDOWN_TAIL_S, deadline - SHUTDOWN_RESERVE_S)   # 3) the pass's own writes
         while self._pass_lock.locked() and not overran and loop.time() < tail:
             await asyncio.sleep(0.05)
@@ -1010,12 +1015,7 @@ class Runner:
         if self.lease.role != LEADER:
             return
         if overran:
-            msg = (f"a pass was still running {self.shutdown_order_wait_s():.0f} s into shutdown: the lease is NOT "
-                   f"released (it expires in {self.lease.ttl_s:.0f} s), so no other instance trades beside it")
-            log.error(msg)
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(self.alerter.send("Shutdown: pass overran", msg, priority="high"),
-                                       self._shutdown_timeout(deadline))
+            await self._shutdown_overran(deadline, maker_step=maker_step, arb_set=arb_set)
             return
         handover = await self._make_handover(deadline) if self._leader_ready else None
         try:                                              # 5) hand over, inside what is left of the budget
@@ -1025,6 +1025,31 @@ class Runner:
             log.error("lease release at shutdown did not finish: %s (it expires after the TTL)", type(e).__name__)
             return
         log.warning("lease released at shutdown (ok=%s, signed handover=%s)", ok, handover is not None)
+
+    async def _shutdown_overran(self, deadline: float, *, maker_step: bool, arb_set: dict | None) -> None:
+        """L-2: a step was still running when the shutdown wait ended. It is never cut by us (a worker thread
+        cannot be stopped safely) and SIGKILL may end it part-way. Fail safe: the lease is kept (no second leader
+        trades beside it), an URGENT alert goes out ("check positions" when an arbitrage set was being sent), and a
+        marker is saved so the next leader trips the arbitrage legging kill switch (services/arbguard). Both use the
+        two store-call slots that the skipped handover read and lease release leave free. Never raises."""
+        what = ("an arbitrage set" if arb_set else "a maker order step" if maker_step
+                else "an arbitrage scan (no set being sent)" if self.arb_running_scan else "a pass")
+        msg = (f"{what} was still running {self.shutdown_order_wait_s():.0f} s into shutdown: the lease is NOT "
+               f"released (it expires in {self.lease.ttl_s:.0f} s), so no other instance trades beside it.")
+        if arb_set:
+            ev = str(arb_set.get("event") or "?")[:80]
+            msg += (f" Check positions on {ev}: the set may be part-filled with no containment. Arbitrage stays "
+                    "off until you acknowledge it.")
+        log.error(msg)
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(self.alerter.send("Shutdown: pass overran", msg, priority="urgent"),
+                                   self._shutdown_timeout(deadline))
+        doc = arbguard.overrun_doc(self.instance_id, utcnow(), maker_step=maker_step, arb_set=arb_set)
+        try:
+            await asyncio.wait_for(self.store.save_cloud_settings({arbguard.CLOUD_OVERRUN: doc}, by="shutdown"),
+                                   self._shutdown_timeout(deadline))
+        except BaseException as e:  # noqa: BLE001
+            log.error("shutdown overrun marker not saved: %s", type(e).__name__)
 
     async def _shutdown_stop_checks(self, deadline: float | None = None) -> None:
         """S-53 (a): a Stop written to the store by ANOTHER instance (the new standby got the request) while this
@@ -1151,6 +1176,7 @@ class Runner:
         self._tail.skip_to_end()
         await self.load_cloud()
         self._apply_arming(self.cloud.get(armsvc.CLOUD_KEY))
+        self._restore_arb_kill(self.cloud)          # a legging kill survives the ephemeral disk
         st_alerts = self.cloud.get("alerts_state")
         if isinstance(st_alerts, dict) and isinstance(st_alerts.get("daily_sent"), str):
             self._daily_sent = st_alerts["daily_sent"][:10]
@@ -2796,6 +2822,7 @@ class Runner:
             kw["complete"] = ArbCompletionGate(self, client, op.event, gen, budget, frac)   # H3-B, demo only
         if loss_cap is not None:
             kw["loss_cap"] = loss_cap                    # item 3: None (OFF) is never passed: today's behaviour
+        self._arb_set_inflight = {"kind": kind, "event": str(op.event)[:120]}   # L-2: read by the shutdown
         try:
             # arb_scanner trips its own kill switch on an uncontained partial set (not on a contained one)
             out = str(scanner.execute(client, op, **kw))
@@ -2805,6 +2832,8 @@ class Runner:
             with self._arb_budget_lock:                  # H3S-1: an errored set may hold legs
                 budget["held"].setdefault(str(op.event), set()).add(str(op.kind))
             return f"ERROR {type(e).__name__}"
+        finally:
+            self._arb_set_inflight = None
         try:
             self._arb_after_execute(scanner, op, out, budget, loss_cap)
         except Exception as e:  # noqa: BLE001   (bookkeeping must never hide a result: fail toward the kill switch)
@@ -2959,6 +2988,10 @@ class Runner:
             log.warning("arb partial history rebuild unusable (truncated or bad)")
             return None
         recs = arbcontain.records_from_docs(docs, kind)
+        cloud = await self._sync_arb_guard(why="contain rebuild")
+        if cloud is None:
+            return None                                       # pause / kill state unknown: refuse every set
+        recs = arbcontain.merge(recs, arbguard.decode_records(cloud.get(arbguard.CLOUD_CONTAIN), kind, now))
         if cur is not None:
             recs = arbcontain.merge(cur["records"], recs)      # never forget a partial seen by this process
         state = {"mark": mark, "records": arbcontain.prune(recs, now)}
@@ -3048,6 +3081,8 @@ class Runner:
             self.arb_scans += 1
             self.arb_found += len(results)
             notes = (budget or {}).get("notes") or {}
+            if any((n or {}).get("type") == "contained" for n in notes.values()):
+                await self._save_arb_contain()
             for op, executed in results:
                 doc = arbsvc.opportunity_doc(op, executed, kind or "log-only")
                 doc["ts"] = utcnow()
@@ -3106,12 +3141,95 @@ class Runner:
                 await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
                                         f"{op.event}: {executed}", priority="urgent")
 
+    def _restore_arb_kill(self, cloud: dict | None) -> bool:
+        """Write the local arb kill file back from the persisted legging kill (or from a predecessor's shutdown
+        overrun mid-set) when it is missing. True if such a kill is in force. Never raises."""
+        cloud = cloud if isinstance(cloud, dict) else {}
+        doc = arbguard.normalize_kill(cloud.get(arbguard.CLOUD_KILL))
+        if doc is None:
+            doc = arbguard.overrun_kill(cloud.get(arbguard.CLOUD_OVERRUN), self.instance_id)
+        if doc is None:
+            return False
+        if arbsvc.kill_reason(self.arb_kill_path) not in ("legging", "unknown"):
+            try:
+                self.arb_kill_path.parent.mkdir(parents=True, exist_ok=True)
+                self.arb_kill_path.write_text(arbguard.kill_file_text(doc), encoding="utf-8")
+                log.warning("arb legging kill switch restored from the store")
+            except OSError as e:
+                log.error("arb kill switch not restored: %s", type(e).__name__)
+        return True
+
+    async def _sync_arb_guard(self, *, why: str) -> dict | None:
+        """Re-read the persisted arbitrage guard (services/arbguard): restore the legging kill switch, and, as the
+        leader, turn a predecessor's shutdown overrun mid-set into a persisted legging kill (urgent alert, marker
+        cleared). Returns the cloud doc, or None if it could not be read. Never raises."""
+        try:
+            cloud = await asyncio.wait_for(self.store.get_cloud_settings(), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("arb guard read failed (%s): %s", why, type(e).__name__)
+            return None
+        cloud = dict(cloud or {})
+        if isinstance(self.cloud, dict):
+            for k in (arbguard.CLOUD_CONTAIN, arbguard.CLOUD_KILL, arbguard.CLOUD_OVERRUN):
+                self.cloud[k] = cloud.get(k)
+        self._restore_arb_kill(cloud)
+        overrun = arbguard.overrun_kill(cloud.get(arbguard.CLOUD_OVERRUN), self.instance_id)
+        if overrun is not None and self.lease.role == LEADER:
+            upd = {arbguard.CLOUD_OVERRUN: None}
+            if arbguard.normalize_kill(cloud.get(arbguard.CLOUD_KILL)) is None:
+                upd[arbguard.CLOUD_KILL] = overrun
+            try:
+                await asyncio.wait_for(self.store.save_cloud_settings(upd, by="overrun-takeover"), 5)
+                cloud.update(upd)
+                if isinstance(self.cloud, dict):
+                    self.cloud.update(upd)
+            except Exception as e:  # noqa: BLE001   (the local kill file is already in force)
+                log.error("overrun kill not persisted: %s", type(e).__name__)
+            with contextlib.suppress(Exception):
+                await self.alerter.send(
+                    "Arbitrage stopped: kill switch",
+                    f"The previous instance shut down while an arbitrage set on {overrun['event'] or '?'} was being "
+                    "sent. Check positions; arbitrage stays off until you acknowledge it.", priority="urgent")
+        return cloud
+
+    async def _save_arb_kill(self) -> None:
+        """Persist the legging kill switch now on disk (Stop's kill persists through the state doc). Never raises."""
+        try:
+            text = self.arb_kill_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        doc = arbguard.kill_from_file(text)
+        if doc is None:
+            return
+        try:
+            await asyncio.wait_for(self.store.save_cloud_settings({arbguard.CLOUD_KILL: doc}, by="arb-kill-switch"), 5)
+            if isinstance(self.cloud, dict):
+                self.cloud[arbguard.CLOUD_KILL] = doc
+        except Exception as e:  # noqa: BLE001
+            log.error("arb kill switch not persisted: %s", type(e).__name__)
+
+    async def _save_arb_contain(self) -> None:
+        """Persist the contained-partial records (the series pauses) of every kind in memory. Never raises: the
+        arbitrage log row is the second copy."""
+        now = utcnow()
+        with self._arb_budget_lock:
+            mem = {k: list(v.get("records") or []) for k, v in self._arb_contain.items()}
+        stored = self.cloud.get(arbguard.CLOUD_CONTAIN) if isinstance(self.cloud, dict) else None
+        doc = arbguard.contain_doc(mem, stored, now)
+        try:
+            await asyncio.wait_for(self.store.save_cloud_settings({arbguard.CLOUD_CONTAIN: doc}, by="arb-contain"), 5)
+            if isinstance(self.cloud, dict):
+                self.cloud[arbguard.CLOUD_CONTAIN] = doc
+        except Exception as e:  # noqa: BLE001
+            log.error("arb pause not persisted: %s", type(e).__name__)
+
     async def _arb_tripped(self) -> None:
         """The arb kill switch is on disk (legging) while arb is on: turn arb off and persist it, because Render's
         disk is ephemeral and the file alone would not survive a restart. Never raises."""
         self.arb_desired = "stopped"
         self.arb_mode = "demo"
         reason = arbsvc.kill_reason(self.arb_kill_path)
+        await self._save_arb_kill()
         try:
             await asyncio.wait_for(self.store.set_state(by="arb-kill-switch", arb_desired="stopped",
                                                         arb_mode="demo"), timeout=5)
@@ -3137,11 +3255,16 @@ class Runner:
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
         if mode == "live" and not self.armed("arbitrage"):
             raise PermissionError("arbitrage_not_armed")   # item 10
-        if desired == "running" and arbsvc.kill_reason(self.arb_kill_path) in ("legging", "unknown") \
-                and not ack_legging:
-            raise PermissionError("arb_legging_kill")
+        stored_kill = arbguard.normalize_kill((self.cloud or {}).get(arbguard.CLOUD_KILL))
+        if desired == "running" and (arbsvc.kill_reason(self.arb_kill_path) in ("legging", "unknown")
+                                     or stored_kill) and not ack_legging:
+            raise PermissionError("arb_legging_kill")    # also when only the persisted copy is left
         if desired is None and mode is None:
             return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode}
+        if desired == "running" and stored_kill:
+            # the acknowledged restart clears the persisted legging kill first (a failure raises: nothing changes)
+            await asyncio.wait_for(self.store.save_cloud_settings({arbguard.CLOUD_KILL: None}, by=by), timeout=5)
+            self.cloud[arbguard.CLOUD_KILL] = None
         await self.store.set_state(by=by, arb_desired=desired, arb_mode=mode)
         if turning_on and (gen != self._stop_gen or self._stopping):
             # a Stop landed during our write, which may have reached the store after Stop's: re-assert stopped

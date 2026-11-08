@@ -6,12 +6,18 @@ maker strategy; taker fills are the arbitrage legs (and any manual taker trades,
 """
 from __future__ import annotations
 
+import logging
+import math
 import re
 import zoneinfo
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from functools import lru_cache
 from typing import Iterable
 
+log = logging.getLogger("control_api.pnl")
+
+# A single fill above this many contracts is not a real Kalshi value: it is read as an unknown count (fail closed).
+MAX_FILL_COUNT = 1_000_000.0
 
 # ---- viewer time zone (Today's P&L day boundary). Storage, settlements and everything else stay UTC; only the
 # "since local midnight" instant is computed in the viewer's zone. Anything unknown or malformed means UTC.
@@ -52,10 +58,14 @@ def local_midnight_utc(now: datetime, tz: tzinfo) -> datetime:
 
 
 def _f(v) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+    """A finite float, else None. float() accepts "inf" / "nan" strings: those are never a usable number here."""
+    if isinstance(v, bool):
         return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return x if math.isfinite(x) else None
 
 
 def fill_side(f: dict) -> str | None:
@@ -71,11 +81,29 @@ def fill_price(f: dict, side: str) -> float | None:
     return p
 
 
+def fill_count_checked(f: dict) -> float | None:
+    """Contracts in one Kalshi fill: count_fp (fixed-point string) else count. 0.0 when neither is given; None when
+    the given value is unusable (not a number, NaN, inf, negative or above MAX_FILL_COUNT). Fail closed: an unusable
+    count is unknown, never read as a full fill."""
+    raw = f.get("count_fp")
+    if raw is None or raw == "":
+        raw = f.get("count")
+    if raw is None or raw == "":
+        return 0.0
+    c = _f(raw)
+    if c is None or c < 0 or c > MAX_FILL_COUNT:
+        return None
+    return c
+
+
 def fill_count(f: dict) -> float:
-    c = _f(f.get("count_fp"))
+    """fill_count_checked with an unusable count read as 0 contracts (logged, without the raw value)."""
+    c = fill_count_checked(f)
     if c is None:
-        c = _f(f.get("count"))
-    return c or 0.0
+        log.warning("fill %s: unusable contract count, read as unknown (0)",
+                    str(f.get("fill_id") or f.get("trade_id") or "?")[:64])
+        return 0.0
+    return c
 
 
 def fill_pnl(f: dict, result: str) -> float | None:

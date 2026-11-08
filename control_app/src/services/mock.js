@@ -51,6 +51,10 @@ const CONFIG_SCHEMA = {
     type: 'list', unit: 'series tickers', options: SERIES, editable: true,
     help: 'Series the strategy may quote (allowed series only).',
   },
+  record_decisions: {
+    type: 'bool', label: 'Record Decisions', editable: true,
+    help: 'Saves extra detail about each quoting decision for later analysis. Does not change any orders.',
+  },
   cells: {
     type: 'table', unit: '[min price, max price, min h, max h, side]', editable: false,
     help: 'THE VALIDATED STRATEGY - DO NOT EDIT. Read-only.',
@@ -257,7 +261,7 @@ function initialState() {
     live_allowed: true,
     last_run: now() - 4 * MIN,
     last_error: null,
-    config: { run_budget: 15, max_order: 3, max_open_frac: 0.3, series: [...SERIES], poll_minutes: 10, cells: CELLS },
+    config: { run_budget: 15, max_order: 3, max_open_frac: 0.3, series: [...SERIES], poll_minutes: 10, record_decisions: false, cells: CELLS },
     version: 7,
     journal: seedJournal(),
     summary,
@@ -538,6 +542,7 @@ function validateConfig(next) {
   if (!Number.isInteger(next.poll_minutes) || next.poll_minutes < 2 || next.poll_minutes > 14) {
     errs.push('poll_minutes must be an integer between 2 and 14 (MAX_POLL_MINUTES)');
   }
+  if ('record_decisions' in next && typeof next.record_decisions !== 'boolean') errs.push('record_decisions must be true or false');
   if (!Array.isArray(next.series) || next.series.length < 1) errs.push('series must contain at least one series');
   else {
     const bad = next.series.filter((s) => !SERIES.includes(s));
@@ -743,7 +748,7 @@ async function route(method, url, headers, body) {
     if (bad) return bad;
     const patch = body || {};
     if ('cells' in patch) return reply(400, { detail: ['cells is read-only (validated strategy)'] });
-    const allowed = ['run_budget', 'max_order', 'max_open_frac', 'poll_minutes', 'series'];
+    const allowed = ['run_budget', 'max_order', 'max_open_frac', 'poll_minutes', 'series', 'record_decisions'];
     const unknown = Object.keys(patch).filter((k) => !allowed.includes(k));
     if (unknown.length) return reply(400, { detail: [`unknown or read-only field(s): ${unknown.join(', ')}`] });
     const next = { ...S.config, ...patch };

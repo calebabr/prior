@@ -3,7 +3,7 @@
 // A key that is not listed here is GLOBAL: it appears only in Settings, so a new backend key can never
 // silently vanish from the app. No setting is removed anywhere.
 
-export const MAKER_KEYS = ['run_budget', 'max_order', 'max_open_frac', 'series'];
+export const MAKER_KEYS = ['run_budget', 'max_order', 'max_open_frac', 'series', 'record_decisions'];
 
 /** 'maker' | 'arb' | 'global' for a /api/config key. */
 export function configScope(key) {

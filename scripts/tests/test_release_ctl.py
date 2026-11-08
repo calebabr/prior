@@ -172,6 +172,16 @@ def test_register_then_poll_until_approved(api, tmp_path, capsys):
     assert rc.main(["poll", "--id", "r1", "--timeout", "2", "--interval", "0.05"]) == 1
 
 
+def test_register_sends_trading_changes_flag(api, tmp_path):
+    notes = tmp_path / "n.md"
+    notes.write_text("- fix(api): thing", encoding="utf-8")
+    base = ["register", "--version", "2026.11.8-1", "--commit", SHA, "--summary-file", str(notes)]
+    assert rc.main(base) == 0
+    assert [s for s in Fake.seen if s[0] == "POST"][-1][3]["trading_changes"] is False
+    assert rc.main(base + ["--trading-changes"]) == 0
+    assert [s for s in Fake.seen if s[0] == "POST"][-1][3]["trading_changes"] is True
+
+
 def test_register_rejects_bad_input_and_bad_token(api, tmp_path, monkeypatch):
     notes = tmp_path / "n.md"
     notes.write_text("x", encoding="utf-8")

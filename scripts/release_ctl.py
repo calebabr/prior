@@ -6,7 +6,7 @@ Why a script and not curl in the workflow: the keys never appear on a command li
 anything), and the polling / verification logic is unit-tested.
 
     release_ctl.py status          --out status.json            GET  /api/deploy/status   (env DEPLOY_STATUS_KEY)
-    release_ctl.py register        --version V --commit SHA --summary-file notes.md --ci TEXT   -> prints the id
+    release_ctl.py register        --version V --commit SHA --summary-file notes.md --ci TEXT [--trading-changes]   -> prints the id
                                                                 POST /api/release/pending (env RELEASE_TOKEN)
     release_ctl.py poll            --id ID [--timeout 1800]     GET  /api/release/pending/{id}: exit 0 only on "approved"
     release_ctl.py verify-backend  --version V --commit SHA [--prev-generation N] [--timeout 600]
@@ -104,7 +104,8 @@ def cmd_register(a) -> int:
     summary = Path(a.summary_file).read_text(encoding="utf-8", errors="replace")[:MAX_SUMMARY]
     try:
         status, body = request("POST", base_url() + "/api/release/pending", headers={"X-Release-Token": _key("RELEASE_TOKEN")},
-                               body={"version": a.version, "commit": a.commit, "summary": summary, "ci": a.ci[:200]})
+                               body={"version": a.version, "commit": a.commit, "summary": summary, "ci": a.ci[:200],
+                                     "trading_changes": bool(a.trading_changes)})
     except (OSError, ValueError) as exc:
         print(f"register failed: {type(exc).__name__}", file=sys.stderr)
         return 1
@@ -230,7 +231,9 @@ def main(argv: list[str]) -> int:
     s = sub.add_parser("status"); s.add_argument("--out", required=True); s.set_defaults(fn=cmd_status)
     r = sub.add_parser("register")
     r.add_argument("--version", required=True); r.add_argument("--commit", required=True)
-    r.add_argument("--summary-file", required=True); r.add_argument("--ci", default="green"); r.set_defaults(fn=cmd_register)
+    r.add_argument("--summary-file", required=True); r.add_argument("--ci", default="green")
+    r.add_argument("--trading-changes", action="store_true", help="mark a release that changes trading behaviour (starts a new period)")
+    r.set_defaults(fn=cmd_register)
     p = sub.add_parser("poll")
     p.add_argument("--id", required=True); p.add_argument("--timeout", type=float, default=1800)
     p.add_argument("--interval", type=float, default=20); p.set_defaults(fn=cmd_poll)

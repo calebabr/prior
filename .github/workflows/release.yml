@@ -34,6 +34,11 @@ on:
         description: "Commit SHA or tag to release (must be on main)"
         required: true
         type: string
+      trading_changes:
+        description: "This release changes trading behaviour, sizing, caps or reliability (starts a new period)"
+        required: false
+        type: boolean
+        default: false
       bot_stopped_confirmed:
         description: "I stopped the bot in the app (only needed when the running server cannot report its status)"
         required: false
@@ -150,10 +155,13 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           SHA: ${{ needs.gate.outputs.sha }}
           VERSION: ${{ needs.gate.outputs.version }}
+          TRADING_CHANGES: ${{ inputs.trading_changes }}
         run: |
           set -euo pipefail
           python3 scripts/changelog.py --to "$SHA" --version "v${VERSION}" --max-chars 2800 > notes.md
-          ID="$(python3 scripts/release_ctl.py register --version "$VERSION" --commit "$SHA" --summary-file notes.md --ci "green: python, frontend, e2e, gitleaks, semgrep, commit-messages")"
+          FLAG=()
+          if [ "$TRADING_CHANGES" = "true" ]; then FLAG=(--trading-changes); fi
+          ID="$(python3 scripts/release_ctl.py register --version "$VERSION" --commit "$SHA" --summary-file notes.md --ci "green: python, frontend, e2e, gitleaks, semgrep, commit-messages" "${FLAG[@]}")"
           echo "id=$ID" >> "$GITHUB_OUTPUT"
           echo "Registered pending release v${VERSION}. Open Prior -> Server -> Pending release and approve with 2FA."
       - name: Wait for approval (30 minutes, then fail)

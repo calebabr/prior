@@ -206,6 +206,27 @@ describe('Arbitrage demo-execute, caps and gate reasons', () => {
     expect(calls.find((c) => c.key === 'PUT /api/arb').body).toEqual({ arb_demo_execute: true });
   });
 
+  it('shows the percentage caps, empty means off, and saves a value or clears it', async () => {
+    const user = userEvent.setup();
+    const arb = { ...ARB, settings: { ...ARB.settings, arb_set_loss_frac: null, arb_scan_cap_frac: 0.03, arb_day_cap_frac: null, max_event_frac: null } };
+    const calls = stubApi({
+      'GET /api/status': STATUS,
+      'GET /api/arb': arb,
+      'GET /api/arb/opportunities': OPPS,
+      'PUT /api/arb': () => arb,
+    });
+    renderApp('/strategies/arb/controls');
+    const loss = await screen.findByLabelText(/Set Loss Frac/i);
+    expect(loss).toHaveValue(null);
+    expect(screen.getByLabelText(/Scan Cap Frac/i)).toHaveValue(0.03);
+    await user.type(loss, '0.03');
+    await user.clear(screen.getByLabelText(/Scan Cap Frac/i));
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+    await enterCode(user, /^save$/i);
+    await waitFor(() => expect(calls.some((c) => c.key === 'PUT /api/arb')).toBe(true));
+    expect(calls.find((c) => c.key === 'PUT /api/arb').body).toEqual({ arb_set_loss_frac: 0.03, arb_scan_cap_frac: null });
+  });
+
   it('gateReason reads the reason from the executed text', () => {
     expect(gateReason('skipped: gate scan cap')).toBe('scan cap');
     expect(gateReason('skipped: other')).toBeNull();

@@ -20,6 +20,7 @@ export const ARB_SERIES = [];
 const FIELDS = [
   'arb_max_contracts', 'arb_min_profit', 'arb_poll_seconds', 'arb_series',
   'arb_scan_cap', 'arb_day_cap', 'arb_series_cap_frac', 'arb_demo_execute',
+  'arb_set_loss_frac', 'arb_scan_cap_frac', 'arb_day_cap_frac', 'max_event_frac',
 ];
 const DEFAULT_SCHEMA = {
   arb_max_contracts: {
@@ -49,6 +50,22 @@ const DEFAULT_SCHEMA = {
   arb_series_cap_frac: {
     type: 'number', unit: 'fraction of the open-exposure ceiling', min: 0.05, max: 0.9, step: 0.01,
     help: 'Most one series may hold in open exposure, as a share of the account ceiling.',
+  },
+  arb_set_loss_frac: {
+    type: 'number', nullable: true, unit: 'share of equity', min: 0.001, max: 0.5, step: 0.001,
+    help: 'Most one partial set may lose before containment gives up and trips the kill switch. Empty = off.',
+  },
+  arb_scan_cap_frac: {
+    type: 'number', nullable: true, unit: 'share of equity per scan', min: 0.001, max: 1, step: 0.001,
+    help: 'Percentage cap per scan; the dollar scan cap stays the maximum. Empty = off.',
+  },
+  arb_day_cap_frac: {
+    type: 'number', nullable: true, unit: 'share of equity per day', min: 0.001, max: 1, step: 0.001,
+    help: 'Percentage cap per UTC day; the dollar day cap stays the maximum. Empty = off.',
+  },
+  max_event_frac: {
+    type: 'number', nullable: true, unit: 'share of equity per event', min: 0.001, max: 1, step: 0.001,
+    help: 'Most one event may hold, maker and arbitrage together. Empty = off.',
   },
   arb_demo_execute: {
     type: 'bool', label: 'Demo Execute',
@@ -204,7 +221,11 @@ export function useArbController() {
         if (!Array.isArray(v) || !v.length) errs[k] = 'Pick at least one';
       } else {
         if (v === '' || v == null) {
-          errs[k] = 'Required';
+          if (spec.nullable) {
+            if (settings[k] != null) p[k] = null;
+          } else {
+            errs[k] = 'Required';
+          }
           continue;
         }
         v = Number(v);

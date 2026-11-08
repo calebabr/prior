@@ -279,6 +279,18 @@ describe('Since You Last Checked', () => {
     expect(screen.queryByTestId('since-card')).toBeNull();
   });
 
+  it('tapping the banner expands the full text and links to all alerts', async () => {
+    window.localStorage.setItem(LAST_VISIT_KEY, iso(3 * 60 * MIN));
+    stubApi(base({ 'GET /api/since': { fills: 3, settled: 2, pnl_change: 1.4 } }));
+    renderApp('/');
+    const toggle = await screen.findByTestId('since-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('since-all-alerts')).toBeNull();
+    await userEvent.setup().click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('since-all-alerts')).toHaveAttribute('href', '/alerts');
+  });
+
   it('is hidden when nothing changed or the request fails', async () => {
     window.localStorage.setItem(LAST_VISIT_KEY, iso(60 * MIN));
     stubApi(base({ 'GET /api/since': { fills: 0, settled: 0, pnl_change: 0 } }));

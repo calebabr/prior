@@ -14,7 +14,7 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
  * and a marker under the axis; the partial period has a dashed outline. The plot scrolls sideways when it needs
  * more than MIN_SLOT_PX per bar; the y gutter stays fixed.
  */
-export default function ReturnsBars({ periods, granularity, selected, onSelect, onOpen, scale: scaleProp }) {
+export default function ReturnsBars({ periods, granularity, selected, onSelect, onOpen, onOpenDay, scale: scaleProp }) {
   const n = periods.length;
   const scale = useMemo(() => scaleProp || scaleOf(periods), [periods, scaleProp]);
   const span = scale.hi - scale.lo || 1;
@@ -162,7 +162,7 @@ export default function ReturnsBars({ periods, granularity, selected, onSelect, 
                 style={{ left: `${(i / n) * 100}%`, width: `${100 / n}%` }}
                 aria-label={barLabel(p, granularity)}
                 data-testid="returns-bar"
-                onClick={() => onSelect(i)}
+                onClick={() => (onOpenDay && i === sel ? onOpenDay(i) : onSelect(i))}
               />
             ))}
           </div>
@@ -179,6 +179,9 @@ export default function ReturnsBars({ periods, granularity, selected, onSelect, 
           </div>
         </div>
       </div>
+      {onOpenDay && (
+        <p className="hint rt-scrollhint">Tap the selected bar again to open that day.</p>
+      )}
       {scrolls && (
         <p className="hint rt-scrollhint" data-testid="returns-scrollhint">
           Scroll sideways for older {granularity === 'day' ? 'days' : granularity === 'week' ? 'weeks' : 'months'}.

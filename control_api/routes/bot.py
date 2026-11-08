@@ -99,6 +99,10 @@ async def stop(request: Request, user: dict = Depends(current_user_stop)) -> dic
 
 @router.post("/bot/start")
 async def start(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
+    if _runner(request).mode == "live" and _runner(request).live_allowed():
+        # L-1: Start in live re-runs the go-live preflight, so a stale arm cannot start live trading (409 + checks)
+        from .arming import live_recheck
+        await live_recheck(request, user=user, action="bot.start")
     try:
         res = await _runner(request).start_trading(by=user.get("username", "user"))
     except ConfigInvalid as e:
@@ -136,6 +140,10 @@ async def set_mode(body: ModeIn, request: Request, user: dict = Depends(require_
     if body.mode == "live" and body.confirm != "LIVE":
         await audit(request, "mode.set", ok=False, user=user, details={"mode": body.mode, "error": "confirm"})
         raise HTTPException(400, "type LIVE to confirm")
+    if body.mode == "live" and r.mode != "live" and r.live_allowed():
+        # L-1: switching live mode on re-runs the go-live preflight (409 + failing checks); demo is never gated
+        from .arming import live_recheck
+        await live_recheck(request, user=user, action="mode.set", details={"mode": body.mode})
     try:
         res = await r.set_mode(body.mode, by=user.get("username", "user"))
     except PermissionError as e:

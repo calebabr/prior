@@ -8,6 +8,7 @@ import RangeSelect from '../components/RangeSelect.jsx';
 import Skeleton from '../components/Skeleton.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import FillQuality from '../components/FillQuality.jsx';
+import DayCard from '../components/day/DayCard.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import { IconChevron } from '../components/Icons.jsx';
 import { ErrorNotice, Loading } from '../components/Notices.jsx';
@@ -25,6 +26,7 @@ import { DASH, NA_TITLE, dateTime, formatMoney, money, sentenceCase } from '../u
 import { shortDate } from '../utils/analytics.js';
 import { moneyDigits } from '../utils/chart.js';
 import '../styles/overview.css';
+import '../styles/day.css';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const tone = (v) => (isNum(v) ? (v < 0 ? 'neg' : v > 0 ? 'pos' : '') : '');
@@ -228,6 +230,8 @@ export default function Overview() {
               )}
               {ledgerError && head.source !== 'status' && ledgerRetry}
             </section>
+
+            <DayCard />
 
             <section className="home-section" aria-labelledby="home-by-h" data-testid="by-strategy">
               <h2 className="home-label" id="home-by-h">By Strategy</h2>

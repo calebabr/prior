@@ -36,6 +36,8 @@ from .services import pnl as pnlsvc
 from .services import queuepos as qp
 from .services import riskgate
 from .services import alerts as alertsvc
+from .services import arming as armsvc
+from .services import kalshi_recon as recon
 from .services import strategies as strat
 from .services import shadow as shadowsvc
 from .services import shadow_model as shadow_model
@@ -64,14 +66,26 @@ MAKER_OID_MAX = 150_000             # journal maker order ids kept in memory (~3
 ORDER_LOOKUPS_PER_SYNC = 20         # GET /portfolio/orders/{id} for fills no local evidence explains
 SOURCE_BACKFILL_MAX = 20_000        # fills relabelled by the startup backfill
 SOURCE_BACKFILL_BUDGET_S = 60
+RECON_DEFAULT_TIME = "06:00"         # item 14: local time the daily recon becomes due when no summary time is set
+RECON_BUDGET_S = 180                # whole daily recon (its Kalshi reads have their own 120 s bound)
 PNL_TODAY_TTL_S = 60                # /status today P&L cache
 PNL_TODAY_CACHE_MAX = 16            # entries kept, one per (mode, validated time zone); oldest dropped first
 RECENT_PASSES = 12
 FILL_ALERT_MAX_LINES = 3
 # release process (docs/RELEASE_PROCESS.md section 4): lease, fencing, graceful handover
 FENCE_MARGIN_S = 5.0                # a pass starts only if the lease outlives PASS_BUDGET_S + this margin
-SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes
-SHUTDOWN_STORE_TIMEOUT_S = 5.0
+SHUTDOWN_TAIL_S = 10.0              # after the order step: time for the pass's journal/heartbeat writes (capped below)
+# Item 11 (option b, $0): the graceful shutdown must fit Render's DEFAULT window. Render sends SIGTERM and waits its
+# shutdown delay, default 30 s, before SIGKILL (https://render.com/docs/deploys, cited in docs/RELEASE_PROCESS.md);
+# the free plan rejects maxShutdownDelaySeconds, so 30 s is the real window. Settings.shutdown_delay_s defaults to
+# it (env SHUTDOWN_DELAY_S only for a paid plan that really raised the delay).
+RENDER_SHUTDOWN_WINDOW_S = 30.0
+# uvicorn drains in-flight requests for up to --timeout-graceful-shutdown BEFORE the lifespan shutdown (this runner)
+# starts, so that time comes out of the same window. Must match render.yaml's startCommand.
+UVICORN_GRACEFUL_S = 5.0
+SHUTDOWN_MARGIN_S = 3.0             # event loop, store.close() and process exit before SIGKILL
+SHUTDOWN_STORE_TIMEOUT_S = 2.0      # each shutdown store call (journal flush, state read, handover read, release)
+SHUTDOWN_RESERVE_S = 4 * SHUTDOWN_STORE_TIMEOUT_S   # kept free after the order step for those four calls
 CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
 # CA-2: Stop's cancel runs on its own pool, never the default executor, so monitor runs, abandoned arb scans or
 # anything else using asyncio.to_thread can never queue it behind them. 4 workers: a few Stop taps against a hung
@@ -325,6 +339,10 @@ class RunnerDisabled(RuntimeError):
     """RUNNER_ENABLED=false: nothing can start trading (S-10)."""
 
 
+class NotArmed(RuntimeError):
+    """Item 10: the strategy is not armed for LIVE; nothing is sent (not an error, no heartbeat)."""
+
+
 class ConfigInvalid(RuntimeError):
     """Start refused: the stored config still fails validation (S-12). str() is the plain-English reason."""
 
@@ -541,8 +559,20 @@ class Runner:
         self._pre_acquire_lease: dict | None = None   # lease doc read just before acquiring (handover token)
         self.handover_result: dict | None = None      # {"kept_live": bool, "reason": str, "utc": str}
         self.fence_blocked = 0
+        # item 10: per-strategy LIVE arming (services/arming.py). Not armed until loaded from the store; a disarm
+        # whose store write failed stays in force here (re-applied over anything read back)
+        self.arming: dict = armsvc.default()
+        self._disarm_pending: set[str] = set()
+        self._disarm_cancel: asyncio.Future | None = None
+        self._disarm_gen: dict[str, int] = {x: 0 for x in armsvc.STRATEGIES}   # M-1: bumped by every disarm
+        self._arming_lock = asyncio.Lock()                                       # M-1: serializes arming writes
+        # item 14: daily Kalshi reconciliation (local date of the last run; also kept in alerts_state)
+        self._recon_day: str | None = None
+        self._recon_task: asyncio.Task | None = None
         if isinstance(self.alerter, Alerter):
             self.alerter.on_alert = self._on_alert
+            if self.alerter.grouper is None:          # item 18: group repeats of the same alert (urgent never waits)
+                self.alerter.grouper = alertsvc.AlertGrouper()
 
     # ---- paths (read from the bot module each time, so tests can monkeypatch them)
     @property
@@ -577,7 +607,8 @@ class Runner:
     def arb_state(self) -> str:
         if self.arb_desired != "running" or self.arb_kill_switch():
             return "stopped"
-        return "live" if self.arb_mode == "live" and self.live_allowed() else "log-only"
+        return ("live" if self.arb_mode == "live" and self.live_allowed() and self.armed("arbitrage")
+                else "log-only")
 
     def kill_switch(self) -> bool:
         try:
@@ -685,6 +716,7 @@ class Runner:
             if self._leader_ready:
                 if rehydrate_state is None:
                     await self._sync_state_from_store()
+                    await self._sync_arming_from_store()
             elif rehydrate_state is None:
                 await self._mirror_state()
         except Exception as e:  # noqa: BLE001
@@ -796,10 +828,11 @@ class Runner:
             self._spawn(self._best_effort_cancel(stored_mode, "leader started stopped"))
         await self._alert_resumed_state(st, kept_live=kept_live)
 
-    async def _best_effort_cancel(self, mode: str, why: str) -> int:
+    async def _best_effort_cancel(self, mode: str, why: str, timeout: float | None = None) -> int:
         """Cancel resting mm- orders (the same call Stop makes; no fence: it only removes risk). Never raises."""
         try:
-            n = await asyncio.wait_for(self._cancel_in_stop_pool(mode), timeout=CANCEL_TIMEOUT_S)
+            n = await asyncio.wait_for(self._cancel_in_stop_pool(mode),
+                                       timeout=CANCEL_TIMEOUT_S if timeout is None else timeout)
             if n:
                 log.warning("%s: cancelled %s resting mm- orders (%s)", why, n, mode)
             return n
@@ -891,28 +924,49 @@ class Runner:
             self._spawn(self.run_source_backfill())     # read-only relabel of older fills; budgeted, never raises
         log.info("runner started: instance %s on %s, role %s", self.instance_id[:8], hostname(), self.role())
 
+    def shutdown_window_s(self) -> float:
+        """Render's SIGTERM-to-SIGKILL window (default RENDER_SHUTDOWN_WINDOW_S; the free plan cannot raise it)."""
+        try:
+            w = float(getattr(self.settings, "shutdown_delay_s", RENDER_SHUTDOWN_WINDOW_S))
+        except (TypeError, ValueError):
+            w = RENDER_SHUTDOWN_WINDOW_S
+        return w if math.isfinite(w) and w > 0 else RENDER_SHUTDOWN_WINDOW_S
+
     def shutdown_budget_s(self) -> float:
-        """The whole graceful shutdown must end well inside Render's shutdown delay (120 s)."""
-        delay = float(getattr(self.settings, "shutdown_delay_s", 120.0))
-        return max(5.0, min(delay - 30.0, self.pass_budget_s + SHUTDOWN_TAIL_S + CANCEL_TIMEOUT_S
-                            + 5 * SHUTDOWN_STORE_TIMEOUT_S))
+        """The runner's whole graceful shutdown: the window minus uvicorn's request drain (it runs first) and a
+        margin for process exit. 22 s with Render's default 30 s window."""
+        return max(3.0, self.shutdown_window_s() - UVICORN_GRACEFUL_S - SHUTDOWN_MARGIN_S)
+
+    def shutdown_order_wait_s(self) -> float:
+        """How long shutdown waits for a running order step / arbitrage set: the pass budget, capped so the journal
+        flush, the Stop check, the handover read and the lease release (SHUTDOWN_RESERVE_S) still fit the budget.
+        12 s with the default window (22 s budget - 2 s fallback release - 8 s reserve). A step still running after
+        that keeps the lease (it expires after the TTL), so no other instance trades beside it; the successor's
+        takeover cancel covers a stopped bot."""
+        return max(0.0, min(self.pass_budget_s,
+                            self.shutdown_budget_s() - SHUTDOWN_STORE_TIMEOUT_S - SHUTDOWN_RESERVE_S))
 
     async def shutdown(self) -> None:
-        """R2 graceful shutdown (SIGTERM -> lifespan): stop scheduling, let a running order step finish (hard
-        PASS_BUDGET_S), persist, then hand over and release the lease if still leader. Never raises. A pass that
-        overran its budget keeps the lease (it expires after the TTL), so no other instance trades beside it."""
+        """R2 graceful shutdown (SIGTERM -> lifespan), bounded by shutdown_budget_s() so it ends inside Render's
+        default window: stop scheduling, let a running order step finish (up to shutdown_order_wait_s), flush the
+        journal, then hand over and release the lease if still leader. Never raises. A pass that overran keeps the
+        lease (it expires after the TTL), so no other instance trades beside it. Stop never waits on any of this."""
         self._shutting_down = True
+        loop = asyncio.get_running_loop()
+        hard_end = loop.time() + self.shutdown_budget_s()
         if self._shadow_task is not None:
             self._shadow_task.cancel()                 # shadow never delays shutdown: cancel, never await
         if self._shadow_variant_task is not None:
             self._shadow_variant_task.cancel()
+        deadline = hard_end - SHUTDOWN_STORE_TIMEOUT_S   # room for the fallback release below
         try:
-            await asyncio.wait_for(self._graceful_handover(), timeout=self.shutdown_budget_s())
+            await asyncio.wait_for(self._graceful_handover(deadline), timeout=max(0.05, deadline - loop.time()))
         except BaseException as e:  # noqa: BLE001   (incl. the budget timeout and cancellation)
             log.error("graceful shutdown incomplete: %s", type(e).__name__)
-            if self.lease.role == LEADER and not self._strategy_running and not self.arb_running_scan:
+            left = hard_end - loop.time()
+            if self.lease.role == LEADER and not self._strategy_running and not self.arb_running_scan and left > 0:
                 with contextlib.suppress(BaseException):
-                    await asyncio.wait_for(self.lease.release(handover=None), SHUTDOWN_STORE_TIMEOUT_S)
+                    await asyncio.wait_for(self.lease.release(handover=None), min(SHUTDOWN_STORE_TIMEOUT_S, left))
         self._leader_ready = False
         for ex in (self._ct_executor, self._tel_executor, self._monitor_executor, self._arb_executor,
                    self._shadow_executor):
@@ -922,61 +976,80 @@ class Runner:
             self._stop_executor.shutdown(wait=False)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
-        for t in self._tasks:
+        if self._tasks:
             with contextlib.suppress(BaseException):
-                await t
+                await asyncio.wait(self._tasks, timeout=0.5)
         self._tasks = []
 
-    async def _graceful_handover(self) -> None:
+    def _shutdown_timeout(self, deadline: float, reserve: float = 0.0) -> float:
+        """A store-call timeout that keeps `reserve` seconds before `deadline` free (at least 50 ms)."""
+        left = deadline - reserve - asyncio.get_running_loop().time()
+        return max(0.05, min(SHUTDOWN_STORE_TIMEOUT_S, left))
+
+    async def _graceful_handover(self, deadline: float | None = None) -> None:
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + self.shutdown_budget_s() - SHUTDOWN_STORE_TIMEOUT_S
         for t in self._tasks:                            # 1) no new passes, scans, renews or pings
             t.cancel()
-        for t in self._tasks:
+        if self._tasks:
             with contextlib.suppress(BaseException):
-                await t
+                await asyncio.wait(self._tasks, timeout=1.0)
         self._tasks = []
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.pass_budget_s       # 2) the order step / arb set finishes (never cut)
-        while (self._strategy_running or self.arb_running_scan) and loop.time() < deadline:
+        # 2) the order step / arb set finishes (never cut by us); the reserve after it stays free
+        wait_until = min(loop.time() + self.shutdown_order_wait_s(), deadline - SHUTDOWN_RESERVE_S)
+        while (self._strategy_running or self.arb_running_scan) and loop.time() < wait_until:
             await asyncio.sleep(0.05)
         overran = self._strategy_running or self.arb_running_scan
-        tail = loop.time() + SHUTDOWN_TAIL_S              # 3) the pass's own journal/heartbeat writes
+        tail = min(loop.time() + SHUTDOWN_TAIL_S, deadline - SHUTDOWN_RESERVE_S)   # 3) the pass's own writes
         while self._pass_lock.locked() and not overran and loop.time() < tail:
             await asyncio.sleep(0.05)
         with contextlib.suppress(BaseException):          # 4) persist what the journal tail has not sent yet
-            await asyncio.wait_for(self._sync_journal(), SHUTDOWN_STORE_TIMEOUT_S)
-        await self._shutdown_stop_checks()
+            await asyncio.wait_for(self._sync_journal(), self._shutdown_timeout(deadline, 3 * SHUTDOWN_STORE_TIMEOUT_S))
+        await self._shutdown_stop_checks(deadline)
         if self.lease.role != LEADER:
             return
         if overran:
-            msg = (f"a pass overran the {self.pass_budget_s:.0f} s budget at shutdown: the lease is NOT released "
-                   f"(it expires in {self.lease.ttl_s:.0f} s), so no other instance trades beside it")
+            msg = (f"a pass was still running {self.shutdown_order_wait_s():.0f} s into shutdown: the lease is NOT "
+                   f"released (it expires in {self.lease.ttl_s:.0f} s), so no other instance trades beside it")
             log.error(msg)
             with contextlib.suppress(BaseException):
-                await asyncio.wait_for(self.alerter.send("Shutdown: pass overran", msg, priority="high"), 5)
+                await asyncio.wait_for(self.alerter.send("Shutdown: pass overran", msg, priority="high"),
+                                       self._shutdown_timeout(deadline))
             return
-        handover = await self._make_handover() if self._leader_ready else None
-        ok = await self.lease.release(handover=handover)  # 5) hand over
+        handover = await self._make_handover(deadline) if self._leader_ready else None
+        try:                                              # 5) hand over, inside what is left of the budget
+            ok = await asyncio.wait_for(self.lease.release(handover=handover),
+                                        max(0.05, deadline - loop.time()))
+        except BaseException as e:  # noqa: BLE001
+            log.error("lease release at shutdown did not finish: %s (it expires after the TTL)", type(e).__name__)
+            return
         log.warning("lease released at shutdown (ok=%s, signed handover=%s)", ok, handover is not None)
 
-    async def _shutdown_stop_checks(self) -> None:
+    async def _shutdown_stop_checks(self, deadline: float | None = None) -> None:
         """S-53 (a): a Stop written to the store by ANOTHER instance (the new standby got the request) while this
         one was shutting down mid-pass: the pass may have placed orders after that instance's cancel. Adopt it
         (no token is then written) and cancel resting mm- orders once more. S-59: a Stop of ours whose store write
         is still pending gets one last write before the lease goes; if that fails, alert. Never raises."""
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + 4 * SHUTDOWN_STORE_TIMEOUT_S + CANCEL_TIMEOUT_S
         if self._stop_pending:
             try:
-                await asyncio.wait_for(self._write_stopped("stop-retry-at-shutdown"), SHUTDOWN_STORE_TIMEOUT_S)
+                await asyncio.wait_for(self._write_stopped("stop-retry-at-shutdown"),
+                                       self._shutdown_timeout(deadline, SHUTDOWN_STORE_TIMEOUT_S))
                 self._stop_pending, self._stop_persisted = False, True
             except Exception as e:  # noqa: BLE001
                 log.error("Stop not persisted before shutdown: %s", type(e).__name__)
                 with contextlib.suppress(BaseException):
                     await asyncio.wait_for(self.alerter.send(
                         "Stop not persisted across deploy", "A Stop on the old instance never reached the store. "
-                        "Press Stop again on the new instance.", priority="urgent"), 5)
+                        "Press Stop again on the new instance.", priority="urgent"), self._shutdown_timeout(deadline))
         if self.desired != "running":
             return                                       # a local Stop already cancelled (and S-4 re-cancelled)
         try:
-            st = await asyncio.wait_for(self.store.get_state(), SHUTDOWN_STORE_TIMEOUT_S)
+            st = await asyncio.wait_for(self.store.get_state(),
+                                        self._shutdown_timeout(deadline, 2 * SHUTDOWN_STORE_TIMEOUT_S))
         except Exception as e:  # noqa: BLE001
             log.warning("shutdown state check failed: %s", type(e).__name__)
             return
@@ -986,9 +1059,13 @@ class Runner:
                     str(st.get("updated_by") or "?")[:64])
         self.desired = "stopped"                         # also means no handover token below
         self.arb_desired, self.arb_mode = "stopped", "demo"
-        await self._best_effort_cancel(self.mode, "shutdown after a remote Stop")
+        # bounded by what is left before the lease release; orders a cut-short cancel leaves resting are cancelled
+        # by the successor (it takes over a stopped bot from another process: S-53 (b) takeover cancel)
+        await self._best_effort_cancel(self.mode, "shutdown after a remote Stop",
+                                       timeout=min(CANCEL_TIMEOUT_S,
+                                                   max(0.05, deadline - SHUTDOWN_STORE_TIMEOUT_S - loop.time())))
 
-    async def _make_handover(self) -> dict | None:
+    async def _make_handover(self, deadline: float | None = None) -> dict | None:
         """A2: a signed token only for a planned shutdown while the maker runs LIVE with no Stop pending. Never
         logged. None (the new leader drops to demo) in every other case."""
         try:
@@ -998,7 +1075,9 @@ class Runner:
             if self.kill_switch() or self._stop_pending or self._stopping:
                 return None
             gen = self._stop_gen
-            st = await asyncio.wait_for(self.store.get_state(), SHUTDOWN_STORE_TIMEOUT_S)
+            to = (SHUTDOWN_STORE_TIMEOUT_S if deadline is None
+                  else self._shutdown_timeout(deadline, SHUTDOWN_STORE_TIMEOUT_S))
+            st = await asyncio.wait_for(self.store.get_state(), to)
             if not st or st.get("desired") != "running" or st.get("mode") != "live":
                 return None
             fp = hosvc.state_fingerprint(st)
@@ -1071,9 +1150,12 @@ class Runner:
         self._tail = botfiles.JournalTail(self.journal_path)
         self._tail.skip_to_end()
         await self.load_cloud()
+        self._apply_arming(self.cloud.get(armsvc.CLOUD_KEY))
         st_alerts = self.cloud.get("alerts_state")
         if isinstance(st_alerts, dict) and isinstance(st_alerts.get("daily_sent"), str):
             self._daily_sent = st_alerts["daily_sent"][:10]
+        if isinstance(st_alerts, dict) and isinstance(st_alerts.get("recon_day"), str):
+            self._recon_day = st_alerts["recon_day"][:10]
         try:
             hb = await self.store.last_heartbeat()
             if hb and hb.get("ts"):
@@ -1192,6 +1274,8 @@ class Runner:
             return "pass_running"
         if self.mode == "live" and not self.live_allowed():
             return "live_not_allowed"
+        if self.mode == "live" and not self.armed("maker"):
+            return "not_armed"                   # item 10: LIVE needs the maker armed (demo is unaffected)
         if self._shutting_down:
             return "shutting_down"
         if not self._fence_ok(min_remaining_s=self.pass_budget_s + FENCE_MARGIN_S):
@@ -1237,9 +1321,9 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 log.error("watchdog failed: %s", e)
             try:
-                await self.check_daily_summary()
+                await self.check_alert_schedules()
             except Exception as e:  # noqa: BLE001
-                log.error("daily summary failed: %s", type(e).__name__)
+                log.error("alert schedules failed: %s", type(e).__name__)
 
     async def check_silence(self) -> None:
         if self.desired != "running":
@@ -1274,6 +1358,8 @@ class Runner:
         """The order step in its worker thread, with the R1 fence checked first."""
         if not self._fence_ok(min_remaining_s=self.pass_budget_s):
             raise FenceBlocked("lease not confirmed before the order step")
+        if mode == "live" and not self.armed("maker"):
+            raise NotArmed("maker not armed for live")     # item 10: a disarm that landed during the pass setup
         return self._run_strategy_sync(mode)
 
     async def _pre_order_fence(self) -> bool:
@@ -1285,6 +1371,7 @@ class Runner:
             return False
         if self._leader_ready:
             await self._sync_state_from_store()
+            await self._sync_arming_from_store()
         return self._fence_ok(min_remaining_s=self.pass_budget_s + FENCE_MARGIN_S)
 
     async def _pass(self, reason: str) -> None:
@@ -1309,6 +1396,8 @@ class Runner:
                     raise FenceBlocked("lease not confirmed")
                 if self.kill_switch() or self.desired != "running" or self._stop_pending:
                     raise RuntimeError("stopped before pass")      # a persisted Stop adopted just above
+                if mode == "live" and not self.armed("maker"):
+                    raise NotArmed("maker not armed for live")      # item 10 (a disarm adopted just above too)
                 strategy_ran = True
                 self._strategy_running = True
                 t0 = time.monotonic()
@@ -1328,12 +1417,17 @@ class Runner:
                 await self._journal_fence_blocked(str(e))
                 self.running_pass = False
                 return                                   # standby: no heartbeat, no pass error alert
+            except NotArmed as e:
+                log.warning("pass skipped: %s", e)
+                self.running_pass = False
+                return                                   # item 10: nothing sent; not an error
             except Exception as e:  # noqa: BLE001
                 ok, err = False, f"{type(e).__name__}: {e}"
                 log.error("pass failed: %s", err)
-            if strategy_ran and (self.desired != "running" or self.kill_switch()):
-                # S-4: a Stop landed during the pass; an order POST in flight at Stop time may have rested
-                # after Stop's cancel. Cancel resting mm- orders once more.
+            if strategy_ran and (self.desired != "running" or self.kill_switch()
+                                 or (mode == "live" and not self.armed("maker"))):
+                # S-4: a Stop (or item 10: a maker disarm) landed during the pass; an order POST in flight at that
+                # time may have rested after its cancel. Cancel resting mm- orders once more.
                 try:
                     n = await asyncio.wait_for(self._cancel_in_stop_pool(mode), timeout=CANCEL_TIMEOUT_S)
                     log.warning("post-pass cancel after Stop: cancelled=%s", n)
@@ -1353,6 +1447,9 @@ class Runner:
             if not ok:
                 await self.alerter.send("Trading pass error", err or "unknown", priority="high")
             self.running_pass = False
+        await self._flush_alert_groups()        # item 18: once per pass, a quiet tail of held repeats
+        if strategy_ran and ok:
+            self._start_recon(mode)             # item 14: once a day, in the background, telemetry pool only
         if strategy_ran:
             self._start_fill_quality()          # S-24: outside the pass lock, own time budget, never blocks Stop
             self._start_queue_position(mode)    # same pattern: read-only, budgeted, Stop never waits on it
@@ -1371,6 +1468,14 @@ class Runner:
             hook()
         except Exception as e:  # noqa: BLE001
             log.warning("post-pass hook failed: %s", type(e).__name__)
+
+    async def _send_throttled(self, title: str, body: str, *, priority: str, key: str) -> Any:
+        """An alert the runner already throttles itself: a per-send group key so the item-18 grouper never holds it
+        back a second time. Falls back to a plain send for an alerter without grouping."""
+        try:
+            return await self.alerter.send(title, body, priority=priority, group_key=key)
+        except TypeError:
+            return await self.alerter.send(title, body, priority=priority)
 
     async def _handle_write_report(self, out: str | None, mode: str, now: datetime | None = None) -> dict:
         """After a pass: record the strategy's write-path summary and send at most ONE grouped order-error alert
@@ -1395,8 +1500,10 @@ class Runner:
                                  "alert.")
                     self._order_alert_utc, self._order_alert_suppressed = now, 0
                     with contextlib.suppress(Exception):
-                        await self.alerter.send(f"Order errors: {rep['cancel']} cancel, {rep['place']} place", body,
-                                                priority="high")
+                        # already throttled here (the body counts suppressed passes): a per-send key keeps the
+                        # item-18 grouper from holding it back a second time
+                        await self._send_throttled(f"Order errors: {rep['cancel']} cancel, {rep['place']} place",
+                                                   body, priority="high", key=f"order-errors@{iso(now)}")
                 else:
                     self._order_alert_suppressed += 1
             if rep["paused"]:
@@ -1404,9 +1511,10 @@ class Runner:
                 if last is None or now - last >= PAUSED_ALERT_EVERY:
                     self._paused_alert_utc = now
                     with contextlib.suppress(Exception):
-                        await self.alerter.send("Trading paused by Kalshi",
-                                                f"Kalshi reported trading is paused ({mode}). The last pass stopped "
-                                                "placing new orders; cancels were still tried.", priority="high")
+                        await self._send_throttled("Trading paused by Kalshi",
+                                                   f"Kalshi reported trading is paused ({mode}). The last pass "
+                                                   "stopped placing new orders; cancels were still tried.",
+                                                   priority="high", key=f"trading-paused@{iso(now)}")
         except Exception as e:  # noqa: BLE001
             log.warning("write report handling failed: %s", type(e).__name__)
         return rep
@@ -1821,6 +1929,26 @@ class Runner:
         parts.append(f"Maker {state} ({self.mode})")
         return "Last 24 h: " + " · ".join(parts)
 
+    def _alerts_state(self) -> dict:
+        cur = self.cloud.get("alerts_state") if isinstance(self.cloud, dict) else None
+        return dict(cur) if isinstance(cur, dict) else {}
+
+    async def _flush_alert_groups(self, now: datetime | None = None) -> None:
+        with contextlib.suppress(Exception):
+            fl = getattr(self.alerter, "flush_groups", None)
+            if callable(fl):
+                await asyncio.wait_for(fl(now), 15)
+
+    async def check_alert_schedules(self, now: datetime | None = None) -> None:
+        """Item 18, once a minute (watchdog): flush held alert groups, the daily summary and the weekly summary
+        (Sunday evening, once per ISO week). Each step is bounded and never raises."""
+        await self._flush_alert_groups(now)
+        with contextlib.suppress(Exception):
+            await self.check_daily_summary(now)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(alertsvc.maybe_send_weekly(self.alerter, self.store, now or utcnow(), self.cloud),
+                                   60)
+
     async def check_daily_summary(self, now: datetime | None = None) -> bool:
         """Once per local day at/after daily_summary_time: one 'daily' alert (history + push). Never raises."""
         try:
@@ -1834,9 +1962,11 @@ class Runner:
                 return False
             self._daily_sent = today                     # set first: a slow store never causes a repeat
             self._notify("daily", "Daily Summary", await self.daily_summary_text(now))
-            self.cloud["alerts_state"] = {"daily_sent": today}
+            # MERGE: alerts_state also holds weekly_sent and recon_day, which must survive the daily write
+            state = {**self._alerts_state(), "daily_sent": today}
+            self.cloud["alerts_state"] = state
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(self.store.save_cloud_settings({"alerts_state": {"daily_sent": today}},
+                await asyncio.wait_for(self.store.save_cloud_settings({"alerts_state": dict(state)},
                                                                       by="daily-summary"), 5)
             return True
         except Exception as e:  # noqa: BLE001
@@ -2109,6 +2239,56 @@ class Runner:
                     e[ctsvc.FIELD] = c
         except Exception as e:  # noqa: BLE001
             log.warning("close-time lookup for new episodes failed: %s", type(e).__name__)
+
+    # ---- item 14: daily Kalshi reconciliation (services/kalshi_recon.py), read only
+    def _recon_due(self, now: datetime) -> str | None:
+        """The local date to record if the daily recon is due now, else None. Due once per local day, at or after
+        the daily summary time (RECON_DEFAULT_TIME when none is set), right after an ok pass (fresh snapshot)."""
+        s = self.alert_settings()
+        loc = alertsvc.local_now(s, now)
+        today = loc.date().isoformat()
+        at = str(s.get("daily_summary_time") or RECON_DEFAULT_TIME)
+        if self._recon_day == today or loc.strftime("%H:%M") < at:
+            return None
+        return today
+
+    def _start_recon(self, mode: str | None = None, now: datetime | None = None) -> asyncio.Task | None:
+        """Schedule the daily recon in the background if due. Never raises, never blocks the pass or Stop."""
+        try:
+            if self._recon_task is not None and not self._recon_task.done():
+                return None
+            today = self._recon_due(now or utcnow())
+            if today is None:
+                return None
+            self._recon_day = today                      # set first: a slow or failing run never repeats today
+            self._recon_task = self._spawn(self.run_recon(mode or self.mode, today, now))
+            return self._recon_task
+        except Exception as e:  # noqa: BLE001
+            log.warning("recon not scheduled: %s", type(e).__name__)
+            return None
+
+    async def run_recon(self, mode: str, today: str | None = None, now: datetime | None = None) -> dict | None:
+        """One daily recon (the previous local day plus open items), its alert through the alerter, and the
+        alerts_state guard (merged). Bounded by RECON_BUDGET_S; Kalshi reads on the telemetry pool (never Stop's).
+        Never raises; a store or Kalshi failure only shows in the report or the log."""
+        now = now or utcnow()
+        report = None
+        try:
+            tz = self.alert_settings().get("tz") or "UTC"
+            report = await asyncio.wait_for(recon.run_daily_recon(
+                self.store, self._tel_kalshi, mode, now, tz=tz, run_blocking=self._run_tel), RECON_BUDGET_S)
+            alert = recon.recon_alert(report)
+            if alert:
+                await self.alerter.send(alert["title"], alert["message"], priority=alert.get("priority", "default"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("daily recon failed: %s", type(e).__name__)
+        if today:
+            state = {**self._alerts_state(), "recon_day": today}
+            self.cloud["alerts_state"] = state
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.store.save_cloud_settings({"alerts_state": dict(state)},
+                                                                      by="daily-recon"), 5)
+        return report
 
     def _tel_kalshi(self, mode: str):
         """S-25: telemetry client: the injected factory if one was given (tests), else the short one."""
@@ -2497,7 +2677,8 @@ class Runner:
         """Re-checked right before every arb execution (a Stop may land mid-scan)."""
         return (self.settings.runner_enabled and self.arb_desired == "running" and self.arb_mode == "live"
                 and gen == self._stop_gen
-                and not self._stopping and self.live_allowed() and not self.arb_kill_switch()
+                and not self._stopping and self.live_allowed() and self.armed("arbitrage")    # item 10
+                and not self.arb_kill_switch()
                 and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
 
     def _arb_demo_wanted(self) -> bool:
@@ -2525,7 +2706,7 @@ class Runner:
     def arb_exec_kind(self) -> str | None:
         """How this scan's opportunities would be handled: "live", "demo-execute", or None (log-only)."""
         if self.arb_mode == "live" and self.live_allowed():
-            return "live"
+            return "live" if self.armed("arbitrage") else None    # item 10: not armed = log-only
         if self._arb_demo_wanted():
             return "demo-execute"
         return None
@@ -2881,26 +3062,16 @@ class Runner:
                     except Exception as e:  # noqa: BLE001
                         log.error("arb log write failed: %s", type(e).__name__)
                 if note.get("type") == "contained":
-                    c = note["contain"]
-                    loss = c.get("loss")
-                    loss_s = f"${loss:.2f}" if isinstance(loss, (int, float)) else "unknown"
-                    if note.get("trip"):
-                        await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
-                                                f"{op.event}: {executed} ({note['trip']})", priority="urgent")
-                    else:
-                        await self.alerter.send(
-                            "Arbitrage partial set contained: series paused",
-                            f"{op.event}: fills {c.get('fills')}, {c.get('how')}, loss {loss_s}. Series "
-                            f"{c.get('series')} paused until {c.get('paused_until_date')} (00:00 New York); "
-                            "other series keep running.", priority="urgent")
+                    await self._send_legging_alert(op, executed, note)
                 elif note.get("type") == "unconfirmed":
                     if stored:                       # at most once per event and reason per hour, like its log row
-                        await self.alerter.send("Arbitrage order state unconfirmed",
-                                                f"{op.event}: {executed}. A first leg may have filled; check "
-                                                "positions.")
+                        # L-3: keyed per event, so another event's alert is never held back by the grouper
+                        await self._send_throttled("Arbitrage order state unconfirmed",
+                                                   f"{op.event}: {executed}. A first leg may have filled; check "
+                                                   "positions.", priority="default",
+                                                   key=f"unconfirmed@{str(op.event)[:80]}")
                 elif executed.startswith(("PARTIAL", "ERROR")):
-                    await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
-                                            f"{op.event}: {executed}", priority="urgent")
+                    await self._send_legging_alert(op, executed, None)
                 elif executed.startswith("FILLED"):
                     where = " (demo exchange)" if kind == "demo-execute" else ""
                     done = " (missing legs completed)" if executed.startswith("FILLED (completed)") else ""
@@ -2909,6 +3080,31 @@ class Runner:
             if self.arb_kill_switch() and self.arb_desired == "running":
                 await self._arb_tripped()
             return {"scanned": True, "found": len(results)}
+
+    async def _send_legging_alert(self, op: Any, executed: str, note: dict | None) -> None:
+        """Items 5/3: the urgent legging alert (services/alerts.legging_alert) for a contained or an uncontained
+        partial set. A contained set whose rules still tripped the global kill switch (e.g. a second partial in 24 h)
+        is sent with no loss cap, so the text says the kill switch tripped, plus the reason. Never raises; on any
+        failure a plain urgent alert still goes out."""
+        try:
+            if note is not None:
+                c = note.get("contain") or {}
+                parsed = {"kind": "contained", "fills": c.get("fills"), "loss": c.get("loss"), "event": op.event}
+                trip = note.get("trip")
+                alert = alertsvc.legging_alert(parsed, c.get("paused_until_date"), None if trip else c.get("loss_cap"))
+                if trip:
+                    alert["body"] = f"{alert['body']} Reason: {str(trip)[:120]}."
+            else:
+                parsed = {**arbcontain.parse(executed), "event": op.event}
+                if parsed.get("kind") not in ("partial", "error"):
+                    parsed["kind"] = "error" if str(executed).startswith("ERROR") else "partial"
+                alert = alertsvc.legging_alert(parsed, None, None)
+            await self.alerter.send_alert(alert)
+        except Exception as e:  # noqa: BLE001
+            log.error("legging alert failed: %s", type(e).__name__)
+            with contextlib.suppress(Exception):
+                await self.alerter.send("Arbitrage legging risk: arb kill switch tripped",
+                                        f"{op.event}: {executed}", priority="urgent")
 
     async def _arb_tripped(self) -> None:
         """The arb kill switch is on disk (legging) while arb is on: turn arb off and persist it, because Render's
@@ -2939,6 +3135,8 @@ class Runner:
             raise StopInProgress("stop_in_progress")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
+        if mode == "live" and not self.armed("arbitrage"):
+            raise PermissionError("arbitrage_not_armed")   # item 10
         if desired == "running" and arbsvc.kill_reason(self.arb_kill_path) in ("legging", "unknown") \
                 and not ack_legging:
             raise PermissionError("arb_legging_kill")
@@ -3103,6 +3301,8 @@ class Runner:
             # never start real-money trading on the public stand-in (mode is normally demo here: LIVE is refused
             # by set_mode and never restored after a restart; this is the belt-and-braces check)
             raise PermissionError("strategy_not_installed")
+        if self.mode == "live" and not self.armed("maker"):
+            raise PermissionError("maker_not_armed")       # item 10: arm the maker first (Arming page, fresh 2FA)
         gen = self._stop_gen
         if self._stopping:
             raise StopInProgress("stop_in_progress")
@@ -3208,6 +3408,130 @@ class Runner:
             self.last_monitor_utc = utcnow()      # don't retry every pass
             return {"summary": summary or None, "error": f"{type(e).__name__}"}
 
+    # ---- item 10: per-strategy LIVE arming (services/arming.py). Stop never reads or writes any of this.
+    def armed(self, strategy: str) -> bool:
+        return isinstance(self.arming, dict) and self.arming.get(strategy) is True
+
+    def _apply_arming(self, raw: Any) -> None:
+        a = armsvc.normalize(raw)
+        for s in self._disarm_pending:
+            a[s] = False
+        self.arming = a
+
+    def _arming_doc(self) -> dict:
+        doc = {s: self.armed(s) for s in armsvc.STRATEGIES}
+        doc.update({"updated": self.arming.get("updated"), "by": self.arming.get("by")})
+        return doc
+
+    async def _sync_arming_from_store(self) -> None:
+        """Leader: adopt a disarm another instance wrote to the store (never an arm: that is only read at startup).
+        One bounded read, only while something is armed. Never raises."""
+        if not any(self.armed(s) for s in armsvc.STRATEGIES):
+            return
+        try:
+            cs = await asyncio.wait_for(self.store.get_cloud_settings(), 5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("arming sync failed: %s", type(e).__name__)
+            return
+        stored = armsvc.normalize((cs or {}).get(armsvc.CLOUD_KEY))
+        for s in armsvc.STRATEGIES:
+            if self.armed(s) and not stored[s]:
+                self.arming = {**self.arming, s: False, "updated": stored["updated"], "by": stored["by"]}
+                log.warning("%s disarmed in the store (by %s): adopted", s, (stored["by"] or "?")[:64])
+
+    def disarm_generation(self, strategy: str) -> int:
+        """M-1: bumped by every disarm of `strategy`. The arming route reads it BEFORE its preflight and passes it to
+        set_armed, so a disarm at any point after that refuses the arm."""
+        return int(self._disarm_gen.get(armsvc.check_strategy(strategy), 0))
+
+    async def _stored_arming(self) -> dict:
+        cs = await asyncio.wait_for(self.store.get_cloud_settings(), 5)
+        return armsvc.normalize((cs or {}).get(armsvc.CLOUD_KEY))
+
+    def _arming_alert(self, title: str, body: str, priority: str, key: str) -> None:
+        """L-3: arming alerts carry a per-send group key, so a repeat (a second disarm) is never held back."""
+        with contextlib.suppress(Exception):
+            self._spawn(self._send_throttled(title, body, priority=priority, key=key))
+
+    async def set_armed(self, strategy: str, armed: bool, *, by: str, disarm_gen: int | None = None) -> dict:
+        """Arm or disarm one strategy for LIVE (the route has already checked fresh 2FA and the preflight).
+
+        M-1 (security review 2B): every store write of the arming doc is serialized by `_arming_lock` and is a
+        read-modify-write of the LATEST stored doc that changes only this strategy's flag.
+        * Arm: refused (PermissionError "disarmed_meanwhile") when this strategy was disarmed since `disarm_gen`
+          (the route's value from before its preflight), checked under the lock before the write and again after
+          it; a disarm that landed during the write gets a compensating "not armed" write. Memory changes only for
+          this strategy and only after the write. A store error raises: nothing is armed.
+        * Disarm: in force in memory at once (before any lock or await), the maker's resting LIVE mm- orders are
+          cancelled on Stop's pool (single-flight) while the store write waits for the lock. A failed write leaves
+          the flag disarmed here (re-applied over later reads). Never raises (ValueError for a bad name)."""
+        s = armsvc.check_strategy(strategy)
+        who = str(by or "user")[:armsvc.BY_MAX]
+        now = iso(utcnow())
+        if armed:
+            gen0 = self.disarm_generation(s) if disarm_gen is None else int(disarm_gen)
+            if not self.settings.runner_enabled:
+                raise RunnerDisabled("runner_disabled")
+            if not self.live_allowed():
+                raise PermissionError(self.live_block_reason() or "live_not_allowed")
+            async with self._arming_lock:
+                if self.disarm_generation(s) != gen0:
+                    raise PermissionError("disarmed_meanwhile")
+                stored = await self._stored_arming()            # raises: not armed (fail safe)
+                doc = {x: (stored[x] and x not in self._disarm_pending) for x in armsvc.STRATEGIES}
+                doc.update({s: True, "updated": now, "by": who})
+                await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: doc}, by=who), 5)
+                if self.disarm_generation(s) != gen0:           # a disarm landed during our write: undo ours
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self.store.save_cloud_settings(
+                            {armsvc.CLOUD_KEY: {**doc, s: False, "by": "disarm-wins"}}, by="disarm-wins"), 5)
+                    raise PermissionError("disarmed_meanwhile")
+                self._disarm_pending.discard(s)
+                self.arming = {**self.arming, s: True, "updated": now, "by": who}
+            self._arming_alert(f"{s.capitalize()} armed for LIVE", f"{s} may trade in live mode; armed by {who}",
+                               "urgent", f"arming@{s}@{now}")
+            return {"strategy": s, "armed": self.armed(s), "persisted": True, "cancelled": 0, "errors": []}
+        # ---- disarm: memory first, no await before this point
+        self._disarm_gen[s] = self.disarm_generation(s) + 1
+        gen = self._disarm_gen[s]
+        self._disarm_pending.add(s)
+        self.arming = {**self.arming, s: False, "updated": now, "by": who}
+        errors: list[str] = []
+        cancel = None
+        if s == "maker" and self.mode == "live":
+            # the same cancel Stop makes (Stop's own pool, bounded); arbitrage sets are immediate-or-cancel.
+            # Single-flight: repeated disarms never hold more than one of Stop's workers, so Stop is never slowed.
+            if self._disarm_cancel is None or self._disarm_cancel.done():
+                self._disarm_cancel = asyncio.ensure_future(
+                    self._best_effort_cancel("live", f"maker disarmed by {who}"))
+                cancel = self._disarm_cancel
+            else:
+                errors.append("cancel: already running")
+        persisted = False
+        try:
+            async with self._arming_lock:                       # behind an in-flight arm (bounded); memory is set
+                try:
+                    stored = await self._stored_arming()
+                except Exception:  # noqa: BLE001   (write what this process knows; this flag is False either way)
+                    stored = armsvc.normalize(self._arming_doc())
+                doc = {x: (stored[x] and x not in self._disarm_pending) for x in armsvc.STRATEGIES}
+                doc.update({s: False, "updated": now, "by": who})
+                await asyncio.wait_for(self.store.save_cloud_settings({armsvc.CLOUD_KEY: doc}, by=who), 5)
+                if self.disarm_generation(s) == gen:
+                    self._disarm_pending.discard(s)
+                persisted = True
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"store: {type(e).__name__} (disarmed in this process)")
+            log.error("disarm not persisted: %s", type(e).__name__)
+        cancelled = 0
+        if cancel is not None:
+            with contextlib.suppress(Exception):
+                cancelled = await asyncio.shield(cancel)
+        self._arming_alert(f"{s.capitalize()} disarmed",
+                           f"{s} will not trade in live mode; disarmed by {who}; cancelled {cancelled}"
+                           + (f"; errors {errors}" if errors else ""), "high", f"arming@{s}@{now}@{gen}")
+        return {"strategy": s, "armed": False, "persisted": persisted, "cancelled": cancelled, "errors": errors}
+
     def status(self) -> dict:
         return {"running_pass": self.running_pass, "last_run_utc": iso(self.last_run_utc),
                 "last_error": self.last_error, "next_due_utc": iso(self.next_due_utc()),
@@ -3217,5 +3541,7 @@ class Runner:
                 "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error},
                 # last pass's write-path summary (additive): cancel/place failures, paused, capped series
                 "write_report": self.last_write_report,
+                # item 10 (additive): per-strategy LIVE arming
+                "arming": {"maker": self.armed("maker"), "arbitrage": self.armed("arbitrage")},
                 # R4 version handshake + R1 lease (additive fields)
                 **ver.handshake(), **self.lease_status(), "instance_id": self.instance_id}

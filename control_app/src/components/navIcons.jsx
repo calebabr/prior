@@ -1,6 +1,6 @@
 import {
   IconAccount, IconActivity, IconAnalytics, IconArb, IconBell, IconHealth, IconLogs, IconMarkets, IconMode,
-  IconBook, IconMore, IconOverview, IconServer, IconSettings,
+  IconBook, IconLock, IconMore, IconOverview, IconServer, IconSettings,
 } from './Icons.jsx';
 
 // Route -> the icon shown in the tab bar, sidebar, More page and the page-title bar.
@@ -21,6 +21,7 @@ const ICONS = {
   '/account': IconAccount,
   '/alerts': IconBell,
   '/mode': IconMode,
+  '/arming': IconLock,
   '/server': IconServer,
   '/logs': IconLogs,
   '/terminology': IconBook,

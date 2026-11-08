@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from control_api.tests.conftest import preflight_ready
+
 from control_api import runner as rn
 from control_api.services import arb as arbsvc
 from control_api.tests.test_arb_demo_execute import DEMO_URL, PROD_URL, TwoEventPublic
@@ -218,6 +220,8 @@ async def test_never_in_live_mode(cenv, monkeypatch, real_strategy):
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(cenv.settings, "prod_keys_present", True)
     monkeypatch.setattr(cenv.settings, "live_confirm_ok", True)
+    cenv.runner.arming["arbitrage"] = True     # S3 item 10: live arbitrage needs arming
+    preflight_ready(monkeypatch)                 # S3 L-1: live re-runs the preflight
     r = await _put(cenv, {"enabled": True, "live": True, "confirm": "LIVE", "arb_complete_legs": True})
     assert r.status_code == 200
     cenv.trader.base_url = PROD_URL

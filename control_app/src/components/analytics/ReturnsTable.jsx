@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom';
+import { dayPath } from '../../utils/day.js';
 import { DASH, formatMoney, formatPeriodReturn, num } from '../../utils/format.js';
 import { signCls } from '../../utils/analytics.js';
 import { isSmall, periodTitle, reasonText, strategyLabel } from '../../utils/returns.js';
@@ -19,7 +21,7 @@ export function ReturnCell({ period }) {
  * Accessible table alternative to the bars (also the screen-reader and print view): one row per period, newest
  * first, one column per strategy the server sent, and a Fills button that opens the same sheet as a bar tap.
  */
-export default function ReturnsTable({ periods, granularity, onOpen }) {
+export default function ReturnsTable({ periods, granularity, onOpen, dayLink = false }) {
   const keys = [];
   for (const p of periods) for (const k of Object.keys(p.by_strategy || {})) if (!keys.includes(k)) keys.push(k);
   const rows = periods.map((p, i) => ({ p, i })).reverse();
@@ -47,7 +49,7 @@ export default function ReturnsTable({ periods, granularity, onOpen }) {
           {rows.map(({ p, i }) => (
             <tr key={p.start_local} className={isSmall(p) ? 'is-small' : ''}>
               <th scope="row">
-                {periodTitle(p, granularity)}
+                {dayLink && granularity === 'day' ? <Link to={dayPath(p.start_local)}>{periodTitle(p, granularity)}</Link> : periodTitle(p, granularity)}
                 {isSmall(p) && <span className="rt-flag"> n&lt;5</span>}
               </th>
               {keys.map((k) => {

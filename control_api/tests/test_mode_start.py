@@ -31,6 +31,8 @@ async def test_live_allowed_when_env_set(env, monkeypatch, real_strategy):
     monkeypatch.setenv("KALSHI_LIVE_CONFIRM", rn.LIVE_CONFIRM)
     monkeypatch.setattr(env.settings, "prod_keys_present", True)   # startup snapshot (S-19)
     monkeypatch.setattr(env.settings, "live_confirm_ok", True)
+    from control_api.tests.conftest import preflight_ready
+    preflight_ready(monkeypatch)                    # S3 L-1: live mode re-runs the go-live preflight
     r = await env.client.put("/api/mode", headers=await env.h2fa(), json={"mode": "live", "confirm": "LIVE"})
     assert r.status_code == 200 and env.runner.mode == "live"
     assert (await env.store.get_state())["mode"] == "live"

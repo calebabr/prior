@@ -411,6 +411,11 @@ export const api = {
   pushTest: () => request('POST', '/api/push/test', { cache: false }),
   getAccountPositions: () => request('GET', '/api/account/positions').then((d) => (Array.isArray(d) ? d : (d && d.positions) || [])),
 
+  // Live-arming checklist (Sprint 2B part 3). Reads need a login; changing arming needs fresh 2FA.
+  getPreflight: (target = 'live') => request('GET', `/api/preflight${query({ target })}`, { cache: false }),
+  getArming: () => request('GET', '/api/arming', { cache: false }),
+  setArming: (strategy, armed, code) => request('PUT', '/api/arming', { body: { strategy, armed }, code, cache: false }),
+
   // Server / keep-awake
   getCloud: () => request('GET', '/api/cloud'),
   putCloud: (patch, code) => request('PUT', '/api/cloud', { body: patch, code }),
@@ -457,6 +462,9 @@ export const api = {
     request('GET', `/api/analytics/returns${query({ granularity, days, env, tz: viewerTimeZone() })}`, { signal }),
   analyticsReturnsFills: ({ granularity = 'day', start, end, days = 30, env, limit = 50, offset = 0 } = {}, { signal } = {}) =>
     request('GET', `/api/analytics/returns/fills${query({ granularity, start, end, days, env, limit, offset, tz: viewerTimeZone() })}`, { signal }),
+  // Day view: one local day of filled / settled / realized. Read-only, no 2FA.
+  analyticsDay: ({ date, strategy, env } = {}, { signal } = {}) =>
+    request('GET', `/api/analytics/day${query({ date, strategy: strategy && strategy !== 'all' ? strategy : undefined, env, tz: viewerTimeZone() })}`, { signal }),
   // params: days, env, series, side, kind, status, band, cell, result, limit, offset
   analyticsTrades: (params = {}, { signal } = {}) =>
     request('GET', `/api/analytics/trades${query(params)}`, { signal }),

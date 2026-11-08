@@ -51,6 +51,7 @@ export const ROUTE_TITLES = [
   { path: '/health', title: 'Health', parent: '/more' },
   { path: '/server', title: 'Server', parent: '/more' },
   { path: '/mode', title: 'Mode', parent: '/more' },
+  { path: '/arming', title: 'Arming', parent: '/more' },
   { path: '/logs', title: 'Logs', parent: '/more' },
   { path: '/account', title: 'Account', parent: '/more' },
   { path: '/settings', title: 'Settings', parent: '/more' },
@@ -77,17 +78,23 @@ export function redirectTarget(pathname) {
   return hit ? hit.to : null;
 }
 
+// Pages whose path carries a parameter (not in ROUTE_TITLES, which lists literal paths): the Day view.
+export const PATTERN_ROUTES = [
+  { pattern: /^\/performance\/day\/\d{4}-\d{2}-\d{2}$/, title: 'Day', parent: '/performance' },
+];
+const patternFor = (p) => PATTERN_ROUTES.find((r) => r.pattern.test(p));
+
 /** Page title for a pathname ("/health/" and "/health" both match), or null if unknown. */
 export function titleForPath(pathname) {
   const p = normalise(pathname);
-  const hit = ROUTE_TITLES.find((r) => r.path === p);
+  const hit = ROUTE_TITLES.find((r) => r.path === p) || patternFor(p);
   return hit ? hit.title : null;
 }
 
 /** Parent of a route (the back arrow's target), or null for the five tabs and unknown paths. */
 export function parentForPath(pathname) {
   const p = normalise(pathname);
-  const hit = ROUTE_TITLES.find((r) => r.path === p);
+  const hit = ROUTE_TITLES.find((r) => r.path === p) || patternFor(p);
   return hit && hit.parent ? hit.parent : null;
 }
 
@@ -135,6 +142,7 @@ export const MORE_GROUPS = [
       { path: '/health', label: 'Health', blurb: 'Monitor summary and health check' },
       { path: '/server', label: 'Server', blurb: 'Keep-awake pings and the external pinger' },
       { path: '/mode', label: 'Mode', blurb: 'Switch between demo and live' },
+      { path: '/arming', label: 'Arming', blurb: 'Live-readiness checks and arming switches' },
       { path: '/logs', label: 'Logs', blurb: 'Server log and audit trail' },
     ],
   },

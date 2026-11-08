@@ -70,7 +70,11 @@ A **single-leader lease** in Atlas decides which server instance may trade.
   - It sets the kill switches and the persisted stop.
   - The lease holder and any new holder must respect it.
   - Stop beats the lease: a stopped bot stays stopped across any number of deploys.
-- **Render setting:** shutdown delay raised from the default 30 s to **90 s** (`render.yaml`), so the old instance always has time to finish its pass and hand over.
+- **Render setting (changed 2026-11-07, Sprint 2B item 11, option b):** the free plan cannot raise the shutdown delay, so the whole shutdown is sized to Render's **default 30 s** window (`runner.RENDER_SHUTDOWN_WINDOW_S`). uvicorn drains in-flight requests for at most 5 s first (`--timeout-graceful-shutdown 5` in `render.yaml` = `runner.UVICORN_GRACEFUL_S`), then the runner has **22 s** (`shutdown_budget_s`, 3 s margin before SIGKILL):
+  - it waits up to **12 s** (`shutdown_order_wait_s`) for a running order step or arbitrage set to finish (never cut by us);
+  - every shutdown store call is bounded at 2 s (journal flush, Stop check, handover read, lease release: 8 s reserved), and a remote-Stop cancel gets only what is left before the release;
+  - a pass still running after 12 s keeps the lease (it expires after the 60 s TTL), so no other instance trades beside it; the successor's takeover cancel covers a stopped bot.
+  - The release gate still refuses to deploy while an arbitrage set is executing. A paid plan may set `SHUTDOWN_DELAY_S` (env) to its real `maxShutdownDelaySeconds`; the budget scales with it.
 
 ## 5. Compatibility rules (old and new code side by side)
 
@@ -141,6 +145,8 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
 | **B** Who triggers deploys | **B2: manual release workflow** | Render auto-deploy **Off**. A GitHub Actions "release" workflow with an approval step by me (approvable from the phone) runs: CI green on the exact commit → safety gate → backend deploy hook → verify → frontend deploy → verify → ntfy "Release vX healthy" → tag. AI coding agents can open PRs but never run or approve it |
 | **C** Shutdown delay | **120 s** | `render.yaml` shutdown delay 120 s; pass budget 25 s; handover must complete well inside it (tested) |
 
+> **Resolved 2026-11-07 (option b, free):** the runner's shutdown now fits Render's default 30 s window (section 4, "Render setting"); decision C is replaced by that budget. The original note follows.
+>
 > **Free-plan limit found 2026-10-17:** Render rejects `maxShutdownDelaySeconds` on the free plan, so the 120 s window above needs a paid plan. On free, Render's default shutdown window applies; a shutdown that is cut short is covered by the successor's takeover cancel. This is fine for the demo (demo mode only). Before LIVE, either move to a paid plan and restore `maxShutdownDelaySeconds: 120`, or shorten the runner shutdown to fit the default window.
 
 ### B2 mechanics (checked 2026-10-13)
@@ -148,7 +154,8 @@ Today (S-21), any restart drops LIVE to demo, and you re-arm from the phone. Wit
 GitHub's native "required reviewers" on deployment environments is **not available for private repos on GitHub Free/Pro/Team** ([GitHub docs](https://docs.github.com/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment)). So B2 for the private repo works like this:
 1. **Start:** I run the `release` workflow (`workflow_dispatch`) from **GitHub Mobile** (Repository → Actions → release → Run workflow), choosing the commit or tag. Only accounts with write access can run it.
 2. **Gate:** the workflow checks that CI is green on that exact commit and runs the safety gate.
-3. **Approve with 2FA in Prior:** the workflow posts a *pending release* (version, commit, change summary, CI result) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. AI coding agents can never approve (no 2FA), even though their commits appear under the owner's git name.
+3. **Approve with 2FA in Prior:** the workflow posts a *pending release* (version, commit, change summary, CI result, and an optional `trading_changes` flag) to the API. The Server page shows it with **Approve** / **Reject**; Approve needs fresh 2FA. The workflow polls the API using a release-scoped token and proceeds only after approval; it times out (no deploy) after 30 min. AI coding agents can never approve (no 2FA), even though their commits appear under the owner's git name.
+   - **`trading_changes`** (boolean, default `false`, added 2026-11-07): set it to `true` when the release changes trading behaviour, sizing, caps or the reliability profile (anything that starts a new period). It is stored with the pending release and written into the `release.register` and `release.approve` audit rows, which the Periods page markers read to show the release as a trading-behaviour change. App-only releases leave it `false`. The register body is `{version, commit, summary, ci, trading_changes}`; a non-boolean value is refused (422). Passing it from the workflow (`scripts/release_ctl.py register`) is a follow-up; until then set it when registering by hand.
 4. **Deploy:** backend deploy hook → verify → frontend → verify → ntfy "Release vX healthy" → tag.
 
 After the public/private split, the public `tradingControlApp` repo could use GitHub's native required reviewers (free on public repos) as an extra layer.

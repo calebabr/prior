@@ -25,7 +25,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     from .auth.routes import router as auth_router
     from .db import get_store
     from . import version as ver
-    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, periods, release, shadow, ux
+    from .routes import alerts, analytics, arb, bot, cloud, config, data, deploy_status, periods, recon, release, shadow, ux
     from .runner import Runner
     from .services import keepalive as ka
     from .services.cronjob import CronJobClient
@@ -47,7 +47,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
             yield
         finally:
             # R2: on SIGTERM uvicorn runs this; the runner finishes its order step, persists, hands over and
-            # releases the lease well inside Render's 120 s shutdown delay. Never raises.
+            # releases the lease inside Render's default 30 s window (runner.shutdown_budget_s). Never raises.
             await runner.shutdown()
             with contextlib.suppress(Exception):
                 await store.close()
@@ -77,8 +77,11 @@ def create_app(settings: Settings | None = None, store: Any = None,
         return {"ok": True, **ver.handshake(), "role": runner.role(), "lease_generation": runner.lease.generation}
 
     app.include_router(auth_router)
-    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow, periods):
+    for mod in (bot, config, data, cloud, arb, analytics, ux, alerts, deploy_status, release, shadow, periods, recon):
         app.include_router(mod.router)
+    app.include_router(__import__("control_api.routes.preflight", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.dayview", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.arming", fromlist=["router"]).router)
     return app
 
 

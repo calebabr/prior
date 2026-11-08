@@ -1,0 +1,42 @@
+/* Day view (pages/Day.jsx, components/day/*). Theme tokens only; no new colours. Single column, 40 px targets. */
+
+.day-date { margin: 0 0 var(--sp-2); font-size: var(--fs-md, 0.9375rem); color: var(--muted); }
+.day-page .chips { margin-bottom: var(--sp-2); }
+.day-dim { opacity: 0.6; }
+
+/* summary strip: three figures that wrap rather than overflow at 320 px */
+.day-figs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin: 0; font-variant-numeric: tabular-nums; }
+.day-fig { min-width: 0; }
+.day-fig dt { font-size: var(--fs-sm, 0.8125rem); color: var(--muted); }
+.day-fig dd { margin: 0; overflow-wrap: anywhere; }
+.day-fig dd.num { font-size: var(--fs-xl, 1.25rem); font-weight: 500; line-height: var(--lh-tight, 1.2); }
+.day-fig-sub { font-size: var(--fs-xs, 0.75rem); color: var(--muted); }
+.day-verdict { margin: var(--sp-2) 0 0; font-size: var(--fs-sm, 0.8125rem); }
+
+/* lists, grouped by market event */
+.day-group { margin-top: var(--sp-2); }
+.day-event { margin: 0; font-size: var(--fs-xs, 0.75rem); font-weight: 600; color: var(--muted); overflow-wrap: anywhere; letter-spacing: 0.02em; }
+.day-rows { list-style: none; margin: 0; padding: 0; }
+.day-row { padding: var(--sp-2) 0; border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.day-row:first-child { border-top: 0; }
+.day-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--sp-2); }
+.day-row-what { font-weight: 500; }
+.day-row-cost { margin-left: auto; }
+.day-row-sub { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px var(--sp-2); margin-top: 2px; font-size: var(--fs-sm, 0.8125rem); min-height: var(--tap); }
+.day-row-pnl { font-weight: 500; }
+.day-page .kalshi-link { display: inline-flex; align-items: center; min-height: var(--tap); }
+.day-page .collapsible-toggle { min-height: var(--tap); }
+
+/* day analytics */
+.day-an { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.day-an th, .day-an td { padding: var(--sp-2) var(--sp-1); border-top: 1px solid var(--border); text-align: right; }
+.day-an th[scope="row"], .day-an thead th:first-child { text-align: left; font-weight: 400; }
+.day-an thead th { border-top: 0; font-size: var(--fs-sm, 0.8125rem); font-weight: 600; color: var(--muted); }
+
+/* Home card and the Performance Today link */
+.day-card { gap: var(--sp-2); }
+.day-card-figs { display: flex; flex: 1; min-width: 0; gap: var(--sp-3); margin: 0; font-variant-numeric: tabular-nums; }
+.day-card-figs > div { min-width: 0; }
+.day-card-figs dt { font-size: var(--fs-xs, 0.75rem); color: var(--muted); }
+.day-card-figs dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+.day-card-empty { flex: 1; min-width: 0; }

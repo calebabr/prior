@@ -29,7 +29,7 @@ from typing import Any, Iterable
 SCEN = ("lo", "mid", "hi")
 MIN_DAYS = 7
 GATE_MIN_EPISODES = 30
-CAP_REASONS = ("series_cap", "open_cap", "run_budget")
+CAP_REASONS = ("series_cap", "market_cap", "open_cap", "run_budget")
 
 
 # ---------------------------------------------------------------- per episode
@@ -284,7 +284,7 @@ def cap_violations(episodes: Iterable[dict], *, capital: float, max_open_frac: f
                    series: list[str], series_cap: float | None, tol: float = 0.005 + 1e-6) -> list[str]:
     """Invariants after one cycle, from the episode states alone (independent of the pass doc):
     held + resting <= ceiling; resting <= run budget and <= capital - held; resting per series <= headroom / n;
-    a series at or over its cap rests nothing new; capped episodes carry a reason, a zero fill and are read."""
+    held + resting per series <= series cap x ceiling (a series at or over it rests nothing new); capped episodes carry a reason, a zero fill and are read."""
     eps = list(episodes)
     ceiling = max_open_frac * capital
     held = sum(held_cost(e) for e in eps)
@@ -301,8 +301,10 @@ def cap_violations(episodes: Iterable[dict], *, capital: float, max_open_frac: f
         rs = sum(resting_cost(e) for e in eps if e.get("series") == s)
         if rs > per + tol:
             out.append(f"series {s}: resting {rs:.4f} > share {per:.4f}")
-        if series_cap is not None and hs >= series_cap * ceiling - 1e-9 and rs > tol:
-            out.append(f"series {s}: held {hs:.4f} >= cap {series_cap * ceiling:.4f} but resting {rs:.4f}")
+        # series room: a bid is sized to limit x ceiling minus the series' held cost and resting bids, so held plus
+        # resting stays within it, and a series already at or over it rests nothing
+        if series_cap is not None and rs > tol and hs + rs > series_cap * ceiling + tol:
+            out.append(f"series {s}: held {hs:.4f} + resting {rs:.4f} > cap {series_cap * ceiling:.4f}")
     for e in eps:
         if e.get("capped"):
             if e.get("cap_reason") not in CAP_REASONS:
@@ -311,6 +313,37 @@ def cap_violations(episodes: Iterable[dict], *, capital: float, max_open_frac: f
                 out.append(f"capped {e.get('ep_id')}: fill {e.get('fill')} trades_read {e.get('trades_read')}")
             if e.get("pnl") is not None:
                 out.append(f"capped {e.get('ep_id')}: scored")
+    return out
+
+
+def series_funding_violations(snapshots: Iterable[tuple[datetime, dict]], final: dict, *, ceiling: float,
+                              series_cap: float | None, tol: float = 0.005 + 1e-6) -> list[str]:
+    """The series version of the economic invariant, with hindsight (see `funding_violations`): at every cycle time
+    the positions actually held in one series plus its resting bids never exceed series_cap x ceiling. Counted from
+    the stored episodes alone, so it checks the shadow's series room independently of its own bookkeeping."""
+    if series_cap is None:
+        return []
+    cap = series_cap * ceiling
+    out = []
+    for k, (t, eps) in enumerate(snapshots):
+        tot: dict[str, float] = {}
+        for eid, e in eps.items():
+            if e.get("capped"):
+                continue
+            s = e.get("series")
+            if e.get("end_ts") is None:
+                tot[s] = tot.get(s, 0.0) + resting_cost(e)
+                continue
+            f = final.get(eid, e)
+            st = f.get("settled_ts")
+            if f.get("result") is not None and st is not None and st <= t:
+                continue
+            fill = f.get("fill")
+            tot[s] = tot.get(s, 0.0) + (float(e["count"]) * float(e["price"]) if fill is None
+                                        else float(fill["mid"]) * float(e["price"]))
+        for s, v in tot.items():
+            if v > cap + tol:
+                out.append(f"cycle {k} ({t:%H:%M}): series {s} held + resting {v:.4f} > cap {cap:.4f}")
     return out
 
 

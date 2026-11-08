@@ -1,7 +1,8 @@
 """Pending releases (decision B2): the release workflow registers a release and polls it; the owner approves it
 in the app with fresh 2FA (agents have no 2FA, so they can never approve) or rejects it.
 
-* ``POST /api/release/pending``          X-Release-Token   register {version, commit, summary, ci} -> {id, status}
+* ``POST /api/release/pending``          X-Release-Token   register {version, commit, summary, ci,
+                                                            trading_changes?: bool = false} -> {id, status}
 * ``GET  /api/release/pending/{id}``     X-Release-Token   -> {status} (pending/approved/rejected/expired)
 * ``GET  /api/release/pending``          login             -> {release: {...} | null} (latest pending, unexpired)
 * ``POST /api/release/pending/{id}/approve``  fresh 2FA    -> {id, status}
@@ -35,7 +36,8 @@ LIMIT = (60, 300.0)            # the workflow polls about every 10-15 s for up t
 MAX_TOKEN_LEN = 256
 MAX_BODY_BYTES = 8192
 ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
-_PUBLIC = ("id", "version", "commit", "summary", "ci", "status", "created_at", "expires_at", "by", "at")
+_PUBLIC = ("id", "version", "commit", "summary", "ci", "trading_changes", "status", "created_at", "expires_at", "by",
+           "at")
 
 
 class ReleaseIn(BaseModel):
@@ -44,6 +46,9 @@ class ReleaseIn(BaseModel):
     commit: str = Field(min_length=7, max_length=40, pattern=r"^[0-9a-f]{7,40}$")
     summary: str = Field(default="", max_length=3000)
     ci: str = Field(default="", max_length=500)
+    # S3 follow-up (a): true when the release changes trading behaviour (sizing, caps, quoting, orders, reliability
+    # profile). Recorded in the register and approve audit rows, which the Periods page markers read.
+    trading_changes: bool = Field(default=False, strict=True)
 
 
 def _enabled(request: Request) -> str:
@@ -100,7 +105,8 @@ async def register(request: Request, x_release_token: str | None = Header(defaul
                                                      for x in e.errors()[:10]]) from None
     doc = await store_call(request.app.state.store.save_pending_release(body.model_dump()))
     await audit(request, "release.register", user="release-workflow",
-                details={"id": doc.get("id"), "version": body.version, "commit": body.commit, "ci": body.ci[:64]})
+                details={"id": doc.get("id"), "version": body.version, "commit": body.commit, "ci": body.ci[:64],
+                         "trading_changes": body.trading_changes})
     return {"id": doc["id"], "status": _status(doc)}
 
 
@@ -132,7 +138,8 @@ async def _resolve(request: Request, release_id: str, decision: str, user: dict)
             raise HTTPException(status_code=404, detail="release_not_found")
         raise HTTPException(status_code=409, detail="release_not_pending")
     await audit(request, f"release.{'approve' if decision == 'approved' else 'reject'}", ok=True, user=user,
-                details={"id": release_id, "version": doc.get("version"), "commit": doc.get("commit")})
+                details={"id": release_id, "version": doc.get("version"), "commit": doc.get("commit"),
+                         "trading_changes": doc.get("trading_changes") is True})
     return {"id": doc["id"], "status": _status(doc)}
 
 

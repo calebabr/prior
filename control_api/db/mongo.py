@@ -24,6 +24,7 @@ def _proj(fields) -> dict:
 
 
 NEWEST = [("ts", DESCENDING), ("_id", DESCENDING)]
+RECON_NEWEST = [("day", DESCENDING), ("ts", DESCENDING)]
 
 
 def _window(since: datetime | None, until: datetime | None) -> dict:
@@ -105,6 +106,12 @@ class MongoStore(Store):
         await self._c(S.PERIODS).create_index([("started_at", ASCENDING)], name="started_at")
         await self._c(S.CASH_FLOWS).create_index([("id", ASCENDING)], unique=True, name="id_unique")
         await self._c(S.CASH_FLOWS).create_index([("ts", DESCENDING)], name="ts_desc")
+        # recon_reports: one per (mode, day); 90-day TTL on ts (the check time)
+        await self._c(S.RECON_REPORTS).create_index([("mode", ASCENDING), ("day", ASCENDING)], unique=True,
+                                                    name="mode_day_unique")
+        await self._c(S.RECON_REPORTS).create_index([("ts", ASCENDING)], expireAfterSeconds=S.RECON_RETENTION_SECONDS,
+                                                    name="ts_ttl")
+        await self._c(S.RECON_REPORTS).create_index([("day", DESCENDING), ("ts", DESCENDING)], name="day_ts_desc")
         await self._c(S.PUSH_SUBSCRIPTIONS).create_index([("sub_id", ASCENDING)], unique=True, name="sub_id_unique")
         await self._c(S.PUSH_SUBSCRIPTIONS).create_index([("slot", ASCENDING)], unique=True, sparse=True,
                                                          name="slot_unique")
@@ -497,6 +504,27 @@ class MongoStore(Store):
     async def delete_cash_flow(self, id: str) -> bool:
         res = await self._c(S.CASH_FLOWS).delete_one({"id": str(id)})
         return res.deleted_count > 0
+
+    async def save_recon_report(self, doc: dict) -> dict | None:
+        d = S.prepare_recon_report(doc)
+        # one atomic replace-upsert on (mode, day): a rerun replaces, never duplicates
+        await self._c(S.RECON_REPORTS).replace_one({"mode": d["mode"], "day": d["day"]}, dict(d), upsert=True)
+        return d
+
+    async def latest_recon_report(self, mode: str | None = None) -> dict | None:
+        q = {"mode": str(mode)} if mode is not None else {}
+        return await self._c(S.RECON_REPORTS).find_one(q, NO_ID, sort=RECON_NEWEST)
+
+    async def list_recon_reports(self, *, since_day: str | None = None, mode: str | None = None,
+                                 limit: int = 100) -> list[dict]:
+        if limit <= 0:
+            return []
+        q: dict = {}
+        if mode is not None:
+            q["mode"] = str(mode)
+        if since_day is not None:
+            q["day"] = {"$gte": str(since_day)}
+        return await self._c(S.RECON_REPORTS).find(q, NO_ID).sort(RECON_NEWEST).limit(int(limit)).to_list()
 
     async def save_push_subscription(self, doc: dict) -> bool:
         d = S.prepare_push_subscription(doc)

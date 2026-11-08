@@ -42,7 +42,7 @@ describe('route -> title map', () => {
   it('maps every signed-in route and builds document.title', () => {
     expect(ROUTE_TITLES.map((r) => r.title)).toEqual([
       'Home', 'Strategies', 'Maker', 'Maker', 'Maker', 'Arbitrage', 'Arbitrage', 'Arbitrage', 'Performance', 'Periods',
-      'Analytics', 'Shadow Estimate', 'Activity', 'More', 'Health', 'Server', 'Mode', 'Logs', 'Account', 'Settings',
+      'Analytics', 'Shadow Estimate', 'Activity', 'More', 'Health', 'Server', 'Mode', 'Arming', 'Logs', 'Account', 'Settings',
       'Alerts', 'Terminology',
     ]);
     expect(titleForPath('/')).toBe('Home');

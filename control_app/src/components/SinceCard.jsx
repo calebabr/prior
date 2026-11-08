@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { getSince } from '../services/overviewApi.js';
 import { readLastVisit, sinceLabel, sinceParts, writeLastVisit } from '../utils/overview.js';
 import '../styles/overview.css';
@@ -13,6 +14,7 @@ export default function SinceCard() {
   const [since, setSince] = useState(null);
   const [from, setFrom] = useState(null);
   const [gone, setGone] = useState(false);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -45,9 +47,22 @@ export default function SinceCard() {
   if (!parts.length) return null;
   return (
     <section className="since-card" data-testid="since-card" aria-label="Since you last checked">
-      <p className="since-line">
-        <span className="since-title">Since you last checked:</span> {parts.join(', ')}
-      </p>
+      <div className="since-body">
+        <button
+          type="button"
+          className={`since-line ${open ? 'open' : ''}`}
+          aria-expanded={open}
+          data-testid="since-toggle"
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="since-title">Since you last checked:</span> {parts.join(', ')}
+        </button>
+        {open && (
+          <Link to="/alerts" className="since-more" data-testid="since-all-alerts">
+            All alerts
+          </Link>
+        )}
+      </div>
       <button
         type="button"
         className="since-dismiss"

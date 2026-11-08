@@ -51,7 +51,10 @@ def is_standin() -> bool:
         return True
 
 
-EDITABLE = ("run_budget", "max_order", "max_open_frac", "poll_minutes", "series")
+EDITABLE = ("run_budget", "max_order", "max_open_frac", "poll_minutes", "series", "record_decisions")
+# Optional strategy keys: absent from the strategy DEFAULTS (and from a config that never set them), so they are
+# shown with this default and only stored once written. Never added to the stored config or its hash implicitly.
+OPTIONAL_DEFAULTS = {"record_decisions": False}
 
 
 def schema(settings: Any) -> dict:
@@ -71,6 +74,9 @@ def schema(settings: Any) -> dict:
         "series": {"type": "list", "unit": "Kalshi series", "min": 1, "max": len(ms.DEFAULTS["series"]),
                    "options": list(ms.DEFAULTS["series"]),
                    "help": "Markets to quote (allowed series only).", "editable": True},
+        "record_decisions": {"type": "boolean", "unit": "on/off", "min": None, "max": None, "default": False,
+                             "help": "Record why each trading pass did what it did (journal rows). Observation "
+                                     "only: it never changes what is quoted or ordered.", "editable": True},
         "cells": {"type": "list", "unit": "strategy cells", "min": None, "max": None,
                   "help": "The validated strategy. Never editable.", "editable": False},
     }
@@ -89,6 +95,14 @@ def public_config(cfg: dict | None) -> dict:
     return out
 
 
+def config_view(cfg: dict | None) -> dict:
+    """public_config plus OPTIONAL_DEFAULTS for keys the config does not set (GET /api/config, change lists)."""
+    out = public_config(cfg)
+    for k, v in OPTIONAL_DEFAULTS.items():
+        out.setdefault(k, v)
+    return out
+
+
 def merge_and_validate(current: dict | None, update: dict, settings: Any) -> dict:
     """Merge a partial update into the current config; raise ValueError([msgs]) on any problem."""
     ms = strategy()
@@ -101,6 +115,8 @@ def merge_and_validate(current: dict | None, update: dict, settings: Any) -> dic
     ser = update.get("series")
     if isinstance(ser, (list, tuple)) and len(ser) != len({str(s) for s in ser}):
         errs.append("series: duplicate entries are not allowed")      # S-5 (API layer only)
+    if "record_decisions" in update and not isinstance(update["record_decisions"], bool):
+        errs.append("record_decisions: must be true or false")       # strict: never "true", 1 or null
     if errs:
         raise ValueError(errs)
     merged = dict(ms.DEFAULTS)
@@ -111,6 +127,8 @@ def merge_and_validate(current: dict | None, update: dict, settings: Any) -> dic
     except (ValueError, TypeError, KeyError) as e:
         msg = str(e).replace("maker_config.json invalid -> ", "")
         errs.extend(m.strip() for m in msg.split(";") if m.strip())
+    if "record_decisions" in merged and not isinstance(merged["record_decisions"], bool):
+        errs.append("record_decisions: must be true or false")       # a stored/file value, same rule
     try:
         if float(merged["run_budget"]) > settings.max_run_budget:
             errs.append(f"run_budget: API ceiling is {settings.max_run_budget}")

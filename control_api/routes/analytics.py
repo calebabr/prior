@@ -7,6 +7,10 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
   trade rows for one (env, days); concurrent requests for the same key share it (single flight); a request for
   another key waits up to BUSY_WAIT_S for the gate, then gets 429 `analytics_busy` + Retry-After.
 * Builds run on a dedicated one-thread executor, never the default pool that Stop's cancel uses (S-25 family).
+  ALL CPU-bound work (summary, journal fold, ledger, returns, returns fills, scorecard) goes through _cpu(), never
+  inline on the event loop, and the GIL switch interval is lowered while it runs (_SwitchInterval), so Stop is not
+  starved by a 180-day rebuild (load suite scenario `contention`). Identical ledger / returns / scorecard requests
+  share one in-flight computation (_single_flight).
 * Results are cached: the summary SUMMARY_TTL_S (60 s) per (env, days, period, tz) (small; `generated_utc` shows its age) and
   the trade rows per (env, days, period) (at most ROWS_CACHE_KEYS keys; the largest objects, independent of the
   viewer's time zone), so /trades paging and filtering never re-reads Atlas. The rows live CACHE_TTL_S (300 s);
@@ -27,8 +31,11 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
+import sys
+import threading
 import time
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +76,7 @@ SNAP_LIMIT = 20_000
 HB_LIMIT = 20_000
 ALERT_LIMIT = 2000
 AUDIT_LIMIT = 1000
+CPU_SWITCH_INTERVAL_S = 0.0005            # GIL switch interval while an analytics build runs (_SwitchInterval)
 JOURNAL_MAP_MAX = 60_000                 # order ids kept in the map (oldest dropped beyond this)
 RATE_LIMITS = {"analytics_summary": (30, 60.0), "analytics_trades": (60, 60.0),
                "analytics_ledger": (20, 60.0), "analytics_returns": (20, 60.0)}   # per user, per minute
@@ -86,6 +94,79 @@ def _pool() -> ThreadPoolExecutor:
     if _POOL is None:
         _POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analytics")
     return _POOL
+
+
+class _SwitchInterval:
+    """Lowers the interpreter's GIL switch interval while analytics CPU work is in flight, then restores it.
+
+    A pure-Python build in the worker thread holds the GIL for up to the switch interval (5 ms by default) every time
+    the event loop thread wants it back, and the loop wants it back after EVERY blocking call it makes (Stop writes
+    its flag files, reads the kill switches, hands the cancel to its own pool). Under a build, each of those hand-offs
+    waits a full interval (the convoy effect), so a Stop of a few dozen syscalls took seconds (load suite scenario
+    `contention`). With the interval at CPU_SWITCH_INTERVAL_S the wait per hand-off is ten times shorter. Reference
+    counted (thread-safe): the first job in lowers it, the last job out (when its worker FINISHES, even if the waiting
+    request was cancelled) restores the value that was set before. Scheduling only; no result changes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+        self._saved: float | None = None
+
+    def enter(self) -> None:
+        with self._lock:
+            if self._active == 0:
+                self._saved = sys.getswitchinterval()
+                sys.setswitchinterval(min(self._saved, CPU_SWITCH_INTERVAL_S))
+            self._active += 1
+
+    def leave(self, _fut=None) -> None:
+        with self._lock:
+            self._active -= 1
+            if self._active == 0 and self._saved is not None:
+                sys.setswitchinterval(self._saved)
+                self._saved = None
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+
+_SWITCH = _SwitchInterval()
+
+
+async def _cpu(fn, *args, **kwargs):
+    """Run CPU-bound analytics work on the dedicated one-thread executor, never inline on the event loop (a Stop tap
+    must not queue behind a 180-day ledger or returns build; load suite scenario `contention`). One worker: at most
+    one analytics computation runs at a time, so it competes with Stop only through the GIL (kept short by
+    _SwitchInterval), and a second request waits its turn instead of adding a second CPU-bound thread. The work must
+    not touch the event loop or app state shared with it (pure functions of their arguments)."""
+    _SWITCH.enter()
+    try:
+        cf = _pool().submit(functools.partial(fn, *args, **kwargs))
+    except BaseException:
+        _SWITCH.leave()
+        raise
+    cf.add_done_callback(_SWITCH.leave)                       # restored when the WORK ends, not the request
+    return await asyncio.wrap_future(cf)
+
+
+async def _single_flight(request: Request, key: tuple, factory):
+    """At most one computation per key in flight: a second identical request awaits the first one's result instead
+    of queueing a second identical build. The computation runs as its own task, so a client that disconnects does
+    not cancel it for the others (each waiter is shielded). Errors reach every waiter; nothing is cached here."""
+    flights = _state(request).setdefault("flights", {})
+    task = flights.get(key)
+    if task is None:
+        task = asyncio.ensure_future(factory())
+        flights[key] = task
+
+        def done(t: asyncio.Task, k=key) -> None:
+            if flights.get(k) is t:
+                flights.pop(k, None)
+            if not t.cancelled():
+                t.exception()                                 # retrieved: no "never retrieved" warning
+        task.add_done_callback(done)
+    return await asyncio.shield(task)
 
 
 def _bad(field: str, msg: str) -> HTTPException:
@@ -197,6 +278,15 @@ async def _journal_map(request: Request, start: datetime, now: datetime) -> tupl
     since = start if full else jm["hw"] - JOURNAL_OVERLAP
     rows, trunc = _capped(await _read(request.app.state.store.list_journal(
         since=since, limit=an.MAX_JOURNAL + 1, events=["quote"], fields=an.JOURNAL_FIELDS)), an.MAX_JOURNAL)
+    jm, out = await _cpu(_fold_journal, jm, rows, trunc, full=full, start=start, since=since, t=t, now=now)
+    st["jmap"] = jm
+    return out, jm["truncated"]
+
+
+def _fold_journal(jm: dict | None, rows: list, trunc: bool, *, full: bool, start: datetime, since: datetime,
+                  t: float, now: datetime) -> tuple[dict, dict[str, str]]:
+    """The CPU part of _journal_map (runs on the analytics executor, under the gate): fold the quote rows into the
+    map, prune it, and return (map state, order_id -> cell id)."""
     entries = an.journal_cell_entries(rows)
     del rows
     hw = max((e[1] for e in entries.values() if e[1] is not None), default=since)
@@ -214,8 +304,7 @@ async def _journal_map(request: Request, start: datetime, now: datetime) -> tupl
     if len(m) > JOURNAL_MAP_MAX:                              # keep the newest
         jm["map"] = m = dict(sorted(m.items(), key=lambda kv: kv[1][1] or now, reverse=True)[:JOURNAL_MAP_MAX])
         jm["truncated"] = True
-    st["jmap"] = jm
-    return {k: v[0] for k, v in m.items()}, jm["truncated"]
+    return jm, {k: v[0] for k, v in m.items()}
 
 
 async def _period(request: Request, days: int) -> tuple[int, dict | None]:
@@ -260,7 +349,7 @@ async def _build(request: Request, env: str, days: int, period: dict | None = No
         return an.summary(rows, eps, arbs, days=days, env=env, now=now, cells=cells, truncated=truncated,
                           expectations=an.load_expectations(), jcells=jcells, series_list=series,
                           period=period, tz=tz), rows
-    return await asyncio.get_running_loop().run_in_executor(_pool(), build)
+    return await _cpu(build)
 
 
 def _store_result(request: Request, key: tuple, t0: float, summary: dict, rows: list[dict]) -> None:
@@ -544,24 +633,34 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
     zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
     _state(request)["last_tz"] = tzname
     days, period, since, until, now = await _window(request, days)
-    all_rows = await _dataset(request, env, days, "rows", period, swr=True)
+
+    async def compute() -> dict:
+        all_rows = await _dataset(request, env, days, "rows", period, swr=True)
+        store, notes = request.app.state.store, []
+        arb_raw, snaps, flows = await _parallel(
+            _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)),
+            _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+                  "account snapshots", []),
+            _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
+        arbs, _t = _capped(arb_raw, an.MAX_ARB)
+        out = await _cpu(_ledger_body, all_rows, arbs, snaps or [], flows or [], env=env, zone=zone, tzname=tzname,
+                         since=since, until=until, now=now)
+        out["env"], out["days"] = env, days
+        if period is not None:
+            out["period"] = {"id": period.get("id"), "name": period.get("name")}
+        out["notes"] = out["notes"] + notes
+        return out
+    return await _single_flight(request, ("ledger", env, days, _pkey(period), tzname), compute)
+
+
+def _ledger_body(all_rows: list[dict], arbs: list[dict], snaps: list, flows: list, *, env: str, zone, tzname: str,
+                 since: datetime, until: datetime | None, now: datetime) -> dict:
+    """The CPU part of /analytics/ledger (runs on the analytics executor)."""
     rows = _in_window(all_rows, since, until)
-    store, notes = request.app.state.store, []
-    arb_raw, snaps, flows = await _parallel(
-        _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)),
-        _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
-              "account snapshots", []),
-        _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
-    arbs, _t = _capped(arb_raw, an.MAX_ARB)
     sets = arbsets.build_sets(arbs, [r for r in rows if r.get("strategy") == "arb"], env=env, since=since,
                               until=until, limit=arbsets.MAX_SETS * 5)
-    out = ledgersvc.build(rows, sets, zone=zone, tzname=tzname, since=since, until=until, snapshots=snaps or [],
-                          flows=flows or [], now=now, all_rows=all_rows, truncated=len(all_rows) >= an.MAX_FILLS)
-    out["env"], out["days"] = env, days
-    if period is not None:
-        out["period"] = {"id": period.get("id"), "name": period.get("name")}
-    out["notes"] = out["notes"] + notes
-    return out
+    return ledgersvc.build(rows, sets, zone=zone, tzname=tzname, since=since, until=until, snapshots=snaps,
+                           flows=flows, now=now, all_rows=all_rows, truncated=len(all_rows) >= an.MAX_FILLS)
 
 
 def _now() -> datetime:
@@ -595,27 +694,30 @@ async def analytics_returns(request: Request, user: dict = Depends(current_user)
     hit = rc.get(key)
     if _fresh(hit, t0, SUMMARY_TTL_S):
         return hit[1]
-    now = _now()
-    since = now - timedelta(days=days)
-    all_rows = await _dataset(request, env, ds_days, "rows", None, swr=True)
-    store, notes = request.app.state.store, []
-    snaps, flows = await _parallel(
-        _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
-              "account snapshots", []),
-        _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
-    if len(snaps or []) >= SNAP_LIMIT:
-        notes.append("the snapshot read hit its row limit: the oldest periods may have no start balance")
-    mode = getattr(request.app.state.runner, "mode", None)
-    out = retsvc.build(all_rows, snaps or [], flows or [], zone=zone, tzname=tzname, granularity=gran, days=days,
-                       env=env, env_is_current=env in ("demo", "live") and env == mode, now=now,
-                       truncated=len(all_rows) >= an.MAX_FILLS, notes=notes)
-    if not any("store read failed" in n for n in notes):     # only successful builds are cached
-        for k in [k for k, v in rc.items() if not _fresh(v, t0, SUMMARY_TTL_S)]:
-            rc.pop(k, None)
-        while len(rc) >= RETURNS_CACHE_KEYS:
-            rc.pop(min(rc, key=lambda k: rc[k][0]))
-        rc[key] = (t0, out)
-    return out
+
+    async def compute() -> dict:
+        now = _now()
+        since = now - timedelta(days=days)
+        all_rows = await _dataset(request, env, ds_days, "rows", None, swr=True)
+        store, notes = request.app.state.store, []
+        snaps, flows = await _parallel(
+            _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
+                  "account snapshots", []),
+            _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
+        if len(snaps or []) >= SNAP_LIMIT:
+            notes.append("the snapshot read hit its row limit: the oldest periods may have no start balance")
+        mode = getattr(request.app.state.runner, "mode", None)
+        out = await _cpu(retsvc.build, all_rows, snaps or [], flows or [], zone=zone, tzname=tzname,
+                         granularity=gran, days=days, env=env, env_is_current=env in ("demo", "live") and env == mode,
+                         now=now, truncated=len(all_rows) >= an.MAX_FILLS, notes=notes)
+        if not any("store read failed" in n for n in notes):     # only successful builds are cached
+            for k in [k for k, v in rc.items() if not _fresh(v, t0, SUMMARY_TTL_S)]:
+                rc.pop(k, None)
+            while len(rc) >= RETURNS_CACHE_KEYS:
+                rc.pop(min(rc, key=lambda k: rc[k][0]))
+            rc[key] = (t0, out)
+        return out
+    return await _single_flight(request, ("returns",) + key, compute)
 
 
 @router.get("/analytics/returns/fills")
@@ -638,7 +740,7 @@ async def analytics_returns_fills(request: Request, user: dict = Depends(current
     if days is None:
         raise _bad("start", f"must be within the last {max(an.DAYS_ALLOWED)} days")
     all_rows = await _dataset(request, env, days, "rows", None, swr=True)
-    hits = retsvc.period_fills(all_rows, zone=zone, start=start, end=end, now=now)
+    hits = await _cpu(retsvc.period_fills, all_rows, zone=zone, start=start, end=end, now=now)
     return {"tz_used": tzname, "env": env,
             "period": {"start_local": start.isoformat(), "end_local": end.isoformat()},
             "total": len(hits), "offset": offset, "limit": limit, "fills": hits[offset:offset + limit]}
@@ -655,8 +757,13 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
     days = _int("days", q.get("days"), 7, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
     days, period, since, until, now = await _window(request, days)
+    return await _single_flight(request, ("scorecard", env, days, _pkey(period)), lambda: _scorecard(
+        request, env, days, period, since, until, now))
+
+
+async def _scorecard(request: Request, env: str, days: int, period: dict | None, since: datetime,
+                     until: datetime | None, now: datetime) -> dict:
     all_rows = await _dataset(request, env, days, "rows", period)
-    rows = _in_window(all_rows, since, until)
     store, notes = request.app.state.store, []
     hbs, jr, alerts, audit_rows, arb_raw, snaps, flows = await _parallel(
         _soft(store.list_heartbeats(since=since, limit=HB_LIMIT), notes, "heartbeats", []),
@@ -669,6 +776,17 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
               "account snapshots", []),
         _soft(store.list_cash_flows(since=since - SNAP_BEFORE), notes, "cash flows", []))
     arbs, _t = _capped(arb_raw, an.MAX_ARB)
+    label = (period or {}).get("name") or f"last {days} days"
+    out = await _cpu(_scorecard_body, all_rows, arbs, hbs, jr, alerts, audit_rows, snaps or [], flows or [],
+                     env=env, since=since, until=until, now=now, label=label)
+    out["notes"] = out["notes"] + notes
+    return out
+
+
+def _scorecard_body(all_rows: list[dict], arbs: list[dict], hbs, jr, alerts, audit_rows, snaps: list, flows: list, *,
+                    env: str, since: datetime, until: datetime | None, now: datetime, label: str) -> dict:
+    """The CPU part of /analytics/scorecard (runs on the analytics executor)."""
+    rows = _in_window(all_rows, since, until)
 
     def win(docs, key="ts"):
         out = []
@@ -679,15 +797,12 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
         return out
     sets = arbsets.build_sets(arbs, [r for r in rows if r.get("strategy") == "arb"], env=env, since=since,
                               until=until, limit=arbsets.MAX_SETS * 5)
-    recon = ledgersvc.reconciliation(all_rows, snaps or [], flows or [], since=since, now=now)
-    label = (period or {}).get("name") or f"last {days} days"
-    out = ledgersvc.scorecard(
+    recon = ledgersvc.reconciliation(all_rows, snaps, flows, since=since, now=now)
+    return ledgersvc.scorecard(
         env=env, rows=rows, sets=sets, arb_counts=arbsets.counters(arbs, env=env, since=since, until=until),
         heartbeats=win(hbs), journal=jr or [], alerts=win(alerts), audit_rows=win(audit_rows),
         reconciliation_obj=recon, since=since, until=until, now=now, label=label,
         truncated=len(all_rows) >= an.MAX_FILLS or len(jr or []) > an.MAX_JOURNAL)
-    out["notes"] = out["notes"] + notes
-    return out
 
 
 NOTE_MAX = 200

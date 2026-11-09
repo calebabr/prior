@@ -71,6 +71,14 @@ RECON_DEFAULT_TIME = "06:00"         # item 14: local time the daily recon becom
 RECON_BUDGET_S = 180                # whole daily recon (its Kalshi reads have their own 120 s bound)
 PNL_TODAY_TTL_S = 60                # /status today P&L cache
 PNL_TODAY_CACHE_MAX = 16            # entries kept, one per (mode, validated time zone); oldest dropped first
+# /status rolling P&L (pnl_pair): fresh for PNL_PAIR_TTL_S; an older value of the SAME mode is served while one
+# shared refresh runs (stale-while-revalidate) up to PNL_PAIR_MAX_STALE_S; past that, or with no value for the mode,
+# a poll waits for the shared refresh up to PNL_PAIR_WAIT_S (then null, as before). A fills sync or label backfill
+# marks the value stale. The refresh's store reads stay on the loop; the windows() maths runs in a worker thread.
+PNL_PAIR_TTL_S = 10.0
+PNL_PAIR_MAX_STALE_S = 120.0
+PNL_PAIR_WAIT_S = 5.0
+PNL_PAIR_REFRESH_BUDGET_S = 30.0
 RECENT_PASSES = 12
 FILL_ALERT_MAX_LINES = 3
 # release process (docs/RELEASE_PROCESS.md section 4): lease, fencing, graceful handover
@@ -126,6 +134,12 @@ def utcnow() -> datetime:
 
 def iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
+
+
+def _pnl_pair_done(task: asyncio.Task) -> None:
+    """Retrieves a /status P&L refresh's error (logged by type only), so an unawaited refresh never warns."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("pnl refresh failed: %s", type(task.exception()).__name__)
 
 
 def _state_stamp(st: dict | None) -> tuple:
@@ -527,6 +541,12 @@ class Runner:
         self._maker_oids: dict[str, None] = {}       # journal maker order ids (insertion ordered, bounded)
         self.source_backfill: dict | None = None
         self._pnl_today: dict[tuple[str, str], tuple[float, dict, str]] = {}   # (env, tz) -> (monotonic t, value, since)
+        # /status rolling P&L cache (pnl_pair): (monotonic t, env, generation, value); one shared refresh task
+        self._pnl_pair_cache: tuple[float, str, int, tuple] | None = None
+        self._pnl_pair_task: asyncio.Task | None = None
+        self._pnl_pair_task_key: tuple[str, int] | None = None
+        self._pnl_gen = 0                            # bumped when fills / settlements / labels are written
+        self._pnl_clock: Callable[[], float] = time.monotonic
         self.push = PushService(settings, store)
         self._daily_sent: str | None = None          # local date of the last daily summary
         # S-25: telemetry Kalshi reads on their own pool (threads start on first use; shut down in shutdown())
@@ -987,6 +1007,8 @@ class Runner:
             self._stop_executor.shutdown(wait=False)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
+        if self._pnl_pair_task is not None:
+            self._pnl_pair_task.cancel()               # a /status P&L refresh never delays shutdown
         if self._tasks:
             with contextlib.suppress(BaseException):
                 await asyncio.wait(self._tasks, timeout=0.5)
@@ -1658,8 +1680,11 @@ class Runner:
             known_settled = await self._known_settlements(settlements, since)
             self._stamp_cached_close_times(fills, mode)
             self._stamp_cached_close_times(settlements, mode)
-            nf = await self.store.upsert_fills(fills)
-            ns = await self.store.upsert_settlements(settlements)
+            try:
+                nf = await self.store.upsert_fills(fills)
+                ns = await self.store.upsert_settlements(settlements)
+            finally:
+                self._pnl_gen += 1                     # /status P&L: the cached value is stale now
             self.last_fills_sync_utc, self.fills_sync_error = now, None
             if known is not None:
                 self._alert_new_fills([f for f in fills if str(f.get("fill_id") or f.get("trade_id")) not in known])
@@ -1799,7 +1824,10 @@ class Runner:
                     updates[str(f["fill_id"])] = m
                     res["you"] += m["source"] == strat.YOU
             if updates:
-                res["labelled"] = await asyncio.wait_for(self.store.set_fills_fields(updates), 30)
+                try:
+                    res["labelled"] = await asyncio.wait_for(self.store.set_fills_fields(updates), 30)
+                finally:
+                    self._pnl_gen += 1                 # labels move fills between maker / arb / you
             return res
         except Exception as e:  # noqa: BLE001
             log.warning("source backfill failed: %s", type(e).__name__)
@@ -2436,12 +2464,56 @@ class Runner:
 
     async def pnl_pair(self) -> tuple[dict | None, dict | None]:
         """(maker, arbitrage) d7/d30 realised P&L by settlement time in the current mode, from one pair of store
-        reads. (None, None) if no data or error."""
+        reads. (None, None) if no data or error. Cached (see PNL_PAIR_*): a fresh value costs nothing; a stale value of
+        the same mode is returned at once while ONE shared refresh runs; a value of another mode is never served."""
+        env, gen, t = self.mode, self._pnl_gen, self._pnl_clock()
+        c = self._pnl_pair_cache
+        if c is not None and c[1] == env:
+            age = t - c[0]
+            if c[2] == gen and 0 <= age < PNL_PAIR_TTL_S:
+                return c[3]
+            if 0 <= age < PNL_PAIR_MAX_STALE_S:
+                self._pnl_pair_refresh(env, gen)      # stale-while-revalidate: this poll does not wait
+                return c[3]
+        task = self._pnl_pair_refresh(env, gen)
         try:
-            return await asyncio.wait_for(pnlsvc.compute_pair(self.store, utcnow(), env=self.mode), 5)
-        except Exception as e:  # noqa: BLE001
+            return await asyncio.wait_for(asyncio.shield(task), PNL_PAIR_WAIT_S)
+        except Exception as e:  # noqa: BLE001   (incl. the wait timeout; the refresh itself keeps running)
             log.warning("pnl compute failed: %s", type(e).__name__)
             return None, None
+
+    def _pnl_pair_refresh(self, env: str, gen: int) -> asyncio.Task:
+        """The running refresh for (env, gen), or a new one. Concurrent polls share it (single flight)."""
+        task = self._pnl_pair_task
+        if task is not None and not task.done() and self._pnl_pair_task_key == (env, gen):
+            return task
+        task = asyncio.create_task(self._pnl_pair_compute(env, gen))
+        task.add_done_callback(_pnl_pair_done)
+        self._pnl_pair_task, self._pnl_pair_task_key = task, (env, gen)
+        return task
+
+    async def _pnl_pair_compute(self, env: str, gen: int) -> tuple[dict | None, dict | None]:
+        """One refresh: the store reads (on the loop, as before), then the windows() maths in a worker thread. The
+        result is cached only if the mode is unchanged and no newer value is cached; a failure drops this mode's cached
+        value, so the next poll waits for a fresh read and shows null on error exactly as before."""
+        t0, now = self._pnl_clock(), utcnow()
+
+        async def run():
+            fills, settlements = await pnlsvc.pair_rows(self.store, now)
+            if not settlements:
+                return None, None
+            return await asyncio.to_thread(pnlsvc.pair_from_rows, fills, settlements, now, env=env)
+        try:
+            value = await asyncio.wait_for(run(), PNL_PAIR_REFRESH_BUDGET_S)
+        except BaseException:
+            c = self._pnl_pair_cache
+            if c is not None and c[1] == env and c[2] <= gen:
+                self._pnl_pair_cache = None
+            raise
+        c = self._pnl_pair_cache
+        if env == self.mode and (c is None or c[1] != env or (gen, t0) >= (c[2], c[0])):
+            self._pnl_pair_cache = (t0, env, gen, value)
+        return value
 
     # ---- bracket arbitrage
     def _arb_skip_reason(self) -> str | None:

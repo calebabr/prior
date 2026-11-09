@@ -316,15 +316,38 @@ async def compute_by_fill(store, lo7: datetime, lo30: datetime, hi: datetime | N
     return windows_by_fill(fills, settlements, lo7=lo7, lo30=lo30, hi=hi, taker=taker, env=env)
 
 
+# Every fill / settlement field windows() reads (fill_label, env, ticker, side, prices, count, fee; fill_id and
+# trade_id only for the unusable-count log line). Projecting to these gives windows() the same answer as full docs
+# (test_status_pnl_cache) and keeps the read and decode small.
+PAIR_FILL_FIELDS = FILL_FIELDS + ("trade_id",)
+PAIR_SETTLEMENT_FIELDS = ("ticker", "market_result", "result", "ts")
+
+
+async def pair_rows(store, now: datetime) -> tuple[list[dict], list[dict]]:
+    """The store reads behind compute_pair(): (fills of the last 60 days, settlements of the last 30 days), or
+    ([], []) when nothing settled in 30 days (the fills are then not read). Raises on store errors."""
+    settlements = await store.list_settlements(since=now - timedelta(days=30), limit=100000,
+                                               fields=PAIR_SETTLEMENT_FIELDS)
+    if not settlements:
+        return [], []
+    fills = await store.list_fills(since=now - timedelta(days=60), limit=100000, fields=PAIR_FILL_FIELDS)
+    return fills, settlements
+
+
+def pair_from_rows(fills: list[dict], settlements: list[dict], now: datetime, *,
+                   env: str | None = None) -> tuple[dict | None, dict | None]:
+    """The pure CPU half of compute_pair() (safe to run in a worker thread: it only reads its arguments)."""
+    if not settlements:
+        return None, None
+    return (windows(fills, settlements, now, taker=False, env=env),
+            windows(fills, settlements, now, taker=True, env=env))
+
+
 async def compute_pair(store, now: datetime, *, env: str | None = None) -> tuple[dict | None, dict | None]:
     """(maker, arbitrage) settlement-time windows from ONE pair of store reads (same maths as compute() twice).
     Raises on store errors (callers wrap it)."""
-    settlements = await store.list_settlements(since=now - timedelta(days=30), limit=100000)
-    if not settlements:
-        return None, None
-    fills = await store.list_fills(since=now - timedelta(days=60), limit=100000)
-    return (windows(fills, settlements, now, taker=False, env=env),
-            windows(fills, settlements, now, taker=True, env=env))
+    fills, settlements = await pair_rows(store, now)
+    return pair_from_rows(fills, settlements, now, env=env)
 
 
 async def compute_by_fill_pair(store, lo7: datetime, lo30: datetime, hi: datetime | None, *,

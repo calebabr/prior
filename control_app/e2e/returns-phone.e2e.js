@@ -142,10 +142,16 @@ for (const size of SIZES) {
       await expect(c.getByTestId('returns-bar')).toHaveCount(30);
       const before = await c.getByTestId('returns-readout').innerText();
       const bars = c.getByTestId('returns-bar');
-      const target = bars.nth(20);
-      await target.scrollIntoViewIfNeeded();
-      await target.dispatchEvent('click'); // the hit columns are ~9 px wide; assert behaviour, size is reported below
-      await expect(target).toHaveAttribute('aria-selected', 'true');
+      // The mock leaves a few random days empty (seeded by the date), and an empty day has no Details button, so
+      // start at bar 20 and move on to the first day that has settlements: the test must not depend on today's date.
+      let target = bars.nth(20);
+      for (const i of [20, 19, 21, 18, 22, 17, 23]) {
+        target = bars.nth(i);
+        await target.scrollIntoViewIfNeeded();
+        await target.dispatchEvent('click'); // the hit columns are ~9 px wide; assert behaviour, size is reported below
+        await expect(target).toHaveAttribute('aria-selected', 'true');
+        if ((await c.getByRole('button', { name: 'Details' }).count()) > 0) break;
+      }
       expect(await c.getByTestId('returns-readout').innerText()).not.toBe(before);
 
       // Details -> sheet (fits the viewport, Close is a real tap target)

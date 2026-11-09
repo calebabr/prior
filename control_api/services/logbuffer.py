@@ -18,7 +18,8 @@ _SUBS = [
     # S-44: GitHub tokens (fine-grained github_pat_..., classic ghp_/gho_/ghu_/ghs_/ghr_...), wherever they appear
     (re.compile(r"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})"), "[REDACTED]"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"), "[REDACTED]"),
-    (re.compile(r"(?i)hc-ping\.com/\S+"), "hc-ping.com/[REDACTED]"),      # healthchecks.io ping URLs    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)hc-ping\.com/\S+"), "hc-ping.com/[REDACTED]"),      # healthchecks.io ping URLs
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)((?:password|secret|token|api[_-]?key|x-2fa-code|totp)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+"),
      r"\1[REDACTED]"),
 ]

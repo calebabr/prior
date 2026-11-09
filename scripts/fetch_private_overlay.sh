@@ -68,6 +68,9 @@ echo "fetching the private strategy (ref: $REF)..."
   git -C "$CLONE" -c advice.detachedHead=false checkout -q FETCH_HEAD
 } >"$WORK/git.log" 2>&1 || fail "could not fetch the private repo (check that the token is valid, not expired, and has read access to Contents; check PRIVATE_REPO_REF)"
 
+# Traceability (SC-7): print the exact private commit built (a hash only, nothing private).
+echo "private commit: $(git -C "$CLONE" rev-parse HEAD 2>/dev/null || echo unknown)"
+
 args=(--private "$CLONE" --target "$TARGET")
 # A git work tree is refused unless the caller opts in. Only render_build.sh (a throwaway deploy clone) sets this.
 [ "${OVERLAY_ALLOW_GIT_WORKTREE:-}" = "1" ] && args+=(--allow-git-worktree)

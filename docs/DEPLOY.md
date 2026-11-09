@@ -222,6 +222,17 @@ Use this for a clean performance window (for example Period 2).
 5. Use the period selector (All / each period) on P&L and By Source. Fills count in the period they were filled, even if they settle later.
 6. Start the bot as usual (Start re-reads and validates the saved config). To stop at any time: the app's Stop button; last resort, suspend the service in Render (see below).
 
+## Monitoring, backups and drills (after the first deploy works)
+
+- **External monitoring** (free healthchecks.io dead-man switch plus UptimeRobot on `/healthz`, alerts to ntfy):
+  click-by-click setup, thresholds and what each alert means are in `docs/MONITORING.md`. Verify from your computer
+  with `python scripts/check_monitoring.py`. All intervals stay <= 14 min (the Render keep-awake rule).
+- **Backups:** Atlas M0 has none, so run `python scripts/backup_export.py` weekly with a read-only Atlas user.
+- **Restore drill** (into a database whose name contains `scratch`, never the live one) and the **rebuild-from-scratch
+  drill** (new Render + Atlas + Vercel from the repo and your env list): checklists and a results template in
+  `docs/BACKUP_RESTORE.md`. Do the restore drill before the live date and quarterly after it.
+- New optional Render env var: `HEALTHCHECKS_PING_URL` (secret, see `deploy/env.example`).
+
 ## Emergency stop without the app
 
 Use if the app, Vercel or your phone login is unavailable.

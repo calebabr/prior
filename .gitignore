@@ -79,3 +79,6 @@ Mobile Screenshots/
 # --- private denylist (edge-revealing; lives in the private repo, never here) ---
 .denylist*
 tools/.denylist*
+
+# Local database backups (scripts/backup_export.py)
+backups/

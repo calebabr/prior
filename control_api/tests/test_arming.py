@@ -313,15 +313,17 @@ async def test_m1_disarm_during_an_in_flight_arm_write_is_never_undone(live_ok):
 async def test_m1_disarm_during_the_arm_preflight_refuses_the_arm(live_ok, monkeypatch):
     """M-1 (b): Arm maker, then Disarm while its preflight runs: the arm is refused (409 disarmed_meanwhile)."""
     gate = asyncio.Event()
+    entered = asyncio.Event()
 
     async def slowpf(target, **kw):
+        entered.set()
         await gate.wait()
         return {"ready": True, "target": target, "ts": "x", "checks": []}
     monkeypatch.setattr(pf, "run_preflight", slowpf)
     h = await live_ok.h2fa()
     arm = asyncio.create_task(live_ok.client.put("/api/arming", json={"strategy": "maker", "armed": True},
                                                  headers=h))
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(entered.wait(), timeout=10)   # the preflight is running: no fixed sleep to race
     d = await live_ok.client.put("/api/arming", json={"strategy": "maker", "armed": False}, headers=live_ok.auth)
     assert d.status_code == 200
     gate.set()

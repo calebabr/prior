@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from ..db import schemas as S
 from ..services import alerts as alertsvc
 from ..services import webpush
@@ -26,12 +26,8 @@ PUSH_TEST_TIMEOUT_S = 30.0
 RATE_LIMITS = {"push_subscribe": (10, 60.0), "push_test": (5, 60.0), "push_list": (30, 60.0)}
 
 
-def _rate_limit(request: Request, user: dict, bucket: str) -> None:
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(429, "rate_limited", headers={"Retry-After": str(retry)})
+async def _rate_limit(request: Request, user: dict, bucket: str) -> None:
+    await check_user(request, user, bucket, RATE_LIMITS[bucket])
 
 
 async def _store(coro):
@@ -113,7 +109,7 @@ async def push_public_key(request: Request, user: dict = Depends(current_user)) 
 @router.post("/push/subscribe")
 async def push_subscribe(request: Request, user: dict = Depends(current_user)) -> dict:
     """Body = the browser's PushSubscription JSON: {endpoint, keys: {p256dh, auth}, expirationTime?}."""
-    _rate_limit(request, user, "push_subscribe")
+    await _rate_limit(request, user, "push_subscribe")
     push = request.app.state.runner.push
     if not push.enabled:
         raise HTTPException(409, "push_not_configured")
@@ -141,7 +137,7 @@ async def push_subscribe(request: Request, user: dict = Depends(current_user)) -
 @router.delete("/push/subscribe")
 async def push_unsubscribe(request: Request, user: dict = Depends(current_user)) -> dict:
     """Body {endpoint}. Idempotent: unknown endpoints answer subscribed=false too."""
-    _rate_limit(request, user, "push_subscribe")
+    await _rate_limit(request, user, "push_subscribe")
     body = await _json(request)
     endpoint = body.get("endpoint") if isinstance(body, dict) else None
     if not isinstance(endpoint, str) or not endpoint or len(endpoint) > webpush.ENDPOINT_MAX:
@@ -164,7 +160,7 @@ def _sub_view(d: dict) -> dict:
 @router.get("/push/subscriptions")
 async def push_list(request: Request, user: dict = Depends(current_user)) -> dict:
     """{count, subscriptions: [{host, created_utc}]} oldest first (S-33)."""
-    _rate_limit(request, user, "push_list")
+    await _rate_limit(request, user, "push_list")
     docs = await _store(request.app.state.store.list_push_subscriptions())
     subs = sorted((_sub_view(d) for d in docs), key=lambda s: str(s["created_utc"] or ""))
     return {"count": len(subs), "subscriptions": subs}
@@ -173,7 +169,7 @@ async def push_list(request: Request, user: dict = Depends(current_user)) -> dic
 @router.delete("/push/subscriptions")
 async def push_clear(request: Request, user: dict = Depends(current_user)) -> dict:
     """Remove every subscription (all devices). Defensive, so session-only like unsubscribe (S-33)."""
-    _rate_limit(request, user, "push_subscribe")
+    await _rate_limit(request, user, "push_subscribe")
     removed = await _store(request.app.state.store.clear_push_subscriptions())
     await audit(request, "push.clear", user=user, details={"removed": int(removed or 0)})
     return {"removed": int(removed or 0)}
@@ -183,7 +179,7 @@ async def push_clear(request: Request, user: dict = Depends(current_user)) -> di
 async def push_test(request: Request, user: dict = Depends(current_user)) -> dict:
     """Sends a test notification to every subscribed device now (quiet hours don't apply to tests) and logs it to
     the alert history. Returns {sent, failed, removed}."""
-    _rate_limit(request, user, "push_test")
+    await _rate_limit(request, user, "push_test")
     r = request.app.state.runner
     if not r.push.enabled:
         raise HTTPException(409, "push_not_configured")

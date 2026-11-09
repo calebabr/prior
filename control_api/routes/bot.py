@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
+import logging
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -20,6 +22,7 @@ from ..services import pnl as pnlsvc
 from ..services import strategies as strat
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("control_api.bot")
 
 
 def _runner(request: Request):
@@ -93,8 +96,33 @@ async def stop(request: Request, user: dict = Depends(current_user_stop)) -> dic
     """Stops the maker AND arbitrage. No 2FA; the auth dependency fails open on store errors, and the runner's
     flags + kill switches never touch the store, Kalshi or the network. Always 200 (errors are reported)."""
     res = await _runner(request).stop(by=user.get("username", "user"))
-    await audit(request, "bot.stop", ok=not res["errors"], user=user, details=res)
+    # the audit runs as a task: a healthy store writes it inside STOP_AUDIT_WAIT_S (so nothing changes then); a
+    # slow or hung store never holds the response, and the write is retried once and logged if it still fails
+    task = asyncio.create_task(_audit_stop(request, user, dict(res, errors=list(res["errors"]))))
+    bg = getattr(request.app.state, "stop_audit_tasks", None)
+    if bg is None:
+        bg = request.app.state.stop_audit_tasks = set()     # strong references until each task finishes
+    bg.add(task)
+    task.add_done_callback(bg.discard)
+    with contextlib.suppress(Exception):
+        await asyncio.wait({task}, timeout=STOP_AUDIT_WAIT_S)
     return res
+
+
+STOP_AUDIT_WAIT_S = 0.25
+STOP_AUDIT_RETRY_DELAY_S = 2.0
+
+
+async def _audit_stop(request: Request, user: dict, details: dict) -> bool:
+    """Writes the bot.stop audit doc; one retry after STOP_AUDIT_RETRY_DELAY_S. Never raises."""
+    ok = not details["errors"]
+    if await audit(request, "bot.stop", ok=ok, user=user, details=details):
+        return True
+    await asyncio.sleep(STOP_AUDIT_RETRY_DELAY_S)
+    if await audit(request, "bot.stop", ok=ok, user=user, details=details):
+        return True
+    log.error("Stop audit not written after one retry (the Stop itself completed)")
+    return False
 
 
 @router.post("/bot/start")

@@ -217,7 +217,7 @@ async def test_quiet_hours_and_push_filter():
 
 async def test_classify_existing_ntfy_titles():
     assert al.classify("Bot stopped") == "stop" and al.classify("Bot stopped: invalid config", "high") == "stop"
-    assert al.classify("Arbitrage legging risk: arb kill switch tripped", "urgent") == "breaker"
+    assert al.classify("Arbitrage legging risk: arb kill switch tripped", "urgent") == "arb_legging"
     assert al.classify("Trading pass error", "high") == "error" and al.classify("No heartbeat") == "error"
     assert al.classify("Arbitrage executed") == "fill" and al.classify("LIVE trading enabled", "urgent") == "system"
 

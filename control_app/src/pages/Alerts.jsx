@@ -19,13 +19,15 @@ export const ALERT_TYPES = [
   { id: 'fill', label: 'Fills' },
   { id: 'settled', label: 'Settled' },
   { id: 'daily', label: 'Daily' },
+  { id: 'weekly', label: 'Weekly' },
   { id: 'error', label: 'Errors' },
   { id: 'stop', label: 'Stop' },
   { id: 'breaker', label: 'Breaker' },
+  { id: 'arb_legging', label: 'Legging' },
 ];
 
-const TYPE_TONE = { fill: 'accent', settled: 'ok', daily: 'muted', error: 'danger', stop: 'danger', breaker: 'danger', test: 'muted', system: 'muted' };
-const TYPE_LABEL = { fill: 'Fill', settled: 'Settled', daily: 'Daily', error: 'Error', stop: 'Stop', breaker: 'Breaker', test: 'Test', system: 'System' };
+const TYPE_TONE = { fill: 'accent', settled: 'ok', daily: 'muted', weekly: 'muted', error: 'danger', stop: 'danger', breaker: 'danger', arb_legging: 'danger', test: 'muted', system: 'muted' };
+const TYPE_LABEL = { fill: 'Fill', settled: 'Settled', daily: 'Daily', weekly: 'Weekly', error: 'Error', stop: 'Stop', breaker: 'Breaker', arb_legging: 'Arbitrage legging', test: 'Test', system: 'System' };
 
 // ---------------------------------------------------------------- history (item 37)
 
@@ -90,7 +92,7 @@ function AlertHistory() {
       {busy && !items && <Loading />}
       {items && !items.length && !error && <p className="muted">No alerts yet.</p>}
       {items && items.length > 0 && (
-        <CollapsibleList items={items} pageKey="alerts-history" label="alerts" pinned={(a) => ['error', 'stop', 'breaker'].includes(a.type)}>
+        <CollapsibleList items={items} pageKey="alerts-history" label="alerts" pinned={(a) => ['error', 'stop', 'breaker', 'arb_legging'].includes(a.type)}>
           {(vis) => (
             <ul className="rows">
               {vis.map((a) => (

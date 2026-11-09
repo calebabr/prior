@@ -316,14 +316,94 @@ async def test_clock_falls_back_to_store_and_fails_without_any_reference(ready_e
     async def store_now():
         return datetime.now(timezone.utc) + timedelta(seconds=1)
     monkeypatch.setattr(ready_env.store, "server_time", store_now)
+    # S3 item 9: live no longer accepts the database clock instead of Kalshi's time (fails closed)
     out = await pf.run_preflight("live", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
+    assert _by_id(out)["clock"]["status"] == "fail" and "Kalshi" in _by_id(out)["clock"]["detail"]
+    # demo may still fall back to the database clock
+    ready_env.runner.mode = "demo"
+    out = await pf.run_preflight("demo", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
     assert _by_id(out)["clock"]["status"] == "pass" and "database" in _by_id(out)["clock"]["detail"]
 
     async def none():
         return None
     monkeypatch.setattr(ready_env.store, "server_time", none)
-    out = await pf.run_preflight("live", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
-    assert _by_id(out)["clock"]["status"] == "fail"
+    out = await pf.run_preflight("demo", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
+    assert _by_id(out)["clock"]["status"] == "warn"
+
+
+# ---------------------------------------------------------------- S3 item 9: Kalshi time source
+class TimeKalshi:
+    """Only the public exchange-status call answers (Date header skew). Anything else is recorded and must not happen."""
+
+    def __init__(self, skew=0.4, fail=None, delay=0.0):
+        self.clock_skew_seconds = None
+        self._skew, self.fail, self.delay = skew, fail, delay
+        self.calls = []
+
+    def get_exchange_status(self):
+        self.calls.append("status")
+        if self.delay:
+            time.sleep(self.delay)
+        if self.fail:
+            raise self.fail
+        self.clock_skew_seconds = self._skew
+        return {"exchange_active": True}
+
+    def __getattr__(self, name):
+        if name.startswith(("place", "cancel", "get_balance", "get_orders", "get_positions", "amend")):
+            def rec(*a, **k):
+                self.calls.append(name)
+            return rec
+        raise AttributeError(name)
+
+
+class _R:
+    def __init__(self, client):
+        self.client = client
+        self.kalshi_factory = lambda mode: client
+
+
+async def test_time_probe_reads_skew_and_makes_no_auth_or_order_calls():
+    c = TimeKalshi(skew=1.5)
+    assert await pf._kalshi_time_probe(_R(c), "live") == 1.5
+    assert c.calls == ["status"]
+
+
+async def test_time_probe_unreadable_and_timeout_give_none():
+    assert await pf._kalshi_time_probe(_R(TimeKalshi(fail=RuntimeError("x"))), "live") is None
+    assert await pf._kalshi_time_probe(_R(TimeKalshi(skew=None)), "live") is None
+    assert await pf._kalshi_time_probe(_R(TimeKalshi(delay=0.5)), "live", timeout=0.05) is None
+    assert await pf._kalshi_time_probe(_R(None), "live") is None
+
+
+NOW = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def test_check_clock_live_fail_closed_demo_warns():
+    assert pf.check_clock(0.4, None, NOW, "live")[0] == "pass"
+    assert pf.check_clock(30.0, None, NOW, "live")[0] == "fail"
+    assert pf.check_clock(30.0, None, NOW, "demo")[0] == "warn"
+    assert pf.check_clock(None, NOW, NOW, "live")[0] == "fail"       # database clock is no substitute for live
+    assert pf.check_clock(None, NOW, NOW, "demo")[0] == "pass"
+    assert pf.check_clock(None, None, NOW, "demo")[0] == "warn"
+    assert pf.check_clock(None, None, NOW, "live")[0] == "fail"
+
+
+async def test_run_preflight_uses_the_time_probe_for_the_clock(ready_env):
+    ready_env.kalshi = OkKalshi(skew=0.2)
+    # time probe only: patch it, leaving the authenticated probe on OkKalshi
+    async def probe(runner, target, timeout=3.0):
+        return 40.0
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    try:
+        mp.setattr(pf, "_kalshi_time_probe", probe)
+        out = await pf.run_preflight("live", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
+        assert _by_id(out)["clock"]["status"] == "fail" and "+40" in _by_id(out)["clock"]["detail"].replace("-40", "+40")
+        out = await pf.run_preflight("demo", runner=ready_env.runner, store=ready_env.store, settings=ready_env.settings)
+        assert _by_id(out)["clock"]["status"] == "warn"
+    finally:
+        mp.undo()
 
 
 async def test_alerts_pass_with_push_only(ready_env, monkeypatch):

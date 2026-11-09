@@ -32,6 +32,7 @@ TARGETS = ("live", "demo")
 PASS, WARN, FAIL = "pass", "warn", "fail"
 STORE_TIMEOUT_S = 5.0
 KALSHI_TIMEOUT_S = 6.0
+TIME_TIMEOUT_S = 3.0                            # the Kalshi time read (public exchange status, Date header)
 SNAPSHOT_FRESH_S = 20 * 60
 SKEW_MAX_S = opsmon.SKEW_WARN_S                 # 5 s
 RECON_TOLERANCE = 0.10                          # dollars
@@ -190,18 +191,25 @@ def check_caps(runner: Any, settings: Any) -> tuple[str, str]:
 
 
 def check_clock(kalshi_skew_local_minus_server: float | None, store_time: datetime | None,
-                now: datetime) -> tuple[str, str]:
-    ref, source = None, None
+                now: datetime, target: str = "live") -> tuple[str, str]:
+    """Server clock against Kalshi's clock (HTTP Date header). Live fails closed when Kalshi's time cannot be read
+    (the database clock is no substitute for money decisions) or the skew is over SKEW_MAX_S. Demo only warns, and
+    may fall back to the database clock."""
+    bad = FAIL if target == "live" else WARN
     if kalshi_skew_local_minus_server is not None:
         ref, source = now - timedelta(seconds=float(kalshi_skew_local_minus_server)), "Kalshi"
+    elif target == "live":
+        return _res(FAIL, "could not read Kalshi's time (no Date header within the timeout)")
     elif store_time is not None:
         ref, source = _aware(store_time), "database"
+    else:
+        ref, source = None, None
     rep = opsmon.clock_report(ref, now, source or "none")
     if not rep["available"]:
-        return _res(FAIL, "no reference clock (Kalshi Date header and database clock unavailable)")
+        return _res(bad, "no reference clock (Kalshi Date header and database clock unavailable)")
     skew = rep["skew_s"]
     if abs(skew) > SKEW_MAX_S:
-        return _res(FAIL, f"skew {skew:+.1f} s against the {source} clock")
+        return _res(bad, f"skew {skew:+.1f} s against the {source} clock")
     return _res(PASS, f"skew {skew:+.1f} s against the {source} clock")
 
 
@@ -406,6 +414,22 @@ async def _kalshi_probe(runner: Any, target: str, timeout: float) -> tuple[tuple
     return _res(PASS, f"authenticated read on the {env} exchange answered"), skew
 
 
+async def _kalshi_time_probe(runner: Any, target: str, timeout: float = TIME_TIMEOUT_S) -> float | None:
+    """Local minus Kalshi clock, from the Date header of the public exchange-status call (no auth, no orders).
+    None when it cannot be read in `timeout` seconds. Never raises."""
+    def go() -> float | None:
+        client = _kalshi_client(runner, target)
+        if client is None:
+            return None
+        client.get_exchange_status()
+        skew = getattr(client, "clock_skew_seconds", None)
+        return float(skew) if isinstance(skew, (int, float)) and not isinstance(skew, bool) else None
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(go), timeout)
+    except Exception:  # noqa: BLE001  (timeout included; the check reports "could not read")
+        return None
+
+
 async def _reconciliation(app_state: Any, store: Any, env: str, now: datetime) -> dict | None:
     """Cheap only. First the newest daily Kalshi reconciliation report for this env (one store read) when the store
     has them; else the ledger residual from the analytics row cache (built after each pass by analytics.warm) when a
@@ -462,11 +486,11 @@ async def run_preflight(target: str, *, runner: Any, store: Any, settings: Any, 
 
     # independent I/O first, in parallel, each bounded
     (ping_ok, ping), (snap_ok, snap), (push_ok, push), (rel_ok, rel), (rec_ok, rec), (_k, kal), \
-        (st_ok, store_time) = await asyncio.gather(
+        (st_ok, store_time), (_t, time_skew) = await asyncio.gather(
             _soft(_store_ping(store)), _soft(_latest_snapshot(store)), _soft(_push_count(store)),
             _soft(_approved_release(store)), _soft(_reconciliation(app_state, store, snap_env, t)),
             _soft(_kalshi_probe(runner, target, kalshi_timeout)),
-            _soft(_bounded(store.server_time())))
+            _soft(_bounded(store.server_time())), _soft(_kalshi_time_probe(runner, target)))
 
     run("keys", lambda: check_keys(target, settings))
     run("mode", lambda: check_mode(target, runner, settings))
@@ -476,7 +500,8 @@ async def run_preflight(target: str, *, runner: Any, store: Any, settings: Any, 
     run("caps", lambda: check_caps(runner, settings))
     kalshi_res, skew = kal if _k else (_res(FAIL, f"check could not run: {kal}"), None)
     results["kalshi"] = kalshi_res
-    run("clock", lambda: check_clock(skew, store_time if st_ok else None, t))
+    clock_skew = time_skew if _t and time_skew is not None else skew
+    run("clock", lambda: check_clock(clock_skew, store_time if st_ok else None, t, target))
     if ping_ok and ping:
         results["store"] = _res(PASS, "the database answered a ping")
     else:

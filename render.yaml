@@ -98,6 +98,8 @@ services:
         sync: false           # same --gen-keys output; sent by cron-job.org as X-Tick-Token
       - key: CRONJOB_API_KEY
         sync: false           # optional; cron-job.org Console -> Settings -> API
+      - key: HEALTHCHECKS_PING_URL
+        sync: false           # optional, secret; healthchecks.io dead-man ping URL (docs/MONITORING.md)
       - key: KALSHI_DEMO_API_KEY_ID
         sync: false
       - key: KALSHI_DEMO_PRIVATE_KEY

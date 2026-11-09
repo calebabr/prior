@@ -14,7 +14,7 @@ import abc
 import asyncio
 import copy
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from . import schemas as S
@@ -397,6 +397,13 @@ class Store(abc.ABC):
         """Merge the given top-level fields into the stored doc (e.g. {"pinger_minutes": 7} or
         {"cronjob_job_id": 123, "pinger_sync": {...}}); sets updated_utc/updated_by. Returns the full doc."""
 
+    # ---- shared rate-limit counters (Sprint 3 item 2; not abstract: a store without them fails open)
+    async def ratelimit_hit(self, key: str, window_index: int, window_s: float) -> tuple[int, int]:
+        """Atomically add 1 to the counter for (key, window_index) and return (that count, the count of the
+        window before it, 0 if none). The doc lives until the end of the NEXT window (``expires_at``, TTL), so it can
+        serve as "previous" once. ``key`` is an opaque hashed id (no raw IP / username). ValueError on bad input."""
+        raise NotImplementedError("ratelimit_hit")
+
 
 # ------------------------------------------------------------------ shared validation
 def _validate_state(desired: str | None, mode: str | None,
@@ -467,6 +474,22 @@ def _new_release(doc: dict, now: datetime) -> dict:
     return out
 
 
+def _ratelimit_args(key: str, window_index: int, window_s: float) -> tuple[str, int, float]:
+    if not isinstance(key, str) or not key or len(key) > S.RATE_LIMIT_KEY_MAX:
+        raise ValueError("ratelimit key must be a non-empty string")
+    if isinstance(window_index, bool) or not isinstance(window_index, int) or window_index < 0:
+        raise ValueError("window_index must be an int >= 0")
+    w = float(window_s)
+    if not w > 0:
+        raise ValueError("window_s must be > 0")
+    return key, window_index, w
+
+
+def ratelimit_expires_at(window_index: int, window_s: float) -> datetime:
+    """End of the window AFTER ``window_index`` (the doc is still needed as that window's "previous" count)."""
+    return datetime.fromtimestamp((window_index + 2) * window_s, tz=timezone.utc)
+
+
 def _newest(docs: list[dict], key: str = "ts") -> list[dict]:
     return sorted(docs, key=lambda d: d[key], reverse=True)
 
@@ -502,6 +525,7 @@ class MemoryStore(Store):
         self._nonces: dict[str, datetime] = {}       # consumed handover nonce -> ts
         self._schema_version: int | None = None
         self._releases: dict[str, dict] = {}         # id -> doc
+        self._ratelimits: dict[str, tuple[int, datetime]] = {}   # "<key>:<window>" -> (count, expires_at)
         self._seq = 0                               # insertion order tiebreak for equal ts
 
     @staticmethod
@@ -1091,6 +1115,26 @@ class MemoryStore(Store):
             self._revoked.pop(str(jti), None)
             return False
         return True
+
+    # ---- shared rate-limit counters
+    async def ratelimit_hit(self, key: str, window_index: int, window_s: float) -> tuple[int, int]:
+        key, idx, w = _ratelimit_args(key, window_index, window_s)
+        # Expiry follows the caller's clock (the window being counted), like a TTL index: a doc whose expires_at is
+        # at or before the start of this window is gone. No await inside, so the increment is atomic.
+        start = datetime.fromtimestamp(idx * w, tz=timezone.utc)
+        rl = self._ratelimits
+        if len(rl) >= S.RATE_LIMIT_MEMORY_MAX:
+            for k in [k for k, (_, exp) in rl.items() if exp <= start]:
+                del rl[k]
+            if len(rl) >= S.RATE_LIMIT_MEMORY_MAX:
+                rl.clear()
+        cur_id, prev_id = f"{key}:{idx}", f"{key}:{idx - 1}"
+        n, exp = rl.get(cur_id, (0, ratelimit_expires_at(idx, w)))
+        if exp <= start:
+            n = 0
+        rl[cur_id] = (n + 1, ratelimit_expires_at(idx, w))
+        prev = rl.get(prev_id)
+        return n + 1, (prev[0] if prev is not None and prev[1] > start else 0)
 
     # ---- cloud settings
     async def get_cloud_settings(self) -> dict | None:

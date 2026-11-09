@@ -36,7 +36,7 @@ class TwoFAIn(BaseModel):
 
 @router.post("/login")
 async def login(body: LoginIn, request: Request) -> dict:
-    enforce(request, "login")
+    await enforce(request, "login")
     store = request.app.state.store
     user = await store_call(store.get_user(body.username))
     if not user:
@@ -80,7 +80,7 @@ async def login(body: LoginIn, request: Request) -> dict:
 
 @router.post("/2fa")
 async def two_factor(body: TwoFAIn, request: Request) -> dict:
-    enforce(request, "2fa")
+    await enforce(request, "2fa")
     settings = request.app.state.settings
     store = request.app.state.store
     try:

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.deps import current_user
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from ..db import schemas as S
 
 router = APIRouter(prefix="/api/recon")
@@ -22,12 +22,8 @@ RATE_LIMITS = {"recon_read": (30, 60.0)}
 HISTORY_MAX_DAYS = S.RECON_RETENTION_DAYS
 
 
-def _rate_limit(request: Request, user: dict, bucket: str = "recon_read") -> None:
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(429, "rate_limited", headers={"Retry-After": str(retry)})
+async def _rate_limit(request: Request, user: dict, bucket: str = "recon_read") -> None:
+    await check_user(request, user, bucket, RATE_LIMITS[bucket])
 
 
 def _mode(mode: str | None) -> str | None:
@@ -54,7 +50,7 @@ def _view(d: dict) -> dict:
 
 @router.get("/latest")
 async def recon_latest(request: Request, mode: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
-    _rate_limit(request, user)
+    await _rate_limit(request, user)
     doc = await _store(request.app.state.store.latest_recon_report(_mode(mode)))
     return {"report": _view(doc) if doc else None}
 
@@ -62,7 +58,7 @@ async def recon_latest(request: Request, mode: str | None = Query(None), user: d
 @router.get("/history")
 async def recon_history(request: Request, days: int = Query(30, ge=1, le=HISTORY_MAX_DAYS),
                         mode: str | None = Query(None), user: dict = Depends(current_user)) -> dict:
-    _rate_limit(request, user)
+    await _rate_limit(request, user)
     since_day = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
     docs = await _store(request.app.state.store.list_recon_reports(since_day=since_day, mode=_mode(mode),
                                                                    limit=days * len(S.MODE_VALUES)))

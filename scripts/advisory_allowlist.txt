@@ -1,0 +1,2 @@
+# Reviewed exceptions for scripts/check_advisories.py. One advisory id per line; a '# reason' comment is REQUIRED
+# (who reviewed, why it does not apply, when to revisit). Empty on purpose: add an entry only after reading the advisory.

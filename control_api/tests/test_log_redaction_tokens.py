@@ -50,3 +50,12 @@ def test_release_process_secrets_are_redacted(monkeypatch, name):
     assert name in lb._SECRET_ENVS
     out = lb.redact(f"handover step saw {value} in a message")
     assert value not in out and "[REDACTED]" in out
+
+
+def test_bearer_tokens_are_redacted_and_the_ping_url_rule_does_not_swallow_the_rule_after_it():
+    """Regression: the hc-ping rule's trailing comment once absorbed the bearer rule that followed it on the same line."""
+    out = lb.redact("Authorization: Bearer abc123.def_456-xyz and https://hc-ping.com/1234-abcd/fail")
+    assert "abc123" not in out and "Bearer [REDACTED]" in out
+    assert "1234-abcd" not in out and "hc-ping.com/[REDACTED]" in out
+    for pattern, _rep in lb._SUBS:                  # every rule is a real, separate entry
+        assert hasattr(pattern, "sub")

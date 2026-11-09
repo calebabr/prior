@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -104,6 +104,44 @@ async def ping_once(runner: Any, transport: Any = None) -> dict:
     return st
 
 
+DEADMAN_TIMEOUT_S = 3.0
+
+
+def deadman_stalled(runner: Any, now: datetime | None = None) -> bool:
+    """True when the bot should be trading (desired running) but no pass has run for silent_alert_minutes, measured
+    like the internal watchdog (from the later of the last pass and when the watchdog first saw it running). A
+    stopped bot is not stalled: the service is alive, so Stop never raises a false dead-man alarm."""
+    if getattr(runner, "desired", None) != "running":
+        return False
+    now = now or utcnow()
+    limit = int((runner.cloud or {}).get("silent_alert_minutes") or 30)
+    refs = [t for t in (getattr(runner, "last_run_utc", None), getattr(runner, "_silence_ref", None)) if t]
+    if not refs:
+        return False          # running but the watchdog has not looked yet: give it the first window
+    return now - max(refs) > timedelta(minutes=limit)
+
+
+async def deadman_ping(runner: Any, transport: Any = None) -> str | None:
+    """Pings the external dead-man (healthchecks.io): the plain URL when healthy, URL/fail when stalled. Off when
+    HEALTHCHECKS_PING_URL is unset. Never raises, never logs the URL (a secret), 3 s timeout; it touches nothing
+    the trading pass or Stop uses. Returns "ok" / "fail" (what was sent), "error" or None (off)."""
+    url = getattr(runner.settings, "healthchecks_ping_url", None)
+    if not url:
+        return None
+    try:
+        stalled = deadman_stalled(runner)
+        async with httpx.AsyncClient(timeout=DEADMAN_TIMEOUT_S, transport=transport,
+                                     follow_redirects=False) as c:
+            r = await asyncio.wait_for(c.get(url + ("/fail" if stalled else "")), DEADMAN_TIMEOUT_S + 1)
+        if r.status_code >= 400:
+            log.warning("dead-man ping refused: HTTP %s", r.status_code)
+            return "error"
+        return "fail" if stalled else "ok"
+    except Exception as e:  # noqa: BLE001   (type only: the URL is a secret)
+        log.warning("dead-man ping failed: %s", type(e).__name__)
+        return "error"
+
+
 async def keepalive_loop(runner: Any) -> None:
     while True:
         minutes = int(runner.cloud.get("keepalive_minutes") or 10)
@@ -113,6 +151,10 @@ async def keepalive_loop(runner: Any) -> None:
             await runner.tick("self-ping")
         except Exception as e:  # noqa: BLE001
             log.error("keepalive failed: %s", type(e).__name__)
+        try:          # after the pass (if one was due), so "ok" reflects it; separate so it can never block the tick
+            await deadman_ping(runner)
+        except Exception as e:  # noqa: BLE001
+            log.error("dead-man ping failed: %s", type(e).__name__)
 
 
 def pinger_status(settings: Any, cloud: dict) -> dict:

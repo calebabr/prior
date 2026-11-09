@@ -1,0 +1,39 @@
+# PROPOSAL (not active): copy to .github/workflows/load-test.yml to use it.
+# Manual only. Runs the LOCAL suite (MemoryStore, fake Kalshi, fake pass): no secrets, no network beyond pip, never live.
+name: load-test
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "all, or a comma list (polling,auth,analytics,stop,push,soak,contention)"
+        default: "all"
+      soak_seconds:
+        description: "soak length in seconds"
+        default: "120"
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r control_api/requirements-dev.txt -r loadtests/requirements.txt
+      - name: Run the local load tests
+        run: >
+          python -m loadtests.run --target local --scenario "${{ inputs.scenario }}"
+          --soak-seconds "${{ inputs.soak_seconds }}" --out-dir load-test-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-test-results
+          path: load-test-results/
+          retention-days: 30
+# Results are uploaded as a build artifact; commit the ones worth keeping to docs/load-tests/ by hand.
+# A Docker memory cap (512 MB) can be added by running loadtests.server in a container; see the README.

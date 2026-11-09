@@ -154,12 +154,13 @@ def _store_case(settings, kalshi, **kw):
 def test_stop_with_store_black_holed(settings, bot_paths, kalshi):
     body, total = _store_case(settings, kalshi, store_delay=INF)
     assert any(e.startswith("store") for e in body["errors"])
-    assert total < 12.0                                # 0.5 s auth + 5 s store write + 5 s audit, all bounded
+    assert total < 1.5                  # 0.5 s auth + 0.6 s store wait + 0.25 s audit wait (both continue behind)
 
 
 def test_stop_with_store_slow(settings, bot_paths, kalshi):
     body, total = _store_case(settings, kalshi, store_delay=2.0)
-    assert body["errors"] == [] and total < 12.0      # the slow write still lands inside its 5 s bound
+    # the response no longer waits for a slow write; it says so, and the write lands behind it (test_stop_response_bound)
+    assert body["errors"] == ["store: slow (still writing in background)"] and total < 1.5
 
 
 def test_stop_with_store_raising(settings, bot_paths, kalshi):
@@ -274,6 +275,11 @@ def test_fifty_simultaneous_stops_with_a_slow_store(settings, bot_paths):
         assert len(probe.starts) == 50 and max(probe.starts) - t0 < FLAG_BUDGET_S
         assert all(f == ("stopped", "stopped", True, True) for f in probe.flags_at_start)
         assert total < 12.0 and _stopped(r) and r._stopping == 0
+        for _ in range(100):                       # the slow store writes finish behind the responses
+            if not r._stop_writes:
+                break
+            await asyncio.sleep(0.1)
+        assert r._stop_writes == 0 and not r._stop_pending
         assert (await mem.get_state())["desired"] == "stopped"
         await r.shutdown()
     run_virtual(go)

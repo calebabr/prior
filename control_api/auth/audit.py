@@ -40,7 +40,8 @@ def _scrub(details: Any) -> Any:
 
 
 async def audit(request: Request, action: str, *, ok: bool = True, user: Any = None,
-                details: Any = None, timeout: float = 5.0) -> None:
+                details: Any = None, timeout: float = 5.0) -> bool:
+    """True when the audit doc was written, False when the write failed or timed out (already logged)."""
     try:
         if user is None:
             user = getattr(request.state, "user", None)
@@ -55,8 +56,10 @@ async def audit(request: Request, action: str, *, ok: bool = True, user: Any = N
         }
         # Bounded so a hung Atlas can never stall a request (Stop in particular).
         await asyncio.wait_for(request.app.state.store.add_audit(doc), timeout)
+        return True
     except Exception as e:  # audit must never break the request (esp. Stop)
         try:
             log.warning("audit write failed for action=%s: %s", action, type(e).__name__)
         except Exception:
             pass
+        return False

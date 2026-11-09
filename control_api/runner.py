@@ -88,6 +88,12 @@ SHUTDOWN_MARGIN_S = 3.0             # event loop, store.close() and process exit
 SHUTDOWN_STORE_TIMEOUT_S = 2.0      # each shutdown store call (journal flush, state read, handover read, release)
 SHUTDOWN_RESERVE_S = 4 * SHUTDOWN_STORE_TIMEOUT_S   # kept free after the order step for those four calls
 CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
+# Stop's store write: bounded at STOP_STORE_WRITE_S, run as a task; the response waits for it at most
+# STOP_STORE_WAIT_S (a healthy store lands well inside that, so the response reflects it as before). A slower write
+# carries on in the background; until it lands, a Start or arbitrage enable is refused (Stop wins), and if it fails
+# the existing desired=stopped retry takes over.
+STOP_STORE_WRITE_S = 5.0
+STOP_STORE_WAIT_S = 0.6
 # CA-2: Stop's cancel runs on its own pool, never the default executor, so monitor runs, abandoned arb scans or
 # anything else using asyncio.to_thread can never queue it behind them. 4 workers: a few Stop taps against a hung
 # Kalshi can each hold one for up to CANCEL_TIMEOUT_S and a new tap still gets a thread.
@@ -484,6 +490,7 @@ class Runner:
         # _stopping > 0 while it runs. Start (and arb enable) refuse if either is set or changed across their awaits.
         self._stop_gen = 0
         self._stopping = 0
+        self._stop_writes = 0             # Stop store writes still in flight after their Stop returned
         # fills / P&L sync
         self.last_fills_sync_utc: datetime | None = None
         self.fills_sync_error: str | None = None
@@ -3249,7 +3256,7 @@ class Runner:
         turning_on =desired == "running" or mode == "live"
         if turning_on and not self.settings.runner_enabled:
             raise RunnerDisabled("runner_disabled")
-        if turning_on and self._stopping:
+        if turning_on and (self._stopping or self._stop_writes):
             raise StopInProgress("stop_in_progress")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
@@ -3325,14 +3332,16 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 errors.append(f"cancel: {type(e).__name__}")
             self._stop_pending = True
-            try:
-                await asyncio.wait_for(self._write_stopped(by), timeout=5)
-                if self.desired == "stopped":
-                    self._stop_pending = False
-                    self._stop_persisted = True
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"store: {type(e).__name__} (retrying in background)")
-                self._ensure_stop_retry(by)
+            # the store write runs as its own task: the response waits for it only briefly (a healthy store lands
+            # inside STOP_STORE_WAIT_S, so nothing changes then); a slow one finishes, or hands over to the retry,
+            # in the background, and blocks Start until it does
+            write = self._spawn(self._persist_stop(by, self._write_stopped))
+            with contextlib.suppress(Exception):
+                await asyncio.wait({write}, timeout=STOP_STORE_WAIT_S)
+            if not write.done():
+                errors.append("store: slow (still writing in background)")
+            elif not write.cancelled() and write.result():
+                errors.append(f"store: {write.result()} (retrying in background)")
             try:
                 log.warning("STOP by %s: cancelled=%s errors=%s", by, cancelled, errors)
                 self._spawn(self.alerter.send("Bot stopped", f"by {by}; cancelled {cancelled}; errors {errors}"))
@@ -3346,6 +3355,26 @@ class Runner:
                 "cancelled": cancelled, "errors": errors,
                 # toast fields (UX item 39); same values as above, new names, nothing removed
                 "stopped_at": iso(self.last_stop_utc), "orders_cancelled": cancelled}
+
+    async def _persist_stop(self, by: str, write) -> str | None:
+        """Stop's own desired=stopped store write, run as a task (see STOP_STORE_WAIT_S). Returns None when it landed,
+        else the error type, after logging it (type only, never details) and handing over to the background retry,
+        so a failed write is never lost silently. While it is in flight, Start and arbitrage enable are refused."""
+        self._stop_writes += 1
+        try:
+            await asyncio.wait_for(write(by), timeout=STOP_STORE_WRITE_S)
+        except asyncio.CancelledError:
+            raise                            # shutdown: its own last-chance write (S-59) covers a pending Stop
+        except Exception as e:  # noqa: BLE001
+            log.error("Stop not persisted yet: %s (retrying in background)", type(e).__name__)
+            self._ensure_stop_retry(by)
+            return type(e).__name__
+        finally:
+            self._stop_writes -= 1
+        if self.desired == "stopped":          # no await since the write landed
+            self._stop_pending = False
+            self._stop_persisted = True
+        return None
 
     async def _write_stopped(self, by: str) -> None:
         """One store write that stops both strategies (maker-only on a store without the arb fields)."""
@@ -3427,7 +3456,7 @@ class Runner:
         if self.mode == "live" and not self.armed("maker"):
             raise PermissionError("maker_not_armed")       # item 10: arm the maker first (Arming page, fresh 2FA)
         gen = self._stop_gen
-        if self._stopping:
+        if self._stopping or self._stop_writes:      # a Stop, or its store write, is still in flight: Stop wins
             raise StopInProgress("stop_in_progress")
         # reload the config from the store (the owner may have fixed it since the last load). A config that still
         # fails validation keeps the bot stopped with the reason; a good one clears a stale "invalid config" error.
@@ -3436,7 +3465,7 @@ class Runner:
             raise ConfigInvalid(f"invalid_config: {self.last_error or 'stored config failed validation'}"[:400])
         if isinstance(self.last_error, str) and self.last_error.startswith(INVALID_CONFIG_PREFIXES):
             self.last_error = None
-        if gen != self._stop_gen or self._stopping:
+        if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
         try:

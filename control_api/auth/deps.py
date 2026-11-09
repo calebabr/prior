@@ -36,6 +36,9 @@ log = logging.getLogger("control_api.auth")
 STORE_TIMEOUT_S = 5.0
 REVOCATION_TIMEOUT_S = 3.0
 SESSIONS_TIMEOUT_S = 3.0
+# Stop's two store reads (revocation + session epoch, run concurrently) are cut at this, then fail open, so a slow or
+# black-holed Atlas delays Stop's flags by at most this much (Sprint 3 item 1; was the 3 s timeouts above).
+STOP_STORE_TIMEOUT_S = 0.5
 SESSIONS_CACHE_TTL_S = 10.0     # reuse a fresh read this long (override: app.state.auth_sessions_ttl_s)
 SESSIONS_FIELD = "sessions_valid_after"
 TWOFA_HEADER = "X-2FA-Code"
@@ -115,7 +118,8 @@ def token_predates_sessions(iat: Any, sva_epoch: float) -> bool:
         return True
 
 
-async def sessions_valid_after(request: Request, username: str, *, fail_open: bool) -> float:
+async def sessions_valid_after(request: Request, username: str, *, fail_open: bool,
+                               timeout: float = SESSIONS_TIMEOUT_S) -> float:
     """Current session epoch for ``username`` (epoch seconds; 0 = no constraint).
 
     Store failure: ``fail_open`` -> last-known cached value (0 if never read); otherwise 503.
@@ -126,8 +130,7 @@ async def sessions_valid_after(request: Request, username: str, *, fail_open: bo
     if cached is not None and time.monotonic() - cached[1] < ttl:
         return cached[0]
     try:
-        doc = await asyncio.wait_for(request.app.state.store.get_user(username),
-                                     SESSIONS_TIMEOUT_S)
+        doc = await asyncio.wait_for(request.app.state.store.get_user(username), timeout)
     except Exception as e:
         if fail_open:
             log.warning("session-epoch check unavailable (%s); Stop uses last-known value",
@@ -173,13 +176,12 @@ async def store_call(coro: Any, timeout: float = STORE_TIMEOUT_S) -> Any:
         raise HTTPException(status_code=503, detail="store_unavailable") from None
 
 
-async def token_revoked(request: Request, jti: str) -> bool:
+async def token_revoked(request: Request, jti: str, timeout: float = REVOCATION_TIMEOUT_S) -> bool:
     exp = _local_revoked(request).get(jti)
     if exp is not None and exp >= sec.utcnow():
         return True
     try:
-        return bool(await asyncio.wait_for(request.app.state.store.is_revoked(jti),
-                                           REVOCATION_TIMEOUT_S))
+        return bool(await asyncio.wait_for(request.app.state.store.is_revoked(jti), timeout))
     except Exception as e:
         log.warning("revocation check unavailable (%s); allowing valid token", type(e).__name__)
         return False
@@ -276,10 +278,12 @@ async def _authenticate(request: Request, *, fail_open: bool) -> dict:
         claims = sec.decode_token(request.app.state.settings, token.strip(), sec.TYP_ACCESS)
     except sec.TokenError:
         raise _unauthorized("invalid_token") from None
-    # Both store reads run concurrently so Stop's worst case is one timeout, not two.
+    # Both store reads run concurrently so Stop's worst case is one timeout, not two; for Stop (fail_open) that one
+    # timeout is STOP_STORE_TIMEOUT_S, so the flags never wait seconds on a slow store.
     revoked, sva = await asyncio.gather(
-        token_revoked(request, claims["jti"]),
-        sessions_valid_after(request, claims["sub"], fail_open=fail_open),
+        token_revoked(request, claims["jti"], STOP_STORE_TIMEOUT_S if fail_open else REVOCATION_TIMEOUT_S),
+        sessions_valid_after(request, claims["sub"], fail_open=fail_open,
+                             timeout=STOP_STORE_TIMEOUT_S if fail_open else SESSIONS_TIMEOUT_S),
     )
     if revoked:
         raise _unauthorized("token_revoked")
@@ -315,7 +319,7 @@ async def require_fresh_2fa(request: Request) -> dict:
     code = request.headers.get(TWOFA_HEADER)
     if code is None or not code.strip():
         raise HTTPException(status_code=403, detail="2fa_required")
-    enforce(request, "stepup")
+    await enforce(request, "stepup")
     doc = await store_call(request.app.state.store.get_user(user["username"]))
     if not doc:
         raise _unauthorized("invalid_token")

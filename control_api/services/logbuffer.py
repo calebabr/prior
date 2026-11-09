@@ -10,14 +10,15 @@ _SECRET_ENVS = ("KALSHI_DEMO_PRIVATE_KEY", "KALSHI_PROD_PRIVATE_KEY", "KALSHI_PR
                 "KALSHI_PROD_API_KEY_ID", "KALSHI_API_KEY_ID", "JWT_SECRET", "TOTP_ENC_KEY", "TICK_TOKEN",
                 "CRONJOB_API_KEY", "MONGODB_URI", "NTFY_TOPIC", "VAPID_PRIVATE_KEY",
                 "PRIVATE_REPO_TOKEN",    # S-44: read-only GitHub token for the private strategy overlay
-                "HANDOVER_HMAC_KEY", "DEPLOY_STATUS_KEY", "RELEASE_TOKEN")    # B-10: release-process secrets
+                "HANDOVER_HMAC_KEY", "DEPLOY_STATUS_KEY", "RELEASE_TOKEN",    # B-10: release-process secrets
+                "HEALTHCHECKS_PING_URL")         # dead-man ping URL (anyone holding it can ping)
 _SUBS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED]"),
     (re.compile(r"mongodb(\+srv)?://\S+"), "[REDACTED]"),
     # S-44: GitHub tokens (fine-grained github_pat_..., classic ghp_/gho_/ghu_/ghs_/ghr_...), wherever they appear
     (re.compile(r"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})"), "[REDACTED]"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"), "[REDACTED]"),
-    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)hc-ping\.com/\S+"), "hc-ping.com/[REDACTED]"),      # healthchecks.io ping URLs    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)((?:password|secret|token|api[_-]?key|x-2fa-code|totp)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+"),
      r"\1[REDACTED]"),
 ]

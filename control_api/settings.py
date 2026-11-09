@@ -52,6 +52,17 @@ def _num(v: str | None, default: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def _ping_url(v: str | None) -> str | None:
+    """HEALTHCHECKS_PING_URL: an https URL without spaces, trailing slash removed; anything else disables the ping
+    with a warning that never includes the value (the URL is a secret)."""
+    if not v:
+        return None
+    if not v.lower().startswith("https://") or any(c.isspace() for c in v) or len(v) > 512:
+        log.warning("HEALTHCHECKS_PING_URL ignored: it must be an https:// URL (dead-man ping off)")
+        return None
+    return v.rstrip("/")
+
+
 def release_timing_from(g) -> dict:
     """Lease / handover timing from env (LEASE_TTL_S, LEASE_RENEW_S, PASS_BUDGET_S, SHUTDOWN_DELAY_S,
     HANDOVER_MAX_AGE_S), clamped so a bad value can never make the lease unsafe: renew <= ttl/3 (two missed renews
@@ -103,6 +114,9 @@ class Settings:
     release_token: str | None = None         # /api/release/pending*; unset -> 404 (feature invisible)
     # Shadow mode (docs/SHADOW_CONTRACT.md): SHADOW_ENABLED env AND the cloud setting shadow_enabled. Read only.
     shadow_enabled: bool = False
+    # Dead-man ping (docs/MONITORING.md): a healthchecks.io ping URL. Secret (anyone holding it can ping): env only,
+    # never logged, stored, audited or returned. Unset (default) = off. Only https:// URLs are used.
+    healthchecks_ping_url: str | None = None
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Settings":
@@ -148,6 +162,7 @@ class Settings:
             deploy_status_key=g("DEPLOY_STATUS_KEY"),
             release_token=g("RELEASE_TOKEN"),
             shadow_enabled=_bool(g("SHADOW_ENABLED"), False),
+            healthchecks_ping_url=_ping_url(g("HEALTHCHECKS_PING_URL")),
         )
         kw.update(release_timing_from(g))
         kw["prod_keys_present"], kw["live_confirm_ok"] = live_gates_from(env if env is not None else os.environ)

@@ -54,3 +54,6 @@ Kept in the cloud-settings document, not exposed or writable through `GET/PUT /a
 - `GET /api/status`: new `write_report` `{cancel, place, paused, series_capped, utc, mode}` or null; `lease_expires_at` follows each renew.
 
 Example: `curl -X POST "$API/api/periods" -H "Authorization: Bearer <TOKEN>" -H "Content-Type: application/json" -d '{"name":"Demo Period 2"}'` (include the fresh-2FA proof your session requires).
+
+- `GET /api/alerts?type=&limit=&before=`: alert history, newest first. `type` is one of `fill`, `settled`, `daily`, `error`, `stop`, `breaker`, `test`, `system`, `weekly` (the once-a-week summary; history and push, quiet hours apply), `arb_legging` (urgent partly-filled arbitrage set; never grouped, always delivered, push and ntfy with the `rotating_light` tag). Rows stored before 2026-11-09 keep their old type (`daily` for weekly summaries, `breaker` for legging alerts) and still list under it. Anything else gives 422.
+- `GET /api/preflight` clock check: live fails closed when Kalshi's time (Date header of the public exchange-status call, 3 s timeout, no auth, no orders) cannot be read or the skew is over 5 s; demo only warns and may use the database clock.

@@ -35,7 +35,7 @@ def test_legging_alert_contained_fields():
     a = al.legging_alert({"kind": "contained", "fills": {"KXT-1-A": 3.0, "KXT-1-B": 0.0}, "loss": 0.42,
                           "event": "KXT-1"}, "2026-11-09", 1.0)
     assert a["type"] == "arb_legging" and a["priority"] == "urgent"
-    assert a["title"].startswith("Arbitrage legging risk") and al.classify(a["title"], "urgent") == "breaker"
+    assert a["title"].startswith("Arbitrage legging risk") and al.classify(a["title"], "urgent") == "arb_legging"
     b = a["body"]
     assert "KXT-1 " in b and "KXT-1-A (3)" in b and "Not filled: KXT-1-B" in b
     assert "$0.42" in b and "$1.00" in b and "until 2026-11-09" in b
@@ -98,7 +98,7 @@ def test_grouper_keys_and_types_are_separate():
 
 
 @pytest.mark.parametrize("kind,title,prio", [
-    ("error", "Anything", "urgent"), ("breaker", "Arbitrage legging risk: x", "high"), ("stop", "Bot stopped", "default"),
+    ("error", "Anything", "urgent"), ("breaker", "Arbitrage legging risk: x", "high"), ("arb_legging", "Arbitrage legging risk: x", "default"), ("stop", "Bot stopped", "default"),
     ("system", "Arbitrage stopped: Kill Switch", "default")])
 def test_urgent_and_kill_switch_never_grouped(kind, title, prio):
     g = al.AlertGrouper()
@@ -235,7 +235,7 @@ async def test_maybe_send_weekly_once_per_iso_week_and_survives_restart():
     assert await al.maybe_send_weekly(c.alerter, st, sun, cloud) is True
     assert len(c.hooked) == 1
     kind, title, body, prio, ch = c.hooked[0]
-    assert (kind, title, prio, ch) == ("daily", "Weekly Summary", "default", [])
+    assert (kind, title, prio, ch) == ("weekly", "Weekly Summary", "default", [])
     assert "Arbitrage sets:" in body and "demo, indicative only" in body
     assert cloud["alerts_state"] == {"daily_sent": "2026-11-08", "weekly_sent": "2026-W45"}   # daily key kept
     assert await al.maybe_send_weekly(c.alerter, st, sun + timedelta(hours=2), cloud) is False

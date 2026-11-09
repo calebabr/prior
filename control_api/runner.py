@@ -1875,7 +1875,7 @@ class Runner:
             log.warning("alert delivery not scheduled: %s", type(e).__name__)
 
     ALERT_URLS = {"fill": "/activity", "settled": "/activity", "daily": "/", "error": "/health", "stop": "/",
-                  "breaker": "/", "test": "/alerts", "system": "/"}
+                  "breaker": "/", "test": "/alerts", "system": "/", "weekly": "/analytics", "arb_legging": "/"}
 
     async def _deliver_alert(self, kind: str, title: str, body: str, priority: str, channels: list[str]) -> None:
         try:

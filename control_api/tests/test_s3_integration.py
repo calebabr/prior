@@ -38,7 +38,7 @@ async def test_contained_partial_sends_the_urgent_contained_legging_alert(env):
     a = r.alerter.sent[-1]
     assert a["priority"] == "urgent" and a["title"] == "Arbitrage legging risk: partial set contained"
     assert "2026-11-05" in a["message"] and "KXDEMOA-B1 (2)" in a["message"]
-    assert alertsvc.classify(a["title"], a["priority"]) == "breaker"
+    assert alertsvc.classify(a["title"], a["priority"]) == "arb_legging"
 
 
 async def test_contained_partial_that_tripped_says_kill_switch_with_the_reason(env):

@@ -21,8 +21,11 @@ from .logbuffer import redact
 
 log = logging.getLogger("control_api.alerts")
 
-TYPES = ("fill", "settled", "daily", "error", "stop", "breaker", "test", "system")
-PROBLEM_TYPES = ("error", "stop", "breaker")
+TYPES = ("fill", "settled", "daily", "error", "stop", "breaker", "test", "system",
+         "weekly", "arb_legging")      # own names since S3 item 8 (were delivered as "daily" / "breaker")
+PROBLEM_TYPES = ("error", "stop", "breaker", "arb_legging")
+# ntfy tags per type, used when the caller gives none
+TYPE_TAGS = {"arb_legging": "rotating_light", "breaker": "warning", "stop": "octagonal_sign", "weekly": "bar_chart"}
 EVERYDAY_TYPES = ("fill", "settled")
 MODES = ("problems", "every_fill")
 DEFAULT_TZ = "America/Chicago"
@@ -35,7 +38,7 @@ _TZ = re.compile(r"^[A-Za-z_]+(/[A-Za-z0-9_+\-]+){0,2}$|^UTC$")
 
 # title prefix -> type, for the existing ntfy alerts (first match wins)
 _TITLE_TYPES = (
-    ("Arbitrage legging risk", "breaker"), ("Arbitrage stopped: kill switch", "breaker"),
+    ("Arbitrage legging risk", "arb_legging"), ("Arbitrage stopped: kill switch", "breaker"),
     ("Bot stopped", "stop"),
     ("Trading pass error", "error"), ("No heartbeat", "error"), ("Monitor failed", "error"),
     ("Self-ping failed", "error"), ("Pinger sync failed", "error"),
@@ -53,7 +56,7 @@ def classify(title: str, priority: str = "default") -> str:
 
 def is_critical(kind: str, priority: str = "default") -> bool:
     """Stop / circuit breaker / high-priority alerts: always delivered, quiet hours or not."""
-    return kind in ("stop", "breaker") or priority in ("high", "urgent")
+    return kind in ("stop", "breaker", "arb_legging") or priority in ("high", "urgent")
 
 
 # ---------------------------------------------------------------- settings (item 38)
@@ -172,7 +175,7 @@ def should_push(settings: dict, kind: str, priority: str = "default", now: datet
     if not critical:
         if kind in EVERYDAY_TYPES and settings.get("mode") != "every_fill":
             return False
-        if kind == "daily" and not settings.get("daily_summary_time"):
+        if kind in ("daily", "weekly") and not settings.get("daily_summary_time"):
             return False
         if in_quiet_hours(settings, now):
             return False
@@ -186,7 +189,7 @@ GROUP_MAX_KEYS = 200
 
 def never_grouped(kind: str, title: str, priority: str) -> bool:
     """Urgent, stop, breaker and kill-switch alerts always send immediately."""
-    return priority == "urgent" or kind in ("stop", "breaker") or "kill switch" in str(title).lower()
+    return priority == "urgent" or kind in ("stop", "breaker", "arb_legging") or "kill switch" in str(title).lower()
 
 
 def _hhmm_utc(ts: datetime | None) -> str:
@@ -327,6 +330,7 @@ class Alerter:
             log.warning("ALERT %s: %s", title, message)
             if self.topic:
                 headers = {"Title": title.encode("ascii", "ignore").decode(), "Priority": priority}
+                tags = tags or TYPE_TAGS.get(classify(title, priority), "")
                 if tags:
                     headers["Tags"] = tags
                 async with httpx.AsyncClient(timeout=10, transport=self.transport) as c:
@@ -348,7 +352,7 @@ class Alerter:
 
 # ---------------------------------------------------------------- urgent legging alert (Sprint 2B part 3, item 5)
 LEGGING_TYPE = "arb_legging"
-LEGGING_TITLE_PREFIX = "Arbitrage legging risk"       # keeps `classify` -> "breaker" (always delivered, push + ntfy)
+LEGGING_TITLE_PREFIX = "Arbitrage legging risk"       # `classify` -> "arb_legging" (urgent, never grouped, push + ntfy)
 
 
 def _fnum(v: Any) -> float | None:
@@ -560,7 +564,7 @@ async def weekly_summary(store, now: datetime, tz: Any = None) -> dict:
 async def maybe_send_weekly(alerter, store, now: datetime, cloud_state: dict) -> bool:
     """Send the weekly summary once per ISO week, from Sunday WEEKLY_HOUR local on. The guard is
     cloud_state["alerts_state"]["weekly_sent"] (ISO week, e.g. "2026-W45"), saved to the store with the other
-    alerts_state keys kept, so a restart does not repeat it. Normal priority, history + push (kind "daily").
+    alerts_state keys kept, so a restart does not repeat it. Normal priority, history + push (kind "weekly").
     `cloud_state` is the runner's cloud settings dict (mutated). Returns whether it sent. Never raises."""
     try:
         cloud_state = cloud_state if isinstance(cloud_state, dict) else {}
@@ -579,7 +583,7 @@ async def maybe_send_weekly(alerter, store, now: datetime, cloud_state: dict) ->
         rep = await weekly_summary(store, now, s.get("tz"))
         fn = getattr(alerter, "notify", None)
         if callable(fn):
-            fn("daily", rep["title"], rep["text"])
+            fn("weekly", rep["title"], rep["text"])
         else:
             await alerter.send(rep["title"], rep["text"])
         try:

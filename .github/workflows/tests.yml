@@ -65,6 +65,8 @@ jobs:
           python -c "import sys; sys.path.insert(0, 'kalshi_bot'); import maker_strategy; assert maker_strategy.IS_STANDIN is True; print('IS_STANDIN=True')"
       - name: Deploy script and push-gate tests
         run: python -m pytest -q -ra --tb=short -p no:cacheprovider scripts/tests
+      - name: Load-test harness tests
+        run: python -m pytest -q -ra --tb=short -p no:cacheprovider loadtests/tests   # not covered by pytest.ini
       - name: Bot tests (kalshi_bot)
         working-directory: kalshi_bot
         run: python -m pytest -q -ra --tb=short -p no:cacheprovider tests
@@ -77,6 +79,22 @@ jobs:
           python -m pip list --format=freeze
           git --version
           uname -a
+
+  advisories:
+    # SC-3: OSV advisory check of the pinned Python locks. NON-BLOCKING for now (continue-on-error; not a release-gate
+    # check): red means a pinned package has a published fix. A network failure only warns. Stdlib script, no deps.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Python advisory check (OSV)
+        run: python scripts/check_advisories.py control_api/requirements.txt control_api/requirements-dev.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -96,7 +114,7 @@ jobs:
           cache: npm
           cache-dependency-path: control_app/package-lock.json
       - name: Install (lockfile only)
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=low
       - name: Test
@@ -126,7 +144,7 @@ jobs:
           cache: npm
           cache-dependency-path: control_app/package-lock.json
       - name: Install (lockfile only)
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install Chromium for Playwright
         run: npx playwright install --with-deps chromium
       - name: End-to-end (mock backend, 375 px)

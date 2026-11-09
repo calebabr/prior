@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api")
 
 @router.get("/analytics/day")
 async def analytics_day(request: Request, user: dict = Depends(current_user)) -> dict:
-    ar._rate_limit(request, user, "analytics_returns")
+    await ar._rate_limit(request, user, "analytics_returns")
     q = request.query_params
     day = ar._parse_date("date", q.get("date"))
     strategy = q.get("strategy") or None

@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from ..auth.deps import current_user
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from ..services import analytics as an
 from ..services import arbsets
 from ..services import botfiles
@@ -130,13 +130,9 @@ def _context(request: Request) -> tuple[list, list[str]]:
     return cells, series
 
 
-def _rate_limit(request: Request, user: dict, bucket: str) -> None:
+async def _rate_limit(request: Request, user: dict, bucket: str) -> None:
     """Per-user sliding window on the app's auth limiter (own bucket). 429 + Retry-After when exceeded."""
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": str(retry)})
+    await check_user(request, user, bucket, RATE_LIMITS[bucket])
 
 
 def _cache(request: Request) -> dict:
@@ -408,7 +404,7 @@ async def _dataset(request: Request, env: str, days: int, want: str, period: dic
 
 @router.get("/analytics/summary")
 async def analytics_summary(request: Request, user: dict = Depends(current_user)) -> dict:
-    _rate_limit(request, user, "analytics_summary")
+    await _rate_limit(request, user, "analytics_summary")
     q = request.query_params
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
@@ -477,7 +473,7 @@ async def _hits(request: Request, days: int, env: str, flt: dict) -> list[dict]:
 
 @router.get("/analytics/trades")
 async def analytics_trades(request: Request, user: dict = Depends(current_user)) -> dict:
-    _rate_limit(request, user, "analytics_trades")
+    await _rate_limit(request, user, "analytics_trades")
     q = request.query_params
     limit = _int("limit", q.get("limit"), 50, 1, 200)
     offset = _int("offset", q.get("offset"), 0, 0, 1_000_000)
@@ -490,7 +486,7 @@ async def analytics_trades(request: Request, user: dict = Depends(current_user))
 @router.get("/analytics/my-trades")
 async def analytics_my_trades(request: Request, user: dict = Depends(current_user)) -> dict:
     """Y5: the owner's own (manual) trades beside the bot. Same cache, gate and rate-limit bucket as /summary."""
-    _rate_limit(request, user, "analytics_summary")
+    await _rate_limit(request, user, "analytics_summary")
     q = request.query_params
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
@@ -541,7 +537,7 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
     """The Honest Ledger (services/ledger.py): fills netted to settlements per strategy and per local day, plus the
     reconciliation of the account equity change against realized P&L and cash flows. Read only; signed-in session
     (no fresh 2FA); same filters as /analytics/trades (days, env, period) plus `tz` (validated; UTC fallback)."""
-    _rate_limit(request, user, "analytics_ledger")
+    await _rate_limit(request, user, "analytics_ledger")
     q = request.query_params
     days = _int("days", q.get("days"), 30, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
@@ -584,7 +580,7 @@ async def analytics_returns(request: Request, user: dict = Depends(current_user)
     """Returns per calendar day / week / month (services/returns.py): realized P&L of bot fills by settlement date in
     the viewer's zone, over a modified-Dietz base from account snapshots and cash flows. Whole periods only. Read
     only; signed in (no 2FA); validated params (422); own cache per (env, days, tz, granularity), 60 s, 24 keys."""
-    _rate_limit(request, user, "analytics_returns")
+    await _rate_limit(request, user, "analytics_returns")
     q = request.query_params
     gran = q.get("granularity", "day")
     if gran not in retsvc.GRANULARITIES:
@@ -626,7 +622,7 @@ async def analytics_returns(request: Request, user: dict = Depends(current_user)
 async def analytics_returns_fills(request: Request, user: dict = Depends(current_user)) -> dict:
     """Drill-down for one period: bot fills settled in the local dates [start, end], newest settlement first, from the
     cached rows. `start` / `end` are the period's `start_local` / `end_local`. Read only; same bucket as /returns."""
-    _rate_limit(request, user, "analytics_returns")
+    await _rate_limit(request, user, "analytics_returns")
     q = request.query_params
     start, end = _parse_date("start", q.get("start")), _parse_date("end", q.get("end"))
     if end < start or (end - start).days >= retsvc.FILLS_MAX_SPAN_DAYS:
@@ -654,7 +650,7 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
     integrity, open positions past expected settlement, alerts by type, arbitrage per set, reconciliation and the
     return labelled with its sample size. `period=<id|current|all>` or `days`. A metric the stored data cannot give
     is null and explained in `notes`. Read only; signed-in session."""
-    _rate_limit(request, user, "analytics_ledger")
+    await _rate_limit(request, user, "analytics_ledger")
     q = request.query_params
     days = _int("days", q.get("days"), 7, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
@@ -733,7 +729,7 @@ async def put_trade_note(fill_id: str, request: Request, user: dict = Depends(cu
     """Y5 journal note on one fill. A display-only annotation (no trading effect), so a signed-in session is enough
     (no fresh 2FA); rate limited per user and audited. Plain text, <= 200 chars; "" clears it."""
     from ..auth.audit import audit
-    _rate_limit(request, user, "trade_note")
+    await _rate_limit(request, user, "trade_note")
     try:
         body = await request.json()
     except ValueError:
@@ -762,7 +758,7 @@ async def put_trade_note(fill_id: str, request: Request, user: dict = Depends(cu
 async def analytics_trades_csv(request: Request, user: dict = Depends(current_user)) -> Response:
     """All matching trade rows (newest first) up to CSV_MAX_ROWS as CSV; X-Truncated: true when there were more.
     Same auth, rate-limit bucket and filters as /analytics/trades (limit/offset ignored). CSV-injection safe."""
-    _rate_limit(request, user, "analytics_trades")
+    await _rate_limit(request, user, "analytics_trades")
     days, env, flt = _filters(request)
     hits = await _hits(request, days, env, flt)
     body = an.trades_csv([an.public_trade(r) for r in hits[:an.CSV_MAX_ROWS]])

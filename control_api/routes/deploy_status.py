@@ -41,7 +41,7 @@ def _unauthorized() -> HTTPException:
 async def deploy_status(request: Request,
                         x_deploy_status_key: str | None = Header(default=None)) -> dict:
     get_limiter(request).limits.setdefault(BUCKET, LIMIT)
-    enforce(request, BUCKET)
+    await enforce(request, BUCKET)
     if not _key_ok(x_deploy_status_key, getattr(request.app.state.settings, "deploy_status_key", None)):
         log.warning("deploy status: bad or missing key")
         raise _unauthorized()

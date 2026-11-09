@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.deps import current_user
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from .periods import window_for
 from ..services import periods as per
 from ..services import pnl as pnlsvc
@@ -33,12 +33,8 @@ _POOL: ThreadPoolExecutor | None = None
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.\-]{0,79}$")
 
 
-def _rate_limit(request: Request, user: dict, bucket: str) -> None:
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(429, "rate_limited", headers={"Retry-After": str(retry)})
+async def _rate_limit(request: Request, user: dict, bucket: str) -> None:
+    await check_user(request, user, bucket, RATE_LIMITS[bucket])
 
 
 def _pool() -> ThreadPoolExecutor:
@@ -99,7 +95,7 @@ async def since_view(request: Request, ts: datetime = Query(...), period: str | 
     FILLED inside the period count (fill-date attribution, as in the period summary; a position filled earlier
     that settles now stays with its own period), and the response gains `window` {label, from, to, period_id}
     and `clipped`. Omitted = unchanged."""
-    _rate_limit(request, user, "since")
+    await _rate_limit(request, user, "since")
     pw = await window_for(request, period) if period is not None else None     # 422 on an unknown id
     now = datetime.now(timezone.utc)
     if ts.tzinfo is None:
@@ -243,7 +239,7 @@ async def account_positions(request: Request, user: dict = Depends(current_user)
     """Y3: every open position and resting order on the Kalshi account (current mode), tagged bot/you. Read-only:
     GET /portfolio/positions, GET /portfolio/orders?status=resting and GET /markets/{t} (titles, prices). Cached
     30 s; 409 kalshi_not_configured without keys; 503 kalshi_unavailable on errors."""
-    _rate_limit(request, user, "account_positions")
+    await _rate_limit(request, user, "account_positions")
     r = request.app.state.runner
     mode = r.mode
     cache = getattr(request.app.state, "account_cache", None) or {}

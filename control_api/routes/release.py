@@ -58,10 +58,10 @@ def _enabled(request: Request) -> str:
     return tok
 
 
-def _require_token(request: Request, given: str | None) -> None:
+async def _require_token(request: Request, given: str | None) -> None:
     expected = _enabled(request)
     get_limiter(request).limits.setdefault(BUCKET, LIMIT)
-    enforce(request, BUCKET)
+    await enforce(request, BUCKET)
     if not given or len(given) > MAX_TOKEN_LEN or not hmac.compare_digest(
             given.encode("utf-8", "replace"), expected.encode("utf-8")):
         log.warning("release endpoint: bad or missing release token")
@@ -94,7 +94,7 @@ def _public(doc: dict) -> dict:
 
 @router.post("/pending")
 async def register(request: Request, x_release_token: str | None = Header(default=None)) -> dict:
-    _require_token(request, x_release_token)          # before the body is parsed: no 422 leaks the route
+    await _require_token(request, x_release_token)          # before the body is parsed: no 422 leaks the route
     raw = await request.body()
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="body_too_large")
@@ -113,7 +113,7 @@ async def register(request: Request, x_release_token: str | None = Header(defaul
 @router.get("/pending/{release_id}")
 async def poll(request: Request, release_id: str = Path(pattern=ID_PATTERN),
                x_release_token: str | None = Header(default=None)) -> dict:
-    _require_token(request, x_release_token)
+    await _require_token(request, x_release_token)
     doc = await store_call(request.app.state.store.get_pending_release(release_id))
     if doc is None:
         raise HTTPException(status_code=404, detail="release_not_found")

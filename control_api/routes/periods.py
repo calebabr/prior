@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from ..services import markers as M
 from ..services import periods as P
 from ..services import pnl as pnlsvc
@@ -47,12 +47,8 @@ async def _json(request: Request):
         return None
 
 
-def _rate_limit(request: Request, user: dict, bucket: str) -> None:
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, RATE_LIMITS[bucket])
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(429, "rate_limited", headers={"Retry-After": str(retry)})
+async def _rate_limit(request: Request, user: dict, bucket: str) -> None:
+    await check_user(request, user, bucket, RATE_LIMITS[bucket])
 
 
 async def payload(request: Request) -> dict:
@@ -215,7 +211,7 @@ async def period_summary(period_id: str, request: Request, env: str | None = Que
     period's P&L. `cash_flows.equity_change_ex_flows` is an account-equity move that ALSO includes settlements of
     positions filled in earlier periods (flagged by `equity_change_includes_earlier_settlements` and explained in
     `equity_change_label`), so do not read it as the period's P&L."""
-    _rate_limit(request, user, "period_summary")
+    await _rate_limit(request, user, "period_summary")
     if source not in P.SOURCES:
         raise HTTPException(422, [{"loc": ["query", "source"], "msg": f"must be one of {list(P.SOURCES)}"}])
     if period_id != "current" and not P.valid_id(period_id):

@@ -12,8 +12,8 @@ from pymongo import ASCENDING, DESCENDING, AsyncMongoClient, ReturnDocument, Upd
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from . import schemas as S
-from .store import (Store, _check_decision, _lease_out, _lease_ttl, _new_release, _state_out,
-                    _validate_state)
+from .store import (Store, _check_decision, _lease_out, _lease_ttl, _new_release, _ratelimit_args, _state_out,
+                    _validate_state, ratelimit_expires_at)
 
 NO_ID = {"_id": 0}
 
@@ -127,6 +127,8 @@ class MongoStore(Store):
         await self._c(S.RELEASES).create_index([("id", ASCENDING)], unique=True, name="id_unique")
         await self._c(S.RELEASES).create_index([("created_at", ASCENDING)],
                                                expireAfterSeconds=S.RELEASE_RETENTION_SECONDS, name="created_ttl")
+        # shared rate-limit counters: _id is the key; each doc expires at its own expires_at (one to two windows)
+        await self._c(S.RATE_LIMITS).create_index([("expires_at", ASCENDING)], expireAfterSeconds=0, name="expires_ttl")
 
     async def close(self) -> None:
         await self._client.close()
@@ -738,6 +740,16 @@ class MongoStore(Store):
         # TTL deletion runs about once a minute, so also check exp explicitly.
         doc = await self._c(S.REVOKED_TOKENS).find_one({"jti": str(jti), "exp": {"$gt": S.utcnow()}}, {"_id": 1})
         return doc is not None
+
+    # ---- shared rate-limit counters
+    async def ratelimit_hit(self, key: str, window_index: int, window_s: float) -> tuple[int, int]:
+        key, idx, w = _ratelimit_args(key, window_index, window_s)
+        coll = self._c(S.RATE_LIMITS)
+        doc = await coll.find_one_and_update(
+            {"_id": f"{key}:{idx}"}, {"$inc": {"n": 1}, "$setOnInsert": {"expires_at": ratelimit_expires_at(idx, w)}},
+            projection={"n": 1}, upsert=True, return_document=ReturnDocument.AFTER)
+        prev = await coll.find_one({"_id": f"{key}:{idx - 1}"}, {"n": 1})
+        return int((doc or {}).get("n") or 1), int((prev or {}).get("n") or 0)
 
     # ---- cloud settings
     async def get_cloud_settings(self) -> dict | None:

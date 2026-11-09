@@ -43,6 +43,10 @@ RUNNER_LEASE = "runner_lease"
 HANDOVER_NONCES = "handover_nonces"
 META = "meta"
 RELEASES = "releases"
+# Store-backed rate limits (Sprint 3 item 2): one tiny doc per (hashed bucket+key, fixed window); TTL on expires_at.
+RATE_LIMITS = "rate_limits"
+RATE_LIMIT_KEY_MAX = 64
+RATE_LIMIT_MEMORY_MAX = 20_000            # MemoryStore guard (Atlas expires the docs itself)
 LEASE_ID = "leader"                       # the single runner_lease doc
 META_SCHEMA_ID = "schema"                 # the single meta doc holding the data schema version
 SCHEMA_VERSION = 1                        # everything that existed before the release process; changes are additive only
@@ -53,7 +57,7 @@ RELEASE_DECISIONS = ("approved", "rejected")
 COLLECTIONS = (STATE, CLOUD_SETTINGS, CONFIG_VERSIONS, HEARTBEATS, JOURNAL_ROWS, ACCOUNT_SNAPSHOTS,
                FILLS, MONITOR_SUMMARIES, AUDIT_LOG, USERS, REVOKED_TOKENS, SETTLEMENTS, ARB_OPPORTUNITIES,
                QUOTE_EPISODES, ALERT_HISTORY, PUSH_SUBSCRIPTIONS, RUNNER_LEASE, HANDOVER_NONCES, META, RELEASES,
-               SHADOW_EPISODES, SHADOW_PASSES, PERIODS, CASH_FLOWS, RECON_REPORTS)
+               SHADOW_EPISODES, SHADOW_PASSES, PERIODS, CASH_FLOWS, RECON_REPORTS, RATE_LIMITS)
 
 # Daily reconciliation against Kalshi (services/kalshi_recon.py): one report per (mode, local day), replaced when the
 # same day is checked again. Read-only data about the books; no secrets. Additive change: SCHEMA_VERSION stays 1.

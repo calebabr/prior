@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
-from ..auth.ratelimit import get_limiter
+from ..auth.ratelimit import check_user
 from ..runner import RunnerDisabled
 from ..services import arming as armsvc
 from ..services import preflight as pf
@@ -40,12 +40,8 @@ class ArmingIn(BaseModel):
     armed: bool = Field(strict=True)
 
 
-def _rate_limit(request: Request, user: dict, bucket: str = BUCKET, limit: tuple = LIMIT) -> None:
-    lim = get_limiter(request)
-    lim.limits.setdefault(bucket, limit)
-    ok, retry = lim.hit(bucket, "user:" + str(user.get("username") or "?"))
-    if not ok:
-        raise HTTPException(429, "rate_limited", headers={"Retry-After": str(retry)})
+async def _rate_limit(request: Request, user: dict, bucket: str = BUCKET, limit: tuple = LIMIT) -> None:
+    await check_user(request, user, bucket, limit)
 
 
 async def live_recheck(request: Request, *, user: dict, action: str, details: dict | None = None) -> None:
@@ -84,13 +80,13 @@ async def put_arming(request: Request, user: dict = Depends(current_user)) -> di
     by = str(user.get("username") or "user")
     details = {"strategy": body.strategy, "armed": body.armed}
     if not body.armed:
-        _rate_limit(request, user, DISARM_BUCKET, DISARM_LIMIT)
+        await _rate_limit(request, user, DISARM_BUCKET, DISARM_LIMIT)
         res = await r.set_armed(body.strategy, False, by=by)
         await audit(request, "arming.set", ok=True, user=user,
                     details={**details, "persisted": res["persisted"], "cancelled": res["cancelled"]})
         return {**armsvc.view(r), "result": res}
     user = await require_fresh_2fa(request)            # arming: the same step-up guard Start uses
-    _rate_limit(request, user)
+    await _rate_limit(request, user)
     if not r.live_allowed():
         why = r.live_block_reason() or "live_not_allowed"
         await audit(request, "arming.set", ok=False, user=user, details={**details, "error": why})

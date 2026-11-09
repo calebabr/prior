@@ -22,7 +22,7 @@ The Kalshi key lives only in Render's environment. The phone never talks to Kals
 
 **Status.** The app polls `/api/status` every 30 s. The API combines in-memory runner state with Atlas (heartbeat, account snapshot, P&L); Atlas calls are time-limited. If Atlas is unreachable, every authenticated endpoint except Stop returns 503 `store_unavailable` (the app shows a database-down banner).
 
-**Stop (maker and arbitrage).** `POST /api/bot/stop` needs only a valid token (no 2FA). Auth uses `current_user_stop`, which fails open if Atlas is down. The runner's sequence:
+**Stop (maker and arbitrage).** `POST /api/bot/stop` needs only a valid token (no 2FA). Auth uses `current_user_stop`, which fails open if Atlas is down or slow: its two store reads (revocation, session epoch) are cut at 0.5 s, so a degraded Atlas delays the flags by at most that. Stop is never rate limited. The runner's sequence:
 1. Bump the stop counter (`_stop_gen`) and hold `_stopping`; this is the first statement, so Stop wins any race with Start or an arb execution.
 2. Set in-memory flags: maker `desired=stopped`, `arb_desired=stopped`, `arb_mode=demo`.
 3. Write both kill switches (`MAKER_KILL_SWITCH`, `ARB_KILL_SWITCH`; an existing legging record is kept).
@@ -85,7 +85,9 @@ All four change only with fresh 2FA.
 - *Bounded reads with projections.* Each of fills, settlements, quote episodes, journal (`quote` rows only) and arbitrage opportunities is read at most 20,000 documents, newest first. `list_settlements` and `list_journal` accept an optional `fields=` projection (MemoryStore and MongoStore alike); the default is unchanged. No new collections or indexes.
 - *Expectations loader.* `load_expectations()` reads the optional private per-cell benchmark from `CELL_EXPECTATIONS_PATH` if set, else `control_api/data/cell_expectations.json`. A missing or invalid file gives `expectations.loaded:false` and no benchmark (null ROI). Contents are never logged. The file is private: supplied as a Render secret file or by the overlay, never committed (S-32).
 - *Statistics.* Wilson per-fill intervals plus ticker-clustered (cluster-robust, deterministic) intervals for win rate, edge and ROI; verdict rule needs 20+ markets.
-- *Rate limits.* Per user, own buckets on the auth limiter: 30/min summary, 60/min trades and CSV. In memory, per process.
+- *Rate limits.* Per user, own buckets on the auth limiter: 30/min summary, 60/min trades and CSV.
+
+**Rate limits (all buckets).** Two layers must both allow a request: an in-memory sliding window per process, and a store-backed counter in the `rate_limits` collection (hashed keys, fixed windows with a sliding estimate, TTL on `expires_at`), so a bucket survives a restart and is shared by every instance. Over the limit is always 429 `rate_limited` with `Retry-After`. If the counter store errors or takes over 0.5 s, the limiter falls back to the in-memory layer alone for 30 s (fail open, never weaker than before). Login, 2FA and step-up keep their closed behaviour: the account lockout is unchanged and those routes still return 503 without the store. Stop never touches the limiter.
 
 **Close-time recording (`services/closetime.py`, runner).** The market's close time makes "time left" exact in Analytics. It is stored as an aware UTC `close_time` on quote episodes (set once at insert, immutable), fills (`set_fill_fields`) and settlements (`set_settlement_fields`). Sources, cheapest first: values already in hand (the doc, the store, the arbitrage scan's market rows via `RecordingPublic`), then one cached public `GET /markets/{ticker}` per `(env, ticker)`.
 - *Cache:* thread-safe LRU of 2,048 entries; a known value lives 6 h, a failure 15 min (no retry every pass).

@@ -61,6 +61,8 @@ def validate_config(cfg: dict) -> None:
         errs.append("max_open_frac: fraction of balance, must be 0.05-0.9")
     if not (2 <= int(cfg["poll_minutes"]) <= 60):
         errs.append("poll_minutes: minutes, must be 2-60")
+    if "record_decisions" in cfg and not isinstance(cfg["record_decisions"], bool):
+        errs.append("record_decisions: must be true or false")   # optional on/off setting, default off
     if [tuple(c) for c in cfg["cells"]] != [tuple(c) for c in DEFAULTS["cells"]]:
         errs.append("cells: changed from the validated strategy; restore the original values")
     if errs:

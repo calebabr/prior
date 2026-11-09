@@ -50,9 +50,21 @@ def _num(v: Any) -> float | None:
         return None
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
+
+
+def _fills(m: Mapping) -> dict[str, float]:
+    """{ticker: contracts} from a scanner's parse_result, finite and in range only. A non-finite or absurd count
+    (e.g. "inf") is dropped (unknown), never kept as a full fill."""
+    from .pnl import MAX_FILL_COUNT
+    out: dict[str, float] = {}
+    for k, v in m.items():
+        x = _num(v)
+        if isinstance(k, str) and x is not None and 0 <= x <= MAX_FILL_COUNT:
+            out[k] = x
+    return out
 
 
 def local_parse(s: Any) -> dict:
@@ -94,7 +106,7 @@ def parse(s: Any, scanner: Any = None) -> dict:
     if not isinstance(got, Mapping) or got.get("kind") not in KINDS:
         return local
     kind = got.get("kind")
-    out = {"kind": kind, "fills": got.get("fills") if isinstance(got.get("fills"), Mapping) else local["fills"],
+    out = {"kind": kind, "fills": _fills(got.get("fills")) if isinstance(got.get("fills"), Mapping) else local["fills"],
            "loss": _num(got.get("loss")), "how": local["how"]}
     if kind == "contained" and local["kind"] != "contained":
         out["kind"] = "partial"

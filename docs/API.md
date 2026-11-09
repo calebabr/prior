@@ -38,6 +38,17 @@ The write routes return the same body as `GET /api/periods` plus `created` or `d
 - `GET /api/status` `pnl_today_state`: `settled`, `none_yet` (nothing settled yet, not $0.00) or `unavailable` (store read failed).
 - `GET /api/config` `shadow_capital`: `{value, default:150, min:50, max:1000, help, editable, write_via:"PUT /api/cloud", needs_fresh_2fa:true}`. Written with `PUT /api/cloud {shadow_capital}` (fresh 2FA, audited with from/to, whole body validated before any write). Dollar P&L and the ceiling scale with it; rates and ROI do not.
 
+## Maker settings: `record_decisions` (Sprint 3)
+- `GET /api/config`: `config.record_decisions` is always present (boolean, `false` when the stored config never set it). `schema.record_decisions` = `{type:"boolean", unit:"on/off", default:false, help, editable:true}`.
+- `PUT /api/config {"record_decisions": true|false}`: the same path as every maker setting (fresh 2FA, merge, `validate_config` plus the API checks, a config version in the store, atomic file write, audit `config.update`). Only a JSON boolean is accepted: `"true"`, `1`, a list or an object is 400 with `detail` a list of messages and nothing is written; `null` is a no-op. `changes` lists it like any other key (from `false` when it was unset); `POST /api/config/undo` restores it.
+- Observation only: when on, each trading pass also writes decision rows to the journal. It never changes what is quoted or ordered. An unset key is never added to the stored config, so it does not change the handover config hash.
+
+## Arbitrage safety state across restarts (Sprint 3)
+Kept in the cloud-settings document, not exposed or writable through `GET/PUT /api/cloud` (unknown keys stay 400):
+- `arb_contain`: the contained partials of the last 48 h per execution kind. A series pause is still computed from each record's time (until the next 00:00 America/New_York), so a restart or a new leader keeps it without extending or shortening it. If the store cannot be read when the history is rebuilt, every set is refused.
+- `arb_kill`: the arbitrage legging kill switch. The local kill file is written back from it at startup and at each new leadership, so `PUT /api/arb {enabled:true}` still needs `ack_legging` after a restart; the acknowledged restart clears it.
+- `shutdown_overrun`: written when a graceful shutdown ends with a step still running. The shutdown alert is `urgent` ("check positions" when an arbitrage set was being sent). When a set was in flight, the next leader turns the marker into the legging kill switch and sends an urgent alert.
+
 ## Other
 - `POST /api/bot/start`: 409 `invalid_config: <reasons>` if the reloaded config fails validation (the bot stays stopped). To stop: `POST /api/bot/stop` or the app's Stop button (no 2FA).
 - `GET /api/status`: new `write_report` `{cancel, place, paused, series_capped, utc, mode}` or null; `lease_expires_at` follows each renew.

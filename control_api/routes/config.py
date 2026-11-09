@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
@@ -23,6 +24,9 @@ class ConfigIn(BaseModel):
     max_open_frac: float | None = None
     poll_minutes: int | None = None
     series: list[str] | None = None
+    # optional boolean, observation only. Typed loosely here so a wrong type is the same 400 list of messages as
+    # every other field (merge_and_validate checks it strictly), not pydantic's 422.
+    record_decisions: Any = None
 
 
 async def save_config(request: Request, update: dict, user: dict, action: str) -> dict:
@@ -44,13 +48,13 @@ async def save_config(request: Request, update: dict, user: dict, action: str) -
     await r.apply_config(after)
     changes = config_changes(before, after)
     await audit(request, action, user=user, details={"update": update, "version": version})
-    return {"config": after, "version": version, "changes": changes}
+    return {"config": botfiles.config_view(after), "version": version, "changes": changes}
 
 
 def config_changes(before: dict | None, after: dict | None) -> list[dict]:
     """[{key, from, to}] over the editable settings (item 39 toast / item 40 preview). `cells` and the arb block are
     never listed (cells are never writable; arb has its own routes)."""
-    b, a = botfiles.public_config(before), botfiles.public_config(after)
+    b, a = botfiles.config_view(before), botfiles.config_view(after)
     return [{"key": k, "from": b.get(k), "to": a.get(k)} for k in botfiles.EDITABLE if b.get(k) != a.get(k)]
 
 
@@ -125,7 +129,7 @@ async def get_config(request: Request, user: dict = Depends(current_user)) -> di
     r = request.app.state.runner
     s = request.app.state.settings
     cfg = r.config or botfiles.read_config_file(r.config_path) or botfiles.public_config(botfiles.strategy().DEFAULTS)
-    return {"config": botfiles.public_config(cfg), "schema": botfiles.schema(s), "ceilings": botfiles.ceilings(s),
+    return {"config": botfiles.config_view(cfg), "schema": botfiles.schema(s), "ceilings": botfiles.ceilings(s),
             "shadow_capital": shadow_capital_field(r)}
 
 

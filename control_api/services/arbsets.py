@@ -13,6 +13,7 @@ a NO set buys NO at 1 - limit, a YES set buys YES at limit.
 from __future__ import annotations
 
 import ast
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -89,8 +90,15 @@ def parse_filled(executed: Any) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
     for k, v in d.items():
-        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) and v == v:
-            out[k] = float(v)
+        # finite, non-negative and not absurd only: "inf" must never read as a full fill (fail closed: skipped)
+        if not isinstance(k, str) or isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        try:
+            x = float(v)
+        except OverflowError:
+            continue
+        if math.isfinite(x) and 0 <= x <= pnlsvc.MAX_FILL_COUNT:
+            out[k] = x
     return out
 
 

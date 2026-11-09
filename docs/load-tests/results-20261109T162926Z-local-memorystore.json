@@ -1,0 +1,818 @@
+{
+  "label": "local MemoryStore",
+  "target": "local",
+  "started_utc": "2026-11-09T16:29:26+00:00",
+  "duration_s": 215.8,
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10-10.0.26300-SP0",
+    "machine_ram_gb": 15.7,
+    "git": "8985e4c"
+  },
+  "params": {
+    "rows": 20000,
+    "pass_seconds": 5.0,
+    "soak_seconds": 120,
+    "rounds": 3,
+    "stop_calls": 200
+  },
+  "scenarios": [
+    {
+      "name": "polling",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "polling: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 29"
+        },
+        {
+          "name": "every poll answered 200",
+          "ok": true,
+          "detail": "{'200': 29}"
+        }
+      ],
+      "metrics": {
+        "phones": 3,
+        "seconds": 20,
+        "poll_every_s": 2.0,
+        "poll_status": {
+          "n": 16,
+          "status": {
+            "200": 16
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 796.5,
+          "p95_ms": 3529.1,
+          "p99_ms": 3529.1,
+          "max_ms": 3529.1
+        },
+        "poll_activity": {
+          "n": 9,
+          "status": {
+            "200": 9
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 939.7,
+          "p95_ms": 1362.8,
+          "p99_ms": 1362.8,
+          "max_ms": 1362.8
+        },
+        "poll_healthz": {
+          "n": 4,
+          "status": {
+            "200": 4
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 5.5,
+          "p95_ms": 11.6,
+          "p99_ms": 11.6,
+          "max_ms": 11.6
+        },
+        "all": {
+          "n": 29,
+          "status": {
+            "200": 29
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 738.4,
+          "p95_ms": 3520.0,
+          "p99_ms": 3529.1,
+          "max_ms": 3529.1
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "analytics_180",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "analytics: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 52"
+        },
+        {
+          "name": "every answer is 200 or 429",
+          "ok": true,
+          "detail": "{'200': 44, '429': 8}"
+        },
+        {
+          "name": "every 429 is rate_limited or analytics_busy",
+          "ok": true,
+          "detail": "{'rate_limited': 4, 'analytics_busy': 4}"
+        },
+        {
+          "name": "cold 180-day summary and ledger returned 200",
+          "ok": true,
+          "detail": "{'summary': {'status': 200, 'secs': 3.39}, 'ledger': {'status': 200, 'secs': 0.69}, 'returns_day': {'status': 200, 'secs': 0.16}, 'returns_week': {'status': 200, 'secs': 0.14}, 'returns_month': {'status': 200, 'secs': 0.13}, 'returns_fills': {'status': 200, 'secs': 0.99}, 'scorecard': {'status': 200, 'secs': 0.56}}"
+        },
+        {
+          "name": "memory stays under the 512 MB budget",
+          "ok": true,
+          "detail": "peak 189.8 MB (n/a on a remote target)"
+        }
+      ],
+      "metrics": {
+        "cold": {
+          "summary": {
+            "status": 200,
+            "secs": 3.39
+          },
+          "ledger": {
+            "status": 200,
+            "secs": 0.69
+          },
+          "returns_day": {
+            "status": 200,
+            "secs": 0.16
+          },
+          "returns_week": {
+            "status": 200,
+            "secs": 0.14
+          },
+          "returns_month": {
+            "status": 200,
+            "secs": 0.13
+          },
+          "returns_fills": {
+            "status": 200,
+            "secs": 0.99
+          },
+          "scorecard": {
+            "status": 200,
+            "secs": 0.56
+          }
+        },
+        "response_bytes": {
+          "summary": 14646,
+          "ledger": 61796,
+          "returns_day": 96017,
+          "returns_week": 14456,
+          "returns_month": 3714,
+          "returns_fills": 136,
+          "scorecard": 1355
+        },
+        "parallel": {
+          "n": 24,
+          "status": {
+            "200": 16,
+            "429": 8
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 8,
+          "detail": {
+            "rate_limited": 4,
+            "analytics_busy": 4
+          },
+          "p50_ms": 4201.7,
+          "p95_ms": 11608.8,
+          "p99_ms": 12180.3,
+          "max_ms": 12180.3
+        },
+        "all": {
+          "n": 52,
+          "status": {
+            "200": 44,
+            "429": 8
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 8,
+          "detail": {
+            "rate_limited": 4,
+            "analytics_busy": 4
+          },
+          "p50_ms": 740.8,
+          "p95_ms": 11607.9,
+          "p99_ms": 12180.3,
+          "max_ms": 12180.3
+        },
+        "peak_rss_mb": 189.8
+      },
+      "notes": []
+    },
+    {
+      "name": "push_race",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "push sign-ups: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 30"
+        },
+        {
+          "name": "exactly 10 of 30 concurrent sign-ups accepted",
+          "ok": true,
+          "detail": "200=10 409=20 {'200': 10, '409': 20}"
+        },
+        {
+          "name": "the rest answered 409 too_many_subscriptions",
+          "ok": true,
+          "detail": "{'too_many_subscriptions': 20}"
+        },
+        {
+          "name": "stored count is exactly 10",
+          "ok": true,
+          "detail": "10"
+        },
+        {
+          "name": "re-subscribing an existing device at the cap stays 200 and the count stays",
+          "ok": true,
+          "detail": "{'200': 10} count=10"
+        }
+      ],
+      "metrics": {
+        "attempts": 30,
+        "signups": {
+          "n": 30,
+          "status": {
+            "200": 10,
+            "409": 20
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {
+            "too_many_subscriptions": 20
+          },
+          "p50_ms": 70.9,
+          "p95_ms": 81.8,
+          "p99_ms": 84.1,
+          "max_ms": 84.1
+        },
+        "duplicate_device": {
+          "n": 10,
+          "status": {
+            "200": 10
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 26.0,
+          "p95_ms": 37.5,
+          "p99_ms": 37.5,
+          "max_ms": 37.5
+        }
+      },
+      "notes": [
+        "the server runs with the push_subscribe limiter raised so this tests the store cap; the limiter itself (10/min) is covered by the control_api tests"
+      ]
+    },
+    {
+      "name": "auth_burst",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "login with the right password gives an mfa token",
+          "ok": true,
+          "detail": "status 200"
+        },
+        {
+          "name": "bad 2FA codes: no 5xx",
+          "ok": true,
+          "detail": "[401, 401, 401, 401, 429, 429, 429, 429, 429, 429, 429, 429]"
+        },
+        {
+          "name": "lockout: 429 from the 5th wrong code",
+          "ok": true,
+          "detail": "first 429 at attempt 5: [401, 401, 401, 401, 429, 429, 429, 429, 429, 429, 429, 429]"
+        },
+        {
+          "name": "429 carries Retry-After",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "a correct code is refused while locked (429)",
+          "ok": true,
+          "detail": "status 429"
+        },
+        {
+          "name": "login burst: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 25"
+        },
+        {
+          "name": "per-IP limit: 429 after the allowance",
+          "ok": true,
+          "detail": "401=9 429=16 of 25"
+        },
+        {
+          "name": "allowance not exceeded (<= 10 wrong passwords answered 401)",
+          "ok": true,
+          "detail": "401=9"
+        },
+        {
+          "name": "Stop and status still work while auth is rate limited",
+          "ok": true,
+          "detail": "stop=200 status=200"
+        }
+      ],
+      "metrics": {
+        "bad_2fa_sequence": [
+          401,
+          401,
+          401,
+          401,
+          429,
+          429,
+          429,
+          429,
+          429,
+          429,
+          429,
+          429
+        ],
+        "login_burst": {
+          "n": 25,
+          "status": {
+            "401": 9,
+            "429": 16
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 16,
+          "detail": {
+            "rate_limited": 16,
+            "invalid_credentials": 9
+          },
+          "p50_ms": 76.9,
+          "p95_ms": 537.7,
+          "p99_ms": 606.1,
+          "max_ms": 606.1
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "stop_storm",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "stop: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 200"
+        },
+        {
+          "name": "every Stop answered 200",
+          "ok": true,
+          "detail": "{'200': 200}"
+        },
+        {
+          "name": "Stop p99 under 1 s",
+          "ok": true,
+          "detail": "p99 636.2 ms"
+        },
+        {
+          "name": "status reports stopped",
+          "ok": true,
+          "detail": "stopped"
+        },
+        {
+          "name": "kill-switch file exists",
+          "ok": true,
+          "detail": ""
+        }
+      ],
+      "metrics": {
+        "concurrency": 50,
+        "stop": {
+          "n": 200,
+          "status": {
+            "200": 200
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 256.4,
+          "p95_ms": 418.5,
+          "p99_ms": 636.2,
+          "max_ms": 720.8
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "contention",
+      "status": "fail",
+      "checks": [
+        {
+          "name": "round 1: Start (fresh 2FA) accepted",
+          "ok": true,
+          "detail": "status 200"
+        },
+        {
+          "name": "round 1: the pass was in flight when Stop landed",
+          "ok": true,
+          "detail": "pass=True"
+        },
+        {
+          "name": "round 1: Analytics was still building when Stop landed (needs the 20,000-row size)",
+          "ok": true,
+          "detail": "analytics_in_flight=1"
+        },
+        {
+          "name": "round 1: flags set (desired=stopped, kill_switch) when Stop returned",
+          "ok": true,
+          "detail": "stopped True"
+        },
+        {
+          "name": "round 1: only mm- orders cancelled, the manual order untouched",
+          "ok": true,
+          "detail": "cancelled=['o0', 'o1', 'o2']"
+        },
+        {
+          "name": "round 1: no new pass after Stop",
+          "ok": true,
+          "detail": "{'ran': False, 'reason': 'stopped'}"
+        },
+        {
+          "name": "round 1: Analytics answered 200 or 429 only",
+          "ok": true,
+          "detail": "{'200': 2, '429': 1}"
+        },
+        {
+          "name": "round 2: Start (fresh 2FA) accepted",
+          "ok": true,
+          "detail": "status 200"
+        },
+        {
+          "name": "round 2: the pass was in flight when Stop landed",
+          "ok": true,
+          "detail": "pass=True"
+        },
+        {
+          "name": "round 2: Analytics was still building when Stop landed (needs the 20,000-row size)",
+          "ok": true,
+          "detail": "analytics_in_flight=3"
+        },
+        {
+          "name": "round 2: flags set (desired=stopped, kill_switch) when Stop returned",
+          "ok": true,
+          "detail": "stopped True"
+        },
+        {
+          "name": "round 2: only mm- orders cancelled, the manual order untouched",
+          "ok": true,
+          "detail": "cancelled=['o0', 'o1', 'o2']"
+        },
+        {
+          "name": "round 2: no new pass after Stop",
+          "ok": true,
+          "detail": "{'ran': False, 'reason': 'stopped'}"
+        },
+        {
+          "name": "round 2: Analytics answered 200 or 429 only",
+          "ok": true,
+          "detail": "{'200': 2, '429': 1}"
+        },
+        {
+          "name": "round 3: Start (fresh 2FA) accepted",
+          "ok": true,
+          "detail": "status 200"
+        },
+        {
+          "name": "round 3: the pass was in flight when Stop landed",
+          "ok": true,
+          "detail": "pass=True"
+        },
+        {
+          "name": "round 3: Analytics was still building when Stop landed (needs the 20,000-row size)",
+          "ok": true,
+          "detail": "analytics_in_flight=1"
+        },
+        {
+          "name": "round 3: flags set (desired=stopped, kill_switch) when Stop returned",
+          "ok": true,
+          "detail": "stopped True"
+        },
+        {
+          "name": "round 3: only mm- orders cancelled, the manual order untouched",
+          "ok": true,
+          "detail": "cancelled=['o0', 'o1', 'o2']"
+        },
+        {
+          "name": "round 3: no new pass after Stop",
+          "ok": true,
+          "detail": "{'ran': False, 'reason': 'stopped'}"
+        },
+        {
+          "name": "round 3: Analytics answered 200 or 429 only",
+          "ok": true,
+          "detail": "{'200': 2, '429': 1}"
+        },
+        {
+          "name": "contention: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 119"
+        },
+        {
+          "name": "every Stop answered 200",
+          "ok": true,
+          "detail": "{'200': 60}"
+        },
+        {
+          "name": "Stop p99 under 1 s",
+          "ok": false,
+          "detail": "p99 5201.6 ms (max 5201.6)"
+        },
+        {
+          "name": "never two passes at once",
+          "ok": true,
+          "detail": "1"
+        },
+        {
+          "name": "peak memory under 512 MB",
+          "ok": true,
+          "detail": "peak 187.4 MB"
+        }
+      ],
+      "metrics": {
+        "rounds": [
+          {
+            "round": 1,
+            "tz": "America/New_York",
+            "days": 180,
+            "tick": "started (external)",
+            "pass_in_flight_before_stop": true,
+            "analytics_calls_in_flight_at_stop": 1,
+            "rebuild": {
+              "n": 3,
+              "status": {
+                "200": 2,
+                "429": 1
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 1,
+              "detail": {
+                "rate_limited": 1
+              },
+              "p50_ms": 19.5,
+              "p95_ms": 360.0,
+              "p99_ms": 360.0,
+              "max_ms": 360.0
+            },
+            "stop": {
+              "n": 20,
+              "status": {
+                "200": 20
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 0,
+              "detail": {},
+              "p50_ms": 2608.7,
+              "p95_ms": 2626.1,
+              "p99_ms": 2634.2,
+              "max_ms": 2634.2
+            },
+            "cancelled": [
+              "o0",
+              "o1",
+              "o2"
+            ],
+            "resting_left": [
+              "manual-1"
+            ]
+          },
+          {
+            "round": 2,
+            "tz": "America/Chicago",
+            "days": 90,
+            "tick": "started (external)",
+            "pass_in_flight_before_stop": true,
+            "analytics_calls_in_flight_at_stop": 3,
+            "rebuild": {
+              "n": 3,
+              "status": {
+                "200": 2,
+                "429": 1
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 1,
+              "detail": {
+                "rate_limited": 1
+              },
+              "p50_ms": 3194.2,
+              "p95_ms": 3450.5,
+              "p99_ms": 3450.5,
+              "max_ms": 3450.5
+            },
+            "stop": {
+              "n": 20,
+              "status": {
+                "200": 20
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 0,
+              "detail": {},
+              "p50_ms": 3073.4,
+              "p95_ms": 3100.3,
+              "p99_ms": 3318.0,
+              "max_ms": 3318.0
+            },
+            "cancelled": [
+              "o0",
+              "o1",
+              "o2"
+            ],
+            "resting_left": [
+              "manual-1"
+            ]
+          },
+          {
+            "round": 3,
+            "tz": "America/Denver",
+            "days": 180,
+            "tick": "started (external)",
+            "pass_in_flight_before_stop": true,
+            "analytics_calls_in_flight_at_stop": 1,
+            "rebuild": {
+              "n": 3,
+              "status": {
+                "200": 2,
+                "429": 1
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 1,
+              "detail": {
+                "rate_limited": 1
+              },
+              "p50_ms": 25.4,
+              "p95_ms": 5735.7,
+              "p99_ms": 5735.7,
+              "max_ms": 5735.7
+            },
+            "stop": {
+              "n": 20,
+              "status": {
+                "200": 20
+              },
+              "n_5xx": 0,
+              "n_errors": 0,
+              "n_429": 0,
+              "detail": {},
+              "p50_ms": 5190.0,
+              "p95_ms": 5197.3,
+              "p99_ms": 5201.6,
+              "max_ms": 5201.6
+            },
+            "cancelled": [
+              "o0",
+              "o1",
+              "o2"
+            ],
+            "resting_left": [
+              "manual-1"
+            ]
+          }
+        ],
+        "stop": {
+          "n": 60,
+          "status": {
+            "200": 60
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {},
+          "p50_ms": 3073.4,
+          "p95_ms": 5195.3,
+          "p99_ms": 5201.6,
+          "max_ms": 5201.6
+        },
+        "peak_rss_mb": 187.4,
+        "passes_started": 3
+      },
+      "notes": []
+    },
+    {
+      "name": "soak",
+      "status": "pass",
+      "checks": [
+        {
+          "name": "Start accepted",
+          "ok": true,
+          "detail": "status 200"
+        },
+        {
+          "name": "soak: no 5xx and no transport errors",
+          "ok": true,
+          "detail": "5xx=0 errors=0 of 186"
+        },
+        {
+          "name": "Stop at the end answered 200",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "the runner kept running passes",
+          "ok": true,
+          "detail": "passes finished: 25"
+        },
+        {
+          "name": "never two passes at once",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "memory growth within tolerance (25 MB or 10%)",
+          "ok": true,
+          "detail": "{'first_mb': 179.9, 'last_mb': 173.6, 'growth_mb': -6.3, 'growth_pct': -3.5, 'samples': 391} tolerance 25.0 MB"
+        }
+      ],
+      "metrics": {
+        "seconds": 120,
+        "passes_started": 26,
+        "passes_finished": 25,
+        "growth": {
+          "first_mb": 179.9,
+          "last_mb": 173.6,
+          "growth_mb": -6.3,
+          "growth_pct": -3.5,
+          "samples": 391
+        },
+        "tolerance_mb": 25.0,
+        "peak_rss_mb": 184.6,
+        "threads_at_end": 7,
+        "requests": {
+          "n": 186,
+          "status": {
+            "200": 185,
+            "422": 1
+          },
+          "n_5xx": 0,
+          "n_errors": 0,
+          "n_429": 0,
+          "detail": {
+            "validation": 1
+          },
+          "p50_ms": 132.3,
+          "p95_ms": 436.3,
+          "p99_ms": 731.4,
+          "max_ms": 1805.1
+        }
+      },
+      "notes": []
+    }
+  ],
+  "bars": [
+    {
+      "bar": "Stop p99 under 1 s, also under load",
+      "status": "fail",
+      "evidence": "contention: Stop p99 under 1 s (p99 5201.6 ms (max 5201.6))"
+    },
+    {
+      "bar": "No 5xx and no transport errors",
+      "status": "pass",
+      "evidence": "8 check(s) in analytics_180, auth_burst, contention, polling, push_race, soak, stop_storm"
+    },
+    {
+      "bar": "Rate limits answer 429, never an error",
+      "status": "pass",
+      "evidence": "9 check(s) in analytics_180, auth_burst, contention"
+    },
+    {
+      "bar": "Flags set first; only mm- orders cancelled",
+      "status": "pass",
+      "evidence": "3 check(s) in contention"
+    },
+    {
+      "bar": "No memory growth over the soak (tolerance stated in the check)",
+      "status": "pass",
+      "evidence": "1 check(s) in soak"
+    },
+    {
+      "bar": "Peak memory under the 512 MB budget",
+      "status": "pass",
+      "evidence": "1 check(s) in contention"
+    },
+    {
+      "bar": "Push cap holds under a sign-up race",
+      "status": "pass",
+      "evidence": "1 check(s) in push_race"
+    }
+  ],
+  "memory_samples": 391,
+  "pass": false
+}

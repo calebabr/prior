@@ -1,0 +1,3 @@
+# Extra pin for the load-test harness only (everything else it uses is already in control_api/requirements*.txt:
+# httpx, pyotp, uvicorn, fastapi, cryptography). psutil is optional: without it memory is reported as unavailable.
+psutil==6.0.0

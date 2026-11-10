@@ -43,8 +43,9 @@ from `MONGODB_DB` and from the backup's source database, and the backup's checks
 you add `--apply`.
 
 1. Pick the newest backup folder. *Check:* `manifest.json` exists and lists collections.
-2. Atlas > Database Access: use a user that can write (the app's readWrite user is fine **for this drill only**) or a
-   temporary one with role readWrite. Set `MONGODB_URI` to it, and `MONGODB_DB=kalshi_control` (the LIVE name, so the
+2. Atlas > Database Access: create a **temporary** user with a custom role that can write only to the scratch database
+   (Add New Database User > Built-in Role: Custom Role > readWrite on `kalshi_scratch_drill` only). Do not use the app's
+   read-write user for this drill; delete the temporary user when you finish. Set `MONGODB_URI` to it, and `MONGODB_DB=kalshi_control` (the LIVE name, so the
    script can refuse it).
 3. Dry run:
    `python scripts/restore_drill.py --backup <folder> --target-db kalshi_scratch_drill`

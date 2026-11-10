@@ -130,6 +130,16 @@ Pushing to GitHub does **not** change your running app (Render's auto-deploy is 
 
 **If something looks wrong:** press **Stop** (always works, no 2FA). If the app is unreachable: Render > service > Suspend. A refusal code in the gate is a safe stop (see `docs/RELEASE_PROCESS.md`): fix the cause and start a new run; a failed run cannot be re-run, start a fresh one.
 
+### Emergency steps, in order (replaces the deferred "Shut down server" button)
+
+Stop each step as soon as the problem is contained. None of them needs the app's database, Kalshi or 2FA except where stated.
+
+1. **Stop** in the app: one tap, then confirm. No 2FA. It cancels the bot's resting orders and stops maker and arbitrage.
+2. If the app will not load or Stop does not answer: **Render > service > Suspend.** The bot stops running. Open orders already on Kalshi stay until step 3.
+3. **Cancel on Kalshi's own site:** log in to Kalshi, find your open (resting) orders and cancel them all, and check your positions for anything unexpected (a stopped bot never closes positions by itself).
+4. **After the cause is understood:** Resume the Render service, open the app, check Home and the Alerts page, then Start (fresh 2FA). If the circuit breaker tripped, the Start needs the acknowledgement checkbox. LIVE is never restored after a restart: re-arm from the phone (More > System > Arming).
+5. Write down what happened and when (the audit log on the Logs page has the Stop, breaker and arming rows).
+
 **App screens are gated too.** After step 12 below, Vercel deploys production only from the `release` branch, which the release workflow moves after your 2FA approval. A push to `main` makes a preview URL only and never reaches your phone.
 
 ## What each email means

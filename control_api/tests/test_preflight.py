@@ -508,3 +508,35 @@ def test_unit_check_snapshot_rules():
     assert pf.check_snapshot({**fresh, "env": "demo"}, "demo", "demo", now)[0] == "pass"
     assert pf.check_snapshot({**fresh, "env": "live"}, "demo", "demo", now)[0] == "fail"
     assert pf.check_snapshot({**fresh}, "demo", "live", now)[0] == "fail"
+
+
+async def test_kalshi_time_probe_retries_once_before_giving_up(monkeypatch):
+    from control_api.services import preflight as pf
+
+    class Client:
+        calls = 0
+        clock_skew_seconds = None
+
+        def get_exchange_status(self):
+            Client.calls += 1
+            if Client.calls >= 2:
+                Client.clock_skew_seconds = 0.4      # the first reply carried no usable time, the second does
+            return {}
+    monkeypatch.setattr(pf, "_kalshi_client", lambda runner, target: Client())
+    skew = await pf._kalshi_time_probe(object(), "live", timeout=1.0)
+    assert skew == 0.4 and Client.calls == 2
+
+
+async def test_kalshi_time_probe_gives_up_after_two_failures(monkeypatch):
+    from control_api.services import preflight as pf
+
+    class Client:
+        calls = 0
+        clock_skew_seconds = None
+
+        def get_exchange_status(self):
+            Client.calls += 1
+            raise OSError("down")
+    monkeypatch.setattr(pf, "_kalshi_client", lambda runner, target: Client())
+    assert await pf._kalshi_time_probe(object(), "live", timeout=1.0) is None
+    assert Client.calls == pf.TIME_ATTEMPTS

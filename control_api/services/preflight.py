@@ -33,6 +33,7 @@ PASS, WARN, FAIL = "pass", "warn", "fail"
 STORE_TIMEOUT_S = 5.0
 KALSHI_TIMEOUT_S = 6.0
 TIME_TIMEOUT_S = 3.0                            # the Kalshi time read (public exchange status, Date header)
+TIME_ATTEMPTS = 2                               # the Kalshi time read is tried twice before live fails closed
 SNAPSHOT_FRESH_S = 20 * 60
 SKEW_MAX_S = opsmon.SKEW_WARN_S                 # 5 s
 RECON_TOLERANCE = 0.10                          # dollars
@@ -444,10 +445,14 @@ async def _kalshi_time_probe(runner: Any, target: str, timeout: float = TIME_TIM
         client.get_exchange_status()
         skew = getattr(client, "clock_skew_seconds", None)
         return float(skew) if isinstance(skew, (int, float)) and not isinstance(skew, bool) else None
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(go), timeout)
-    except Exception:  # noqa: BLE001  (timeout included; the check reports "could not read")
-        return None
+    for _attempt in range(TIME_ATTEMPTS):      # one retry: a single slow reply must not fail an arm or a live Start
+        try:
+            skew = await asyncio.wait_for(asyncio.to_thread(go), timeout)
+        except Exception:  # noqa: BLE001  (timeout included)
+            skew = None
+        if skew is not None:
+            return skew
+    return None            # the check reports "could not read"
 
 
 async def _reconciliation(app_state: Any, store: Any, env: str, now: datetime) -> dict | None:

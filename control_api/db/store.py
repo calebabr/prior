@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
+from .. import cpuyield
 from . import schemas as S
 
 
@@ -436,12 +437,35 @@ def _since_ok(doc: dict, since: datetime | None) -> bool:
     return since is None or doc["ts"] >= S.norm_dt(since)
 
 
-def _project(docs: list[dict], fields: Iterable[str] | None) -> list[dict]:
-    """Keep only `fields` (like a Mongo inclusion projection without _id); None = everything."""
-    if fields is None:
-        return docs
-    keep = {str(f) for f in fields}
-    return [{k: v for k, v in d.items() if k in keep} for d in docs]
+def _windowed(docs: Iterable[dict], since: datetime | None, until: datetime | None, extra=None) -> list[dict]:
+    """[d for d in docs if _window_ok(d, since, until) and extra(d)], with the bounds normalized ONCE instead of per
+    document (same result; a 20k-row read no longer pays two norm_dt calls per row)."""
+    docs = list(docs)
+    if not docs:
+        return []
+    lo = None if since is None else S.norm_dt(since)
+    hi = None if until is None else S.norm_dt(until)
+    return [d for d in docs if (lo is None or d["ts"] >= lo) and (hi is None or d["ts"] < hi)
+            and (extra is None or extra(d))]
+
+
+_HIDDEN = frozenset(("\x00seq", "_id"))
+_IMMUTABLE = frozenset((str, int, float, bool, type(None), bytes, datetime))
+COPY_CHUNK = 1000                    # MemoryStore: bigger reads are copied in chunks with loop checkpoints (_copy_out)
+
+
+def _dcopy(v: Any) -> Any:
+    """copy.deepcopy for the stored value shapes: dicts and lists are copied recursively, exact immutable scalar types
+    (str, numbers, None, datetime ...) are shared, as deepcopy's result would be equal anyway; anything else falls
+    back to copy.deepcopy. A caller can mutate what it got without touching the store, exactly as before."""
+    t = type(v)
+    if t in _IMMUTABLE:
+        return v
+    if t is dict:
+        return {k: _dcopy(x) for k, x in v.items()}
+    if t is list:
+        return [_dcopy(x) for x in v]
+    return copy.deepcopy(v)
 
 
 def _lease_out(doc: dict | None) -> dict | None:
@@ -538,11 +562,28 @@ class MemoryStore(Store):
         return doc
 
     @staticmethod
-    def _clean(doc: dict) -> dict:
-        d = copy.deepcopy(doc)
-        d.pop("\x00seq", None)
-        d.pop("_id", None)
-        return d
+    def _clean(doc: dict, keep: frozenset | set | None = None) -> dict:
+        """A private copy of a stored doc without the internal keys. With `keep` (a projection), only those keys are
+        copied (project BEFORE copying: a 20k-row projected read no longer deep-copies the fields it then drops).
+        Same keys, order and values as deep-copying the whole doc and projecting afterwards."""
+        if keep is None:
+            return {k: _dcopy(v) for k, v in doc.items() if k not in _HIDDEN}
+        return {k: _dcopy(v) for k, v in doc.items() if k in keep and k not in _HIDDEN}
+
+    @classmethod
+    async def _copy_out(cls, docs: list[dict], keep: frozenset | None = None) -> list[dict]:
+        """[_clean(d, keep) for d in docs]. A big read (more than COPY_CHUNK docs, e.g. the 20k-fill Analytics read)
+        is copied in chunks with an event-loop checkpoint between them, so a Stop tap is served between chunks instead
+        of waiting for the whole copy (control_api/cpuyield.py). The doc list is fixed before the first chunk; like a
+        Mongo cursor between batches, a field merged into a listed doc meanwhile may show in a later chunk."""
+        if len(docs) <= COPY_CHUNK:
+            return [cls._clean(d, keep) for d in docs]
+        out: list[dict] = []
+        for i in range(0, len(docs), COPY_CHUNK):
+            if i:
+                await cpuyield.aio_checkpoint()
+            out.extend([cls._clean(d, keep) for d in docs[i:i + COPY_CHUNK]])
+        return out
 
     @staticmethod
     def _newest_seq(docs: Iterable[dict], key: str = "ts") -> list[dict]:
@@ -606,8 +647,8 @@ class MemoryStore(Store):
         return self._clean(self._newest_seq(self._heartbeats)[0])
 
     async def list_heartbeats(self, *, since: datetime | None = None, limit: int = 1000) -> list[dict]:
-        docs = [d for d in self._heartbeats if _since_ok(d, since)]
-        return [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
+        docs = _windowed(self._heartbeats, since, None)
+        return await self._copy_out(self._newest_seq(docs)[:max(0, int(limit))])
 
     # ---- journal
     async def add_journal_rows(self, rows: Iterable[dict]) -> int:
@@ -624,9 +665,9 @@ class MemoryStore(Store):
     async def list_journal(self, *, since: datetime | None = None, limit: int = 200,
                            events: Iterable[str] | None = None, fields: Iterable[str] | None = None) -> list[dict]:
         ev = set(events) if events is not None else None
-        docs = [d for d in self._journal.values()
-                if _since_ok(d, since) and (ev is None or d.get("event") in ev)]
-        return _project([self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]], fields)
+        docs = _windowed(self._journal.values(), since, None, None if ev is None else (lambda d: d.get("event") in ev))
+        keep = None if fields is None else frozenset(str(f) for f in fields)
+        return await self._copy_out(self._newest_seq(docs)[:max(0, int(limit))], keep)
 
     # ---- account snapshots
     async def add_account_snapshot(self, doc: dict) -> None:
@@ -634,7 +675,7 @@ class MemoryStore(Store):
 
     async def list_account_snapshots(self, *, since: datetime | None = None, limit: int = 10000,
                                      env: str | None = None) -> list[dict]:
-        docs = [d for d in self._snapshots if _since_ok(d, since) and (env is None or S.snapshot_env(d) == env)]
+        docs = _windowed(self._snapshots, since, None, None if env is None else (lambda d: S.snapshot_env(d) == env))
         return [S.with_snapshot_env(self._clean(d)) for d in self._newest_seq(docs)[:max(0, int(limit))]]
 
     # ---- fills
@@ -664,13 +705,9 @@ class MemoryStore(Store):
                          limit: int = 500, fields: Iterable[str] | None = None,
                          fill_ids: Iterable[str] | None = None) -> list[dict]:
         ids = None if fill_ids is None else {str(i) for i in fill_ids}
-        docs = [d for d in self._fills.values() if _window_ok(d, since, until)
-                and (ids is None or d["fill_id"] in ids)]
-        out = [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
-        if fields is not None:
-            keep = set(fields)
-            out = [{k: v for k, v in d.items() if k in keep} for d in out]
-        return out
+        docs = _windowed(self._fills.values(), since, until, None if ids is None else (lambda d: d["fill_id"] in ids))
+        keep = None if fields is None else frozenset(fields)
+        return await self._copy_out(self._newest_seq(docs)[:max(0, int(limit))], keep)
 
     # ---- settlements
     async def upsert_settlements(self, rows: Iterable[dict]) -> int:
@@ -688,8 +725,9 @@ class MemoryStore(Store):
 
     async def list_settlements(self, *, since: datetime | None = None, until: datetime | None = None,
                                limit: int = 500, fields: Iterable[str] | None = None) -> list[dict]:
-        docs = [d for d in self._settlements.values() if _window_ok(d, since, until)]
-        return _project([self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]], fields)
+        docs = _windowed(self._settlements.values(), since, until)
+        keep = None if fields is None else frozenset(str(f) for f in fields)
+        return await self._copy_out(self._newest_seq(docs)[:max(0, int(limit))], keep)
 
     async def set_settlement_fields(self, ticker: str, fields: dict) -> bool:
         clean = S.normalize({k: v for k, v in dict(fields).items() if k not in ("ticker", "ts", "_id")})
@@ -720,8 +758,8 @@ class MemoryStore(Store):
 
     async def list_arb_opportunities(self, *, since: datetime | None = None, limit: int = 100,
                                      executed_only: bool = False) -> list[dict]:
-        docs = [d for d in self._arb if _since_ok(d, since)
-                and (not executed_only or d["executed"] != S.ARB_LOG_ONLY)]
+        docs = _windowed(self._arb, since, None,
+                         (lambda d: d["executed"] != S.ARB_LOG_ONLY) if executed_only else None)
         return [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
 
     async def arb_spend_since(self, since: datetime, mode: str) -> float:
@@ -757,13 +795,11 @@ class MemoryStore(Store):
     async def list_quote_episodes(self, *, since: datetime | None = None, env: str | None = None,
                                   status: str | None = None, limit: int = 5000,
                                   fields: Iterable[str] | None = None) -> list[dict]:
-        docs = [d for d in self._episodes.values() if _since_ok(d, since)
-                and (env is None or d.get("env") == env) and (status is None or d.get("status") == status)]
-        out = [self._clean(d) for d in self._newest_seq(docs)[:max(0, int(limit))]]
-        if fields is not None:
-            keep = set(fields)
-            out = [{k: v for k, v in d.items() if k in keep} for d in out]
-        return out
+        docs = _windowed(self._episodes.values(), since, None,
+                         None if env is None and status is None else
+                         (lambda d: (env is None or d.get("env") == env) and (status is None or d.get("status") == status)))
+        keep = None if fields is None else frozenset(fields)
+        return await self._copy_out(self._newest_seq(docs)[:max(0, int(limit))], keep)
 
     # ---- shadow mode
     async def shadow_upsert_episodes(self, docs: list[dict]) -> int:

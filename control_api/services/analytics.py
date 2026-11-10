@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Iterable
 
+from .. import cpuyield as cy
 from . import arbsets
 from . import benchmarks as bench
 from . import fillquality as fq
@@ -186,6 +187,7 @@ def journal_cell_entries(rows: Iterable[dict]) -> dict[str, tuple[str, datetime 
     order). Rows come newest first; the first row seen for an order id wins."""
     out: dict[str, tuple[str, datetime | None]] = {}
     for r in rows:
+        cy.checkpoint()
         if not isinstance(r, dict) or r.get("event") != "quote":
             continue
         m = qp._OID.search(str(r.get("note") or ""))
@@ -243,6 +245,7 @@ def _clusters(rows: list[dict]) -> dict[str, list[float]]:
     """ticker -> [fills, wins, sum(win - price), pnl, cost]."""
     out: dict[str, list[float]] = {}
     for r in rows:
+        cy.checkpoint()
         c = out.setdefault(r.get("ticker") or r.get("fill_id") or str(id(r)), [0.0, 0.0, 0.0, 0.0, 0.0])
         w = 1.0 if r["result"] == "win" else 0.0
         c[0] += 1
@@ -326,6 +329,7 @@ def drawdown(cum: list[float]) -> list[float]:
 def settlement_map(settlements: Iterable[dict]) -> dict[str, dict]:
     out = {}
     for s in settlements:
+        cy.checkpoint()
         if not isinstance(s, dict):
             continue
         t, r = s.get("ticker"), s.get("market_result") or s.get("result")
@@ -340,6 +344,7 @@ def episode_maps(episodes: Iterable[dict]) -> tuple[dict[str, dict], dict[str, b
     by_fill: dict[str, dict] = {}
     front: dict[str, bool] = {}
     for e in episodes:
+        cy.checkpoint()
         if not isinstance(e, dict):
             continue
         ids = [str(i) for i in (e.get("fill_ids") or []) if i]
@@ -370,6 +375,7 @@ def trade_rows(fills: Iterable[dict], settlements: Iterable[dict], episodes: Ite
     series_list = list(series_list)
     out = []
     for f in fills:
+        cy.checkpoint()
         if not isinstance(f, dict) or not env_ok(f, env):
             continue
         side = pnlsvc.fill_side(f)
@@ -458,6 +464,7 @@ def filter_trades(rows: list[dict], *, since: datetime, until: datetime | None =
 def _groups(rows: list[dict], keyf, order: Iterable[str] | None = None) -> list[dict]:
     buckets: dict[str, list[dict]] = {}
     for r in rows:
+        cy.checkpoint()
         buckets.setdefault(keyf(r), []).append(r)
     keys = list(buckets)
     if order is not None:
@@ -467,6 +474,7 @@ def _groups(rows: list[dict], keyf, order: Iterable[str] | None = None) -> list[
         keys.sort()
     out = []
     for k in keys:
+        cy.checkpoint()
         g = group_stats(k, buckets[k])
         g.pop("_markets", None)
         out.append(g)
@@ -480,6 +488,7 @@ def pnl_curve(settled: list[dict], start: date, end: date, zone: tzinfo = timezo
         return []
     day: dict[date, list[float]] = {}
     for r in settled:
+        cy.checkpoint()
         d = r["_settled"].astimezone(zone).date()
         m = day.setdefault(d, [0.0, 0.0])
         m[0 if r["kind"] == "maker" else 1] += r["_pnl"]
@@ -514,6 +523,7 @@ def fill_quality_weekly(rows: list[dict], episodes: Iterable[dict], *, lo: datet
     makers = [r for r in rows if r["kind"] == "maker" and r["_ts"] >= lo]
     eps = []
     for e in episodes:
+        cy.checkpoint()
         t = _ts(e.get("ts")) if isinstance(e, dict) else None
         if t is not None and t >= lo and env_ok(e, env):
             eps.append((t, e))
@@ -522,6 +532,7 @@ def fill_quality_weekly(rows: list[dict], episodes: Iterable[dict], *, lo: datet
     weeks = {w: {"week": w, "fills": 0, "front": 0, "trade_through": 0, "_known": 0, "_q": [], "requotes": 0}
              for w in _weeks(lo, now)}
     for r in makers:
+        cy.checkpoint()
         w = weeks.get(iso_week(r["_ts"]))
         if w is None:
             continue
@@ -531,6 +542,7 @@ def fill_quality_weekly(rows: list[dict], episodes: Iterable[dict], *, lo: datet
             w["front"] += int(bool(r["_front"]))
         w["trade_through"] += int(r["_tt"])
     for t, e in eps:
+        cy.checkpoint()
         w = weeks.get(iso_week(t))
         if w is None:
             continue
@@ -558,12 +570,14 @@ def arb_summary(docs: Iterable[dict], *, lo: datetime, env: str, zone: tzinfo = 
     sets at execution (same as /api/arb), null when none filled. `daily` is bucketed by the local date in `zone`."""
     mine = []
     for d in docs:
+        cy.checkpoint()
         t = _ts(d.get("ts")) if isinstance(d, dict) else None
         if t is not None and t >= lo and env_ok(d, env, "mode"):
             mine.append((t, d))
     daily: dict[str, list[int]] = {}
     executed, filled, pnl = 0, 0, 0.0
     for t, d in mine:
+        cy.checkpoint()
         ex = str(d.get("executed", "")).startswith(("FILLED", "PARTIAL"))
         executed += ex
         if _arb_filled(d):
@@ -654,6 +668,7 @@ def calibration(maker_settled: list[dict], cells: Any = None) -> list[dict]:
     if lows:
         first, top = lows[0], max(b[1] for b in price_bands(cells))
         for r in maker_settled:
+            cy.checkpoint()
             c = round(r["price"] * 100)
             if first <= c <= top:
                 buckets[min(first + (c - first) // CAL_STEP_C * CAL_STEP_C, lows[-1])].append(r)
@@ -682,6 +697,7 @@ def _fr(eps: list[dict]) -> dict:
     filled = partial = unfilled = 0
     rest, to_fill = [], []
     for e in eps:
+        cy.checkpoint()
         got, cnt = qp._f(e.get("filled_count")) or 0.0, qp._f(e.get("count"))
         joined, closed, first = _ts(e.get("ts")), _ts(e.get("closed_utc")), _ts(e.get("first_fill_utc"))
         if got > 1e-9:
@@ -708,6 +724,7 @@ def fill_rate(episodes: Iterable[dict], *, lo: datetime, env: str, cells: Any, j
     series_list = list(series_list)
     mine = []
     for e in episodes:
+        cy.checkpoint()
         if not isinstance(e, dict) or e.get("status") != "closed" or not env_ok(e, env):
             continue
         t = _ts(e.get("first_fill_utc")) or _ts(e.get("closed_utc")) or _ts(e.get("ts"))
@@ -727,6 +744,7 @@ def fill_rate(episodes: Iterable[dict], *, lo: datetime, env: str, cells: Any, j
     by_cell: dict[str, list[dict]] = {}
     by_series: dict[str, list[dict]] = {}
     for c, s_, e in mine:
+        cy.checkpoint()
         by_cell.setdefault(c, []).append(e)
         by_series.setdefault(s_, []).append(e)
     return {"totals": _fr([e for _, _, e in mine]),
@@ -793,6 +811,7 @@ def summary(rows: list[dict], episodes: list[dict], arb_docs: list[dict], *, day
     exp = expectations if expectations is not None else load_expectations()
     cell_rows: dict[str, list[dict]] = {}
     for r in maker:
+        cy.checkpoint()
         cell_rows.setdefault(r["cell"] or CELL_NONE, []).append(r)
     by_cell = _groups(maker, lambda r: r["cell"] or CELL_NONE, order=config_order + [CELL_NONE])
     for g in by_cell:

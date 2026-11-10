@@ -95,14 +95,38 @@ async def test_stale_beyond_ttl_blocks_and_rebuilds(env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trades_and_summary_keep_their_60s_expiry(env, monkeypatch):
+async def test_trades_and_summary_serve_stale_and_refresh_once_after_60s(env, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(ra, "_clock", clock)
+    await _put(env.store, [fill("a", ts=NOW - timedelta(days=1), ticker="T-A")])
+    reads = _count(env.store, monkeypatch)
+    first = (await env.client.get("/api/analytics/trades", headers=env.auth)).json()
+    s1 = (await env.client.get("/api/analytics/summary", headers=env.auth)).json()
+    assert reads["n"] == 1
+    await _put(env.store, [fill("b", ts=NOW - timedelta(hours=2), ticker="T-B")])
+    clock.t += 61                                                     # stale, inside CACHE_TTL_S
+    assert (await env.client.get("/api/analytics/trades", headers=env.auth)).json() == first     # served at once
+    assert (await env.client.get("/api/analytics/summary", headers=env.auth)).json()["generated_utc"] \
+        == s1["generated_utc"]
+    for _ in range(100):
+        await _settle_tasks()
+        if reads["n"] >= 2 and not ra._state(type("R", (), {"app": env.app})())["gate"].locked():
+            break
+    assert reads["n"] == 2                                            # exactly ONE background refresh
+    clock.t += 1
+    assert (await env.client.get("/api/analytics/trades", headers=env.auth)).json()["total"] == first["total"] + 1
+    assert reads["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_trades_past_the_stale_bound_rebuild_before_answering(env, monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(ra, "_clock", clock)
     reads = _count(env.store, monkeypatch)
     await env.client.get("/api/analytics/trades", headers=env.auth)
-    clock.t += 61
+    clock.t += ra.CACHE_TTL_S + 1
     await env.client.get("/api/analytics/trades", headers=env.auth)
-    assert reads["n"] == 2                                            # no stale serving outside the ledger
+    assert reads["n"] == 2
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any, Iterable
 
+from .. import cpuyield as cy
 from ..db import schemas
 from . import pnl as pnlsvc
 from . import strategies as strat
@@ -128,6 +129,7 @@ def _settled_rows(rows: Iterable[dict], lo: datetime, now: datetime) -> list[dic
 def _snapshots(snapshots: Iterable[dict]) -> list[tuple[datetime, float]]:
     out = []
     for s in snapshots or []:
+        cy.checkpoint()
         if not isinstance(s, dict):
             continue
         t, cash, expo = _ts(s.get("ts")), pnlsvc._f(s.get("cash")), pnlsvc._f(s.get("exposure"))
@@ -140,6 +142,7 @@ def _snapshots(snapshots: Iterable[dict]) -> list[tuple[datetime, float]]:
 def _flows(flows: Iterable[dict]) -> list[tuple[datetime, float]]:
     out = []
     for f in flows or []:
+        cy.checkpoint()
         if not isinstance(f, dict):
             continue
         t, a = _ts(f.get("ts")), pnlsvc._f(f.get("amount"))
@@ -152,6 +155,7 @@ def _flows(flows: Iterable[dict]) -> list[tuple[datetime, float]]:
 def _last_at_or_before(snaps: list[tuple[datetime, float]], t: datetime) -> tuple[datetime, float] | None:
     best = None
     for s in snaps:
+        cy.checkpoint()
         if s[0] <= t:
             best = s
         else:
@@ -170,6 +174,7 @@ def dietz_base(snaps: list[tuple[datetime, float]], flows: list[tuple[datetime, 
     span = (end_eff - start).total_seconds()
     base = s0[1]
     for t, amt in flows:
+        cy.checkpoint()
         if t <= s0[0] or t > end_eff:
             continue
         if span <= 0 or t <= start:
@@ -183,6 +188,7 @@ def dietz_base(snaps: list[tuple[datetime, float]], flows: list[tuple[datetime, 
 def _strategy_ids(rows: Iterable[dict]) -> list[str]:
     ids = list(strat.STRATEGIES)
     for r in rows:
+        cy.checkpoint()
         g = _group(r)
         if r.get("source") != "you" and g not in ids:
             ids.append(g)
@@ -203,6 +209,7 @@ def build(rows: list[dict], snapshots: list[dict], flows: list[dict], *, zone: t
     buckets: dict[date, dict] = {p["start"]: {"pnl": dict.fromkeys(ids, 0.0), "n": dict.fromkeys(ids, 0),
                                               "you_n": 0, "you_pnl": 0.0} for p in periods}
     for r in _settled_rows(rows, window_start, now):
+        cy.checkpoint()
         b = buckets.get(period_start(r["_settled"].astimezone(zone).date(), granularity))
         if b is None:
             continue                                    # inside the dropped (straddling) period

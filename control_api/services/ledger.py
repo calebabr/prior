@@ -26,6 +26,7 @@ import statistics
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Iterable
 
+from .. import cpuyield as cy
 from . import arbsets
 from ..db import schemas
 from . import pnl as pnlsvc
@@ -84,6 +85,7 @@ def netting(open_rows: Iterable[dict]) -> dict:
     Kalshi, so it never changes the ledger totals."""
     by: dict[str, dict[str, list[float]]] = {}
     for r in open_rows:
+        cy.checkpoint()
         if r.get("side") in ("yes", "no"):
             s = by.setdefault(r["ticker"], {"yes": [0.0, 0.0], "no": [0.0, 0.0]})[r["side"]]
             c = float(r.get("count") or 0)
@@ -113,6 +115,7 @@ def pair_events(rows: Iterable[dict], until: datetime | None = None) -> dict[str
     state: dict[str, dict[str, list[float]]] = {}
     out: dict[str, list[tuple[datetime, float, float]]] = {}
     for r in ordered:
+        cy.checkpoint()
         st = state.setdefault(r["ticker"], {"yes": [0.0, 0.0], "no": [0.0, 0.0]})
         mine, other = st[r["side"]], st["no" if r["side"] == "yes" else "yes"]
         c, p = float(r.get("count") or 0), float(r.get("price") or 0)
@@ -138,6 +141,7 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
     notes: list[str] = []
     snaps = []
     for s in schemas.filter_snapshots([x for x in snapshots if isinstance(x, dict)], snapshot_env):
+        cy.checkpoint()
         t = arbsets._ts(s.get("ts")) if isinstance(s, dict) else None
         cash, expo = pnlsvc._f(s.get("cash")), pnlsvc._f(s.get("exposure"))
         if t is not None and cash is not None and expo is not None:
@@ -165,6 +169,7 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
     t0, t1 = start[0], end[0]
     net_flows = 0.0
     for f in flows:
+        cy.checkpoint()
         t = arbsets._ts(f.get("ts"))
         a = pnlsvc._f(f.get("amount"))
         if t is None or a is None or not (t0 < t <= t1):
@@ -172,6 +177,7 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
         net_flows += a if f.get("kind") == "deposit" else -a
     realized = fee_settled = fee_filled = 0.0
     for r in rows:
+        cy.checkpoint()
         fee = float(r.get("fee") or 0)
         if r["_settled"] is not None and t0 < r["_settled"] <= t1:
             realized += r["_pnl"]
@@ -183,11 +189,13 @@ def reconciliation(rows: list[dict], snapshots: list[dict], flows: list[dict], *
     events = pair_events(rows, until=t1)
     by_ticker: dict[str, list[dict]] = {}
     for r in rows:
+        cy.checkpoint()
         by_ticker.setdefault(r["ticker"], []).append(r)
     settled_in = {tk for tk, rs in by_ticker.items()
                   if all(r["_settled"] is not None for r in rs) and t0 < max(r["_settled"] for r in rs) <= t1}
     pairs_win = pnl_win = pairs_old = pnl_old = pnl_settled_mkts = 0.0
     for tk, evs in events.items():
+        cy.checkpoint()
         for ts, q, g in evs:
             if t0 < ts <= t1:
                 pairs_win += q
@@ -239,10 +247,12 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
     by_settle: dict[tuple[str, str], dict] = {}
     by_strategy_settled: dict[str, dict] = {}
     for r in rows:
+        cy.checkpoint()
         g = _group(r)
         _add(overall.setdefault(g, _blank()), r)
         _add(daily.setdefault((r["_ts"].astimezone(zone).date().isoformat(), g), _blank()), r)
     for r in all_rows if all_rows is not None else rows:
+        cy.checkpoint()
         if r["_settled"] is not None and r["_settled"] <= now and r["_settled"] >= since \
                 and (until is None or r["_settled"] < until):
             b = by_settle.setdefault((r["_settled"].astimezone(zone).date().isoformat(), _group(r)),
@@ -307,6 +317,7 @@ def build(rows: list[dict], sets: list[dict], *, zone: tzinfo, tzname: str, sinc
 def _count(rows: Iterable[dict], key) -> dict[str, int]:
     out: dict[str, int] = {}
     for r in rows:
+        cy.checkpoint()
         k = key(r)
         out[k] = out.get(k, 0) + 1
     return dict(sorted(out.items()))
@@ -367,6 +378,7 @@ def scorecard(*, env: str, rows: list[dict], sets: list[dict], arb_counts: dict,
            "distinct_sets_logged": arb_counts.get("sets", 0)}
     am = {"stops": 0, "stop_failures": 0, "starts": 0}
     for a in audit_rows:
+        cy.checkpoint()
         act = a.get("action")
         if act == "bot.stop":
             am["stops"] += 1

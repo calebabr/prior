@@ -1,6 +1,7 @@
 """Analytics API (docs/ANALYTICS_CONTRACT.md): math, cell matching, filters, pagination, env, auth, validation."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -409,6 +410,20 @@ class _Clock:
         return self.t
 
 
+async def _until(pred, steps: int = 500) -> None:
+    """Let background refresh tasks run until pred() holds (no wall-clock assertion; fails only if it never does)."""
+    for _ in range(steps):
+        if pred():
+            return
+        await asyncio.sleep(0.01)
+    assert pred()
+
+
+def ra_state(env) -> dict:
+    from control_api.routes import analytics as route
+    return route._state(type("R", (), {"app": env.app})())
+
+
 def _count_reads(store, monkeypatch):
     n = {"fills": 0}
     orig = store.list_fills
@@ -436,9 +451,13 @@ async def test_summary_cache_hit_expiry_and_keys(env, monkeypatch):
     await get("days=7")
     await get("env=all")
     assert reads["fills"] == 3                                    # (env, days) are separate keys
-    clock.t += 31                                                 # 61 s after the first read: expired
+    clock.t += 31                                 # 61 s after the first read: stale-while-refresh
     c = (await get()).json()
-    assert reads["fills"] == 4 and c["totals"]["open_fills"] == 1 and c["generated_utc"] >= a["generated_utc"]
+    assert c == a                                                 # the last good copy, served at once
+    await _until(lambda: reads["fills"] == 4)                     # ONE background refresh ...
+    await _until(lambda: not ra_state(env)["gate"].locked())      # ... that has finished and stored its copy
+    d = (await get()).json()
+    assert reads["fills"] == 4 and d["totals"]["open_fills"] == 1 and d["generated_utc"] >= a["generated_utc"]
 
 
 @pytest.mark.asyncio
@@ -623,7 +642,10 @@ async def test_journal_map_is_incremental(env, monkeypatch):
     by = {x["fill_id"]: x for x in (await env.client.get("/api/analytics/trades", headers=env.auth)).json()["trades"]}
     assert by["j1"]["cell"] == "0.34-0.38|5-11h|no" and by["j2"]["cell"] is None
     await env.store.add_journal_rows([qrow(t + timedelta(minutes=1), "T-2", "o-j2")])
-    clock.t += 61                                                       # summary/rows caches expired
+    clock.t += 61                                                       # summary/rows caches stale
+    await env.client.get("/api/analytics/trades", headers=env.auth)     # stale copy served, one refresh started
+    await _until(lambda: len(calls["list_journal"]) == 2)
+    await _until(lambda: not ra_state(env)["inflight"] and not ra_state(env)["gate"].locked())
     by = {x["fill_id"]: x for x in (await env.client.get("/api/analytics/trades", headers=env.auth)).json()["trades"]}
     assert by["j2"]["cell"] == "0.34-0.38|5-11h|no" and by["j1"]["cell"] == "0.34-0.38|5-11h|no"
     first, second = calls["list_journal"][0]["since"], calls["list_journal"][1]["since"]

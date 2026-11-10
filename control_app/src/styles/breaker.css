@@ -1,0 +1,21 @@
+/* Loss circuit breaker: banner (Home + compact on other pages) and the Settings card. Only var(--...) colours. */
+.breaker-banner {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  margin: 8px 0 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface);
+}
+.breaker-tripped { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
+.breaker-warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); background: color-mix(in srgb, var(--warn) 8%, var(--surface)); }
+.breaker-banner.is-compact { margin: 0 0 8px; padding: 8px 12px; }
+.breaker-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 200px; }
+.breaker-title { font-size: 0.9375rem; }
+.breaker-tripped .breaker-title { color: var(--danger); }
+.breaker-sub { font-size: 0.8125rem; color: var(--muted); overflow-wrap: anywhere; }
+.breaker-action { flex: none; }
+.shell-notices .breaker-banner { margin: 8px var(--gutter, 16px) 0; }
+
+.breaker-state { list-style: none; margin: 0 0 12px; padding: 0; }
+.breaker-state li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.875rem; }
+.breaker-state li > span:first-child { color: var(--muted); }
+.breaker-state li > span:last-child { text-align: right; overflow-wrap: anywhere; }
+.breaker-check-row { display: block; margin: 8px 0; }

@@ -371,7 +371,9 @@ export const api = {
       ? request('GET', `/api/status${query({ period })}`, { cache: false })
       : request('GET', `/api/status${query({ tz: viewerTimeZone() })}`, { cacheKey: '/api/status' }),
   stop: () => request('POST', '/api/bot/stop'), // never needs 2FA
-  start: (code) => request('POST', '/api/bot/start', { code }),
+  // `ackBreaker` acknowledges a tripped loss circuit breaker (409 breaker_tripped without it).
+  start: (code, { ackBreaker = false } = {}) =>
+    request('POST', '/api/bot/start', ackBreaker ? { code, body: { ack_breaker: true } } : { code }),
   runOnce: () => request('POST', '/api/bot/run-once'),
   setMode: (mode, confirm, code) => request('PUT', '/api/mode', { body: { mode, confirm }, code }),
 
@@ -431,6 +433,9 @@ export const api = {
   rejectRelease: (id) => request('POST', `/api/release/pending/${enc(id)}/reject`, { cache: false }),
 
   // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app")
+  // Loss / drawdown circuit breaker. Reading needs a login; changing it needs fresh 2FA.
+  getBreaker: () => request('GET', '/api/breaker', { cache: false }),
+  putBreaker: (patch, code) => request('PUT', '/api/breaker', { body: patch, code, cache: false }),
   getArb: () => request('GET', '/api/arb'),
   // patch: any of {enabled, live, confirm:"LIVE", ack_legging, arb_max_contracts, arb_min_profit, arb_series, arb_poll_seconds, arb_scan_cap, arb_day_cap, arb_series_cap_frac, arb_demo_execute}
   putArb: (patch, code) => request('PUT', '/api/arb', { body: patch, code }),

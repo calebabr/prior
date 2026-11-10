@@ -3,7 +3,8 @@ import { LEGACY_REDIRECTS, PERFORMANCE_ANALYSIS_PATH } from './utils/routes.js';
 import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 import { DialogProvider } from './context/DialogContext.jsx';
 import { DisplayProvider } from './context/DisplayContext.jsx';
-import { StatusProvider } from './context/StatusContext.jsx';
+import { StatusProvider, useStatus } from './context/StatusContext.jsx';
+import BreakerBanner from './components/BreakerBanner.jsx';
 import Header from './components/Header.jsx';
 import NavBar from './components/NavBar.jsx';
 import WakingBanner from './components/WakingBanner.jsx';
@@ -41,6 +42,14 @@ function LegacyRedirect({ to }) {
   return <Navigate to={{ pathname: to, search, hash }} replace />;
 }
 
+// Compact breaker notice under the header on every page except Home (Home has the full banner with the Start button).
+function ShellBreaker() {
+  const { status } = useStatus();
+  const { pathname } = useLocation();
+  if (pathname === '/') return null;
+  return <BreakerBanner breaker={status && status.breaker} compact />;
+}
+
 function SignedIn() {
   const location = useLocation();
   return (
@@ -51,6 +60,7 @@ function SignedIn() {
           <WakingBanner />
           <UpdateBanner />
           <WhatsNew />
+          <ShellBreaker />
         </div>
         <main className="content">
           {/* Sticky page name under the header; outside the boundary so a page crash keeps it. */}

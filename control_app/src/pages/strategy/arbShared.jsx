@@ -6,6 +6,7 @@ import { useResource } from '../../hooks/useResource.js';
 import { usePageVisible } from '../../hooks/usePageVisible.js';
 import { api } from '../../services/api.js';
 import { humanize } from '../../utils/format.js';
+import { BREAKER_ACK_LABEL, breaker409, isTripped } from '../../utils/breaker.js';
 
 // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app").
 //   GET  /api/arb               -> {settings, schema?, ceilings?, status, pnl, expectation?}
@@ -257,6 +258,8 @@ export function useArbController() {
         title: 'Live arbitrage is not allowed by the server',
         text: 'The Render environment needs the prod key and KALSHI_LIVE_CONFIRM. The app cannot enable real money on its own.',
       });
+    } else if (breaker409(err)) {
+      notify({ kind: 'error', title: 'Circuit breaker is tripped', text: breaker409(err) });
     } else if (err.status === 409 && String(err.detail).startsWith('arb_legging_kill')) {
       notify({
         kind: 'error',
@@ -271,6 +274,22 @@ export function useArbController() {
   async function setEnabled(on) {
     if (busy) return;
     const body = { enabled: on };
+    if (on && isTripped(appStatus)) {
+      const ok = await confirm({
+        title: 'Turn arbitrage on after the breaker tripped?',
+        message: (
+          <>
+            <p>The loss circuit breaker stopped trading. Turning arbitrage on clears the trip.</p>
+            <p className="hint">Stop still works at any time. You will need a 2FA code next.</p>
+          </>
+        ),
+        confirmLabel: 'Continue',
+        requireCheck: BREAKER_ACK_LABEL,
+        danger: true,
+      });
+      if (!ok) return;
+      body.ack_breaker = true;
+    }
     if (on && legging) {
       const ok = await confirm({
         title: 'Clear the legging kill switch?',

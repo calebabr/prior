@@ -82,6 +82,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     app.include_router(__import__("control_api.routes.preflight", fromlist=["router"]).router)
     app.include_router(__import__("control_api.routes.dayview", fromlist=["router"]).router)
     app.include_router(__import__("control_api.routes.arming", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.breaker", fromlist=["router"]).router)
     return app
 
 

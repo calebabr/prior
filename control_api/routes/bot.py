@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Literal
@@ -125,14 +126,33 @@ async def _audit_stop(request: Request, user: dict, details: dict) -> bool:
     return False
 
 
+async def _start_body(request: Request) -> dict:
+    """Optional JSON body of POST /bot/start: {ack_breaker: bool}. No body (or an empty one) = {}. Strict types."""
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, ["body: must be a JSON object"]) from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, ["body: must be a JSON object"])
+    if "ack_breaker" in body and body["ack_breaker"] is not None and not isinstance(body["ack_breaker"], bool):
+        raise HTTPException(400, ["ack_breaker: must be true/false"])
+    return body
+
+
 @router.post("/bot/start")
 async def start(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
+    """Fresh 2FA. L1: while the circuit breaker is tripped, also needs body {"ack_breaker": true} (else 409
+    "breaker_tripped"); the acknowledgement clears the trip (audited as breaker.ack)."""
+    ack_breaker = (await _start_body(request)).get("ack_breaker") is True
     if _runner(request).mode == "live" and _runner(request).live_allowed():
         # L-1: Start in live re-runs the go-live preflight, so a stale arm cannot start live trading (409 + checks)
         from .arming import live_recheck
         await live_recheck(request, user=user, action="bot.start")
     try:
-        res = await _runner(request).start_trading(by=user.get("username", "user"))
+        res = await _runner(request).start_trading(by=user.get("username", "user"), ack_breaker=ack_breaker)
     except ConfigInvalid as e:
         # the reloaded stored config still fails validation: stay stopped, say why ("invalid_config: ...")
         await audit(request, "bot.start", ok=False, user=user, details={"error": "invalid_config"})
@@ -144,6 +164,8 @@ async def start(request: Request, user: dict = Depends(require_fresh_2fa)) -> di
     except Exception as e:  # noqa: BLE001  (fail-safe: no store write -> no start)
         await audit(request, "bot.start", ok=False, user=user, details={"error": type(e).__name__})
         raise HTTPException(503, "store_unavailable") from e
+    if res.get("breaker_cleared"):
+        await audit(request, "breaker.ack", user=user, details={"via": "bot.start"})
     await audit(request, "bot.start", user=user)
     return res
 

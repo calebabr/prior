@@ -377,3 +377,88 @@ for (const theme of THEMES) {
     });
   }
 }
+
+// Circuit-breaker states (mock scenarios via sessionStorage 'keel.mock'): the red banner on Home and the compact one
+// on other pages, the amber warning, the unreadable Settings card, and the restart acknowledgement dialog (checkbox),
+// at every width and with the status-bar inset. Stop must stay uncovered in each.
+const BREAKER_SCENARIOS = [
+  { id: 'breaker-tripped', routes: ['/', '/settings', '/more', '/activity', '/strategies/arb/controls'] },
+  { id: 'breaker-warning', routes: ['/', '/settings'] },
+  { id: 'breaker-unreadable', routes: ['/settings'] },
+];
+
+for (const scenario of BREAKER_SCENARIOS) {
+  for (const width of WIDTHS) {
+    test(`layout collisions: ${scenario.id} at ${width}px`, async ({ page }) => {
+      test.setTimeout(180_000);
+      await page.setViewportSize({ width, height: 740 });
+      await page.addInitScript((s) => {
+        try { window.sessionStorage.setItem('keel.mock', s); } catch { /* storage may be blocked */ }
+      }, scenario.id);
+      await login(page);
+      const findings = [];
+      const seen = new Set();
+      const record = async (raw, label) => {
+        let shot = null;
+        for (const f of raw) {
+          const key = `${f.kind}|${label}|${f.selector}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (!shot) {
+            shot = path.join(SHOTS, `${scenario.id}-${width}-${findings.length}-${label.replace(/[^a-z0-9]+/gi, '_')}.png`);
+            await page.screenshot({ path: shot });
+          }
+          findings.push({ ...f, route: label, width, theme: scenario.id, screenshot: shot });
+        }
+      };
+      const go = async (p) => {
+        await page.evaluate((x) => {
+          window.history.pushState({}, '', x);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, p);
+        await page.waitForTimeout(450);
+      };
+      const setSafe = (top, bottom) =>
+        page.evaluate(([t, b]) => {
+          const s = document.documentElement.style;
+          if (t) {
+            s.setProperty('--safe-top', `${t}px`);
+            s.setProperty('--safe-bottom', `${b}px`);
+          } else {
+            s.removeProperty('--safe-top');
+            s.removeProperty('--safe-bottom');
+          }
+        }, [top, bottom]);
+
+      for (const [safeTop, safeBottom] of [[0, 0], [47, 34]]) {
+        await setSafe(safeTop, safeBottom);
+        for (const r of scenario.routes) {
+          await go(r);
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await page.waitForTimeout(150);
+          await record(await page.evaluate(auditInPage, { smallOk: SMALL_OK }), `${scenario.id}:${r}@safe${safeTop}`);
+        }
+        if (scenario.id === 'breaker-tripped') {
+          await go('/');
+          await page.getByTestId('breaker-restart').click();
+          await page.waitForTimeout(400);
+          const res = await page.evaluate(auditOverlay, { safeTop, safeBottom });
+          if (!res.found) {
+            findings.push({ kind: 'modal', route: `breaker-restart-confirm@safe${safeTop}`, width, theme: scenario.id, selector: 'breaker-restart-confirm', detail: 'overlay did not open', screenshot: '' });
+          } else {
+            await record(res.out, `breaker-restart-confirm@safe${safeTop}`);
+          }
+          await page.keyboard.press('Escape');
+          await page.waitForTimeout(150);
+        }
+      }
+      await setSafe(0, 0);
+      fs.writeFileSync(path.join(SHOTS, `findings-${scenario.id}-${width}.json`), JSON.stringify(findings, null, 2));
+      const unknown = findings.filter((f) => !KNOWN.some((k) => `${f.kind}|${f.route}|${f.selector}`.startsWith(k)));
+      expect(
+        unknown.map((f) => `${f.kind} ${f.route} @${f.width} ${f.selector} (${f.detail}) -> ${f.screenshot}`),
+        `layout findings (screenshots in ${SHOTS})`,
+      ).toEqual([]);
+    });
+  }
+}

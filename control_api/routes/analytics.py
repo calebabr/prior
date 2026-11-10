@@ -10,15 +10,19 @@ Load guards (Atlas M0 + the 512 MB instance; SECURITY_REVIEW S-28 / S-30):
   ALL CPU-bound work (summary, journal fold, ledger, returns, returns fills, scorecard) goes through _cpu(), never
   inline on the event loop, and the GIL switch interval is lowered while it runs (_SwitchInterval), so Stop is not
   starved by a 180-day rebuild (load suite scenario `contention`). Identical ledger / returns / scorecard requests
-  share one in-flight computation (_single_flight).
-* Results are cached: the summary SUMMARY_TTL_S (60 s) per (env, days, period, tz) (small; `generated_utc` shows its age) and
+  share one in-flight computation (_single_flight). The build loops call cpuyield.checkpoint(): while a Stop is in
+  flight they step aside (no CPU, no lock held, bounded), so at a tenth of a core Stop gets the CPU share
+  (control_api/cpuyield.py). Scheduling only; no value changes.
+* Results are cached: the summary per (env, days, period, tz) (small; `generated_utc` shows its age) and
   the trade rows per (env, days, period) (at most ROWS_CACHE_KEYS keys; the largest objects, independent of the
-  viewer's time zone), so /trades paging and filtering never re-reads Atlas. The rows live CACHE_TTL_S (300 s);
-  /trades and /summary treat them as expired after 60 s (unchanged), the LEDGER (Home) uses stale-while-revalidate:
-  a copy older than REFRESH_AFTER_S but younger than CACHE_TTL_S is served at once and refreshed once in the
-  background (never more than one refresh at a time, through the same gate). After each bot pass the runner's
-  post-pass hook calls warm(), which pre-builds the default key so Home usually finds a copy. A failed refresh or
-  warm-up only logs. Both caches are bounded
+  viewer's time zone), so /trades paging and filtering never re-reads Atlas. EVERY endpoint uses
+  stale-while-refresh: the summary and the returns bodies are fresh for SUMMARY_TTL_S (60 s) and the rows (which
+  /trades, /ledger, /scorecard and the drill-downs read; their bodies read their live parts on every request) for
+  REFRESH_AFTER_S (60 s); a copy past that but younger than CACHE_TTL_S (300 s) is served at once and refreshed
+  once in the background (never more than one refresh at a time: one dataset refresh through the same gate and one
+  body refresh, _swr_body). A request only waits for a build when no copy younger than CACHE_TTL_S exists. After
+  each bot pass the runner's post-pass hook calls warm(), which pre-builds the default key so Home usually finds a
+  copy. A failed refresh or warm-up only logs, and the stale copy keeps being served. The caches are bounded
   (CACHE_MAX_KEYS summaries; the oldest entry is dropped first). `tz` is validated (pnl.resolve_tz: IANA names
   only, anything else means UTC), so the key space is the tz database, never raw client text. Only successful
   builds are cached.
@@ -44,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from .. import cpuyield
 from ..auth.deps import current_user
 from ..auth.ratelimit import check_user
 from ..services import analytics as an
@@ -142,7 +147,7 @@ async def _cpu(fn, *args, **kwargs):
     not touch the event loop or app state shared with it (pure functions of their arguments)."""
     _SWITCH.enter()
     try:
-        cf = _pool().submit(functools.partial(fn, *args, **kwargs))
+        cf = _pool().submit(functools.partial(cpuyield.cooperative, fn, *args, **kwargs))
     except BaseException:
         _SWITCH.leave()
         raise
@@ -167,6 +172,63 @@ async def _single_flight(request: Request, key: tuple, factory):
                 t.exception()                                 # retrieved: no "never retrieved" warning
         task.add_done_callback(done)
     return await asyncio.shield(task)
+
+
+def _ok_to_cache(out: dict) -> bool:
+    """Only successful builds are cached: a body whose optional reads failed (see _soft) is served, not kept."""
+    return not any("store read failed" in str(n) for n in (out.get("notes") or []))
+
+
+async def _swr_body(request: Request, name: str, key: tuple, compute):
+    """Stale-while-refresh cache for a derived Analytics body (the returns), in _state()[name].
+
+    * fresh (younger than SUMMARY_TTL_S): served, nothing runs;
+    * stale (younger than CACHE_TTL_S): served AT ONCE and one background refresh is started (one-in-flight: at most
+      one body refresh at a time, and none for a key already computing). The refresh waits for a fresh dataset
+      (compute(True)), so a refreshed body is never built from stale rows;
+    * none, or older than CACHE_TTL_S: computed now (compute(False)); identical requests share one computation.
+    At most RETURNS_CACHE_KEYS keys per name (expired first, then the oldest). Only successful bodies are cached
+    (_ok_to_cache). The body is exactly what compute returned; its `generated_utc` shows its age."""
+    st = _state(request)
+    bc = st.setdefault(name, {})
+    hit = bc.get(key)
+    t0 = _clock()
+    if _fresh(hit, t0, SUMMARY_TTL_S):
+        return hit[1]
+    fkey = ("body", name) + key
+
+    async def run(refresh: bool) -> dict:
+        t = _clock()
+        out = await compute(refresh)
+        if _ok_to_cache(out):
+            for k in [k for k, v in bc.items() if not _fresh(v, t, CACHE_TTL_S)]:
+                bc.pop(k, None)
+            bc.pop(key, None)
+            while len(bc) >= RETURNS_CACHE_KEYS:
+                bc.pop(min(bc, key=lambda k: bc[k][0]))
+            bc[key] = (t, out)
+        return out
+
+    if _fresh(hit, t0, CACHE_TTL_S):
+        _spawn_body_refresh(request, fkey, lambda: run(True))
+        return hit[1]
+    return await _single_flight(request, fkey, lambda: run(False))
+
+
+def _spawn_body_refresh(request: Request, fkey: tuple, factory) -> None:
+    """At most ONE background body refresh at a time, and none for a key already computing. Never raises into the
+    request; a failed refresh only logs its type, and the stale copy keeps being served until CACHE_TTL_S."""
+    st = _state(request)
+    t = st.get("body_refresh")
+    if (t is not None and not t.done()) or fkey in st.setdefault("flights", {}):
+        return
+
+    async def bg() -> None:
+        try:
+            await _single_flight(request, fkey, factory)
+        except Exception as e:  # noqa: BLE001
+            log.warning("analytics background build failed: %s", type(e).__name__)
+    st["body_refresh"] = asyncio.ensure_future(bg())
 
 
 def _bad(field: str, msg: str) -> HTTPException:
@@ -228,7 +290,7 @@ def _state(request: Request) -> dict:
     if st is None:
         st = request.app.state.analytics = {"rows": {}, "inflight": {}, "gate": asyncio.Lock(), "jmap": None,
                                             "refresh_task": None, "warm_at": None, "last_tz": None,
-                                            "returns": {}}
+                                            "returns": {}, "body_refresh": None}
     return st
 
 
@@ -356,9 +418,9 @@ def _store_result(request: Request, key: tuple, t0: float, summary: dict, rows: 
     """key = (env, days, period key, validated tz). The summary is cached per full key; the rows per key without
     the zone (they do not depend on it). Both caches drop expired entries, then the OLDEST ones beyond their bound."""
     cache, rc = _cache(request), _state(request)["rows"]
-    for c, ttl in ((cache, SUMMARY_TTL_S), (rc, CACHE_TTL_S)):
-        for k in [k for k, v in c.items() if not _fresh(v, t0, ttl)]:
-            c.pop(k, None)                                    # drop expired entries
+    for c in (cache, rc):
+        for k in [k for k, v in c.items() if not _fresh(v, t0, CACHE_TTL_S)]:
+            c.pop(k, None)                                    # drop entries past the stale-serving bound
     while len(cache) >= CACHE_MAX_KEYS:
         cache.pop(min(cache, key=lambda k: cache[k][0]))      # bounded: oldest first
     cache[key] = (t0, summary)
@@ -449,11 +511,12 @@ async def warm(app) -> None:
 
 
 async def _dataset(request: Request, env: str, days: int, want: str, period: dict | None = None,
-                   tz: str = "UTC", swr: bool = False):
+                   tz: str = "UTC", swr: bool = True):
     """Cached summary (want="summary") or trade rows (want="rows") for (env, days[, period][, tz]); at most one
-    build at a time. `tz` must already be a validated name (pnl.resolve_tz); rows ignore it. swr=True (the ledger,
-    rows only): a copy up to CACHE_TTL_S old is served immediately, and past REFRESH_AFTER_S one background refresh
-    is started."""
+    build at a time. `tz` must already be a validated name (pnl.resolve_tz); rows ignore it. Stale-while-refresh
+    (every Analytics endpoint): a copy past its freshness (SUMMARY_TTL_S / REFRESH_AFTER_S) but younger than
+    CACHE_TTL_S is served immediately and ONE background refresh is started. swr=False (a background refresh of a
+    derived body) waits for a fresh build instead."""
     st, key = _state(request), (env, days, _pkey(period), tz)
 
     def entry():
@@ -466,7 +529,7 @@ async def _dataset(request: Request, env: str, days: int, want: str, period: dic
     res = cached()
     if res is not None:
         return res
-    if swr and want == "rows":
+    if swr:
         hit = entry()
         if _fresh(hit, _clock(), CACHE_TTL_S):
             _spawn_refresh(request, key, env, days, period, tz)
@@ -635,7 +698,7 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
     days, period, since, until, now = await _window(request, days)
 
     async def compute() -> dict:
-        all_rows = await _dataset(request, env, days, "rows", period, swr=True)
+        all_rows = await _dataset(request, env, days, "rows", period)
         store, notes = request.app.state.store, []
         arb_raw, snaps, flows = await _parallel(
             _read(store.list_arb_opportunities(since=since, limit=an.MAX_ARB + 1)),
@@ -650,6 +713,8 @@ async def analytics_ledger(request: Request, user: dict = Depends(current_user))
             out["period"] = {"id": period.get("id"), "name": period.get("name")}
         out["notes"] = out["notes"] + notes
         return out
+    # the ledger body itself is NOT cached (it shows the live arbitrage, snapshot and cash-flow reads on every
+    # request, unchanged); its dataset (the trade rows) is stale-while-refresh, and identical requests share one run
     return await _single_flight(request, ("ledger", env, days, _pkey(period), tzname), compute)
 
 
@@ -688,17 +753,12 @@ async def analytics_returns(request: Request, user: dict = Depends(current_user)
     ds_days = next(d for d in an.DAYS_ALLOWED if d >= days)           # rows come from the smallest cached set covering it
     env = _env(request, q.get("env"))
     zone, tzname = pnlsvc.resolve_tz(q.get("tz"))
-    st = _state(request)
-    st["last_tz"] = tzname
-    key, t0, rc = (env, days, tzname, gran), _clock(), st.setdefault("returns", {})
-    hit = rc.get(key)
-    if _fresh(hit, t0, SUMMARY_TTL_S):
-        return hit[1]
+    _state(request)["last_tz"] = tzname
 
-    async def compute() -> dict:
+    async def compute(refresh: bool) -> dict:
         now = _now()
         since = now - timedelta(days=days)
-        all_rows = await _dataset(request, env, ds_days, "rows", None, swr=True)
+        all_rows = await _dataset(request, env, ds_days, "rows", None, swr=not refresh)
         store, notes = request.app.state.store, []
         snaps, flows = await _parallel(
             _soft(store.list_account_snapshots(since=since - SNAP_BEFORE, limit=SNAP_LIMIT), notes,
@@ -710,14 +770,8 @@ async def analytics_returns(request: Request, user: dict = Depends(current_user)
         out = await _cpu(retsvc.build, all_rows, snaps or [], flows or [], zone=zone, tzname=tzname,
                          granularity=gran, days=days, env=env, env_is_current=env in ("demo", "live") and env == mode,
                          now=now, truncated=len(all_rows) >= an.MAX_FILLS, notes=notes)
-        if not any("store read failed" in n for n in notes):     # only successful builds are cached
-            for k in [k for k, v in rc.items() if not _fresh(v, t0, SUMMARY_TTL_S)]:
-                rc.pop(k, None)
-            while len(rc) >= RETURNS_CACHE_KEYS:
-                rc.pop(min(rc, key=lambda k: rc[k][0]))
-            rc[key] = (t0, out)
         return out
-    return await _single_flight(request, ("returns",) + key, compute)
+    return await _swr_body(request, "returns", (env, days, tzname, gran), compute)
 
 
 @router.get("/analytics/returns/fills")
@@ -757,6 +811,7 @@ async def analytics_scorecard(request: Request, user: dict = Depends(current_use
     days = _int("days", q.get("days"), 7, 1, allowed=an.DAYS_ALLOWED)
     env = _env(request, q.get("env"))
     days, period, since, until, now = await _window(request, days)
+    # like the ledger: the body reads its live parts every time; the trade rows are stale-while-refresh
     return await _single_flight(request, ("scorecard", env, days, _pkey(period)), lambda: _scorecard(
         request, env, days, period, since, until, now))
 

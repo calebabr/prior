@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from . import report
-from .lib import ROOT, Api, LocalServer, MemSampler, Recorder, check_remote_target
+from .lib import ROOT, Api, LocalServer, MemSampler, Recorder, check_remote_target, remote_state_refusal
 from .scenarios import LETTERS, ORDER, REGISTRY, Ctx
 
 REMOTE_SCENARIOS = ["polling", "analytics", "auth", "stop"]       # the rest need the fake pass / local users
@@ -83,9 +83,11 @@ async def amain(a) -> int:
         cfg.update(REMOTE_LIMITS)
         api, info, pid = Api(base, token, rec), {}, None
         st, body, _ = await api.call("preflight", "GET", "/api/status")
-        if st != 200 or (body or {}).get("mode") != "demo":
-            raise SystemExit(f"refusing: GET /api/status gave {st}, mode={(body or {}).get('mode')!r}; the target must "
-                             f"answer 200 and be in demo mode")
+        if st != 200:
+            raise SystemExit(f"refusing: GET /api/status gave {st}; the target must answer 200 and be in demo mode")
+        why = remote_state_refusal(body)
+        if why:
+            raise SystemExit(f"refusing: {why}")
         if (body or {}).get("desired") == "running" and not a.allow_running:
             raise SystemExit("refusing: the demo bot is running; the Stop scenarios would stop it. Pass --allow-running "
                              "if that is fine.")

@@ -2,6 +2,7 @@
 viewer's zone, DST, modified-Dietz base, null reasons, partial and dropped periods, cache keying, validation."""
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -342,8 +343,12 @@ async def test_cache_is_keyed_ttl_bounded_and_cleared(env, monkeypatch):
                                 ("demo", 30, "America/Chicago", "day"), ("demo", 7, "UTC", "day")}
     clock.t += 30
     assert (await env.client.get(URL, headers=env.auth)).json()["generated_utc"] == a["generated_utc"]   # cached
-    clock.t += 31                                                                                         # past 60 s
-    await env.client.get(URL, headers=env.auth)
+    clock.t += 31                                                                         # past 60 s: stale
+    assert (await env.client.get(URL, headers=env.auth)).json()["generated_utc"] == a["generated_utc"]   # served at once
+    for _ in range(500):                                                                  # ONE background refresh
+        if _cache(env)[("demo", 30, "UTC", "day")][0] == clock.t:
+            break
+        await asyncio.sleep(0.01)
     assert _cache(env)[("demo", 30, "UTC", "day")][0] == clock.t
     monkeypatch.setattr(ra, "RETURNS_CACHE_KEYS", 3)
     monkeypatch.setitem(ra.RATE_LIMITS, "analytics_returns", (1000, 60.0))

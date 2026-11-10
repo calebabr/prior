@@ -39,6 +39,7 @@ _TZ = re.compile(r"^[A-Za-z_]+(/[A-Za-z0-9_+\-]+){0,2}$|^UTC$")
 # title prefix -> type, for the existing ntfy alerts (first match wins)
 _TITLE_TYPES = (
     ("Arbitrage legging risk", "arb_legging"), ("Arbitrage stopped: kill switch", "breaker"),
+    ("Circuit breaker tripped", "breaker"),            # L1 loss/drawdown breaker (services/breaker.alert, urgent)
     ("Bot stopped", "stop"),
     ("Trading pass error", "error"), ("No heartbeat", "error"), ("Monitor failed", "error"),
     ("Self-ping failed", "error"), ("Pinger sync failed", "error"),

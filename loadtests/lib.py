@@ -117,6 +117,25 @@ def check_remote_target(url: str, confirm_demo: bool) -> str:
     return f"{u.scheme}://{u.netloc}"
 
 
+def remote_state_refusal(body: dict | None) -> str | None:
+    """Why a remote run must not proceed, from GET /api/status, or None when the deploy is demo-only. The deploy must be
+    in demo mode for maker AND arbitrage, hold no live arming, and not be live-capable at all (live_allowed): after go-live
+    the single service is the live deploy and a load run there could stop real trading or lock the owner out."""
+    b = body or {}
+    if b.get("mode") != "demo":
+        return f"mode={b.get('mode')!r}; the target must be in demo mode"
+    arb = b.get("arb") if isinstance(b.get("arb"), dict) else {}
+    for name, v in (("arb_mode", b.get("arb_mode")), ("arb.arb_mode", arb.get("arb_mode"))):
+        if v is not None and v != "demo":
+            return f"{name}={v!r}; arbitrage must be in demo mode too"
+    arming = b.get("arming") if isinstance(b.get("arming"), dict) else {}
+    if any(arming.get(k) is True for k in ("maker", "arbitrage")):
+        return "live trading is armed on the target"
+    if b.get("live_allowed") is True or arb.get("live_allowed") is True:
+        return "the target is live-capable (live_allowed); load tests run on a demo-only deploy"
+    return None
+
+
 # ---------------------------------------------------------------- local server
 class LocalServer:
     """The throwaway API from loadtests.server as a subprocess on an OS-chosen port."""

@@ -38,6 +38,7 @@ from .services import queuepos as qp
 from .services import riskgate
 from .services import alerts as alertsvc
 from .services import arming as armsvc
+from .services import breaker as breakersvc
 from .services import kalshi_recon as recon
 from .services import strategies as strat
 from .services import shadow as shadowsvc
@@ -599,6 +600,16 @@ class Runner:
         # item 14: daily Kalshi reconciliation (local date of the last run; also kept in alerts_state)
         self._recon_day: str | None = None
         self._recon_task: asyncio.Task | None = None
+        # L1 loss/drawdown circuit breaker (services/breaker.py): the state mirrors cloud_settings.breaker_state.
+        # Not readable until loaded from the store (then every check is skipped with a visible warning, never a trip).
+        # Stop never reads or writes any of this.
+        self.breaker_state: dict = breakersvc.empty_state()
+        self._breaker_loaded = False
+        self.breaker_warning: str | None = None
+        self._breaker_saved_utc: datetime | None = None     # newest reading time in the stored copy
+        self._breaker_unsaved = False                       # the memory copy holds a trip/mark the store lacks
+        self._breaker_retry: asyncio.Task | None = None
+        self._pass_equity: tuple[str, Any, Any] | None = None   # (env, equity, ts) of this pass's account row
         if isinstance(self.alerter, Alerter):
             self.alerter.on_alert = self._on_alert
             if self.alerter.grouper is None:          # item 18: group repeats of the same alert (urgent never waits)
@@ -807,6 +818,9 @@ class Runner:
         arb_desired = st.get("arb_desired", "stopped") if config_ok else "stopped"
         desired, arb_desired = self._apply_local_stop_rules(desired, arb_desired, gen=gen,
                                                             persisted_before=persisted_before)
+        if self.breaker_tripped():
+            # L1: a persisted circuit-breaker trip keeps both stopped until an acknowledged Start (fresh 2FA)
+            desired, arb_desired = "stopped", "stopped"
         mode, arb_mode = st.get("mode", "demo"), st.get("arb_mode", "demo")
         reason = None
         kept_live = False
@@ -1308,11 +1322,14 @@ class Runner:
 
     async def load_cloud(self) -> dict:
         merged = dict(schemas.DEFAULT_CLOUD_SETTINGS)
+        ok = True
         try:
             merged.update(await self.store.get_cloud_settings() or {})
         except Exception as e:  # noqa: BLE001
+            ok = False
             log.warning("cloud settings load failed: %s", type(e).__name__)
         self.cloud = merged
+        self._breaker_apply_cloud(merged if ok else None)
         return merged
 
     # ---- scheduling
@@ -1447,6 +1464,8 @@ class Runner:
                     raise RuntimeError("runner disabled (RUNNER_ENABLED=false)")
                 if self.kill_switch() or self.desired != "running" or self._stop_pending:
                     raise RuntimeError("stopped before pass")
+                if self.breaker_tripped():
+                    raise RuntimeError("circuit breaker tripped")    # L1 belt and braces (the trip ran Stop)
                 if self._shutting_down or not await self._pre_order_fence():
                     raise FenceBlocked("lease not confirmed")
                 if self.kill_switch() or self.desired != "running" or self._stop_pending:
@@ -1490,6 +1509,7 @@ class Runner:
                     log.error("post-pass cancel failed: %s", type(e).__name__)
             self.last_run_utc = utcnow()
             self.last_error = err
+            self._pass_equity = None
             await self._sync_journal(mode)
             if strategy_ran:
                 await self.sync_fills(mode)
@@ -1502,6 +1522,10 @@ class Runner:
             if not ok:
                 await self.alerter.send("Trading pass error", err or "unknown", priority="high")
             self.running_pass = False
+            pass_equity, self._pass_equity = self._pass_equity, None
+        if strategy_ran:
+            # L1: the loss/drawdown breaker on this pass's account equity (outside the pass lock; Stop never waits)
+            await self._breaker_after_pass(mode, pass_equity)
         await self._flush_alert_groups()        # item 18: once per pass, a quiet tail of held repeats
         if strategy_ran and ok:
             self._start_recon(mode)             # item 14: once a day, in the background, telemetry pool only
@@ -1629,6 +1653,8 @@ class Runner:
                         "headroom": info.get("headroom", 0.0),
                         "env": "live" if (mode or self.mode) == "live" else "demo"}
                     self._note_equity(snap)
+                    # L1: the breaker reads this pass's equity from here (no extra read); None = unusable
+                    self._pass_equity = (snap["env"], breakersvc.snapshot_equity(snap), snap["ts"])
                     await self.store.add_account_snapshot(snap)
             return n
         except BaseException as e:  # noqa: BLE001   (a cancelled write must not lose rows either)
@@ -2783,7 +2809,7 @@ class Runner:
         return (self.settings.runner_enabled and self.arb_desired == "running" and self.arb_mode == "live"
                 and gen == self._stop_gen
                 and not self._stopping and self.live_allowed() and self.armed("arbitrage")    # item 10
-                and not self.arb_kill_switch()
+                and not self.arb_kill_switch() and not self.breaker_tripped()
                 and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
 
     def _arb_demo_wanted(self) -> bool:
@@ -2799,6 +2825,7 @@ class Runner:
         """Same re-checks as _arb_live_ok, for demo-execute. Never true while the maker or arb is LIVE."""
         return (self.settings.runner_enabled and self.arb_desired == "running" and self._arb_demo_wanted()
                 and gen == self._stop_gen and not self._stopping and not self.arb_kill_switch()
+                and not self.breaker_tripped()
                 and not self._shutting_down and self._fence_ok(min_remaining_s=FENCE_MARGIN_S))   # R1 fence
 
     @staticmethod
@@ -2919,7 +2946,30 @@ class Runner:
             log.error("arb result handling failed: %s", type(e).__name__)
             if not out.startswith(("FILLED", "skipped")):
                 self._arb_write_kill("legging risk: partial result not handled", op.event, error=type(e).__name__)
+        self._arb_breaker_note(budget, kind, out, op, cash, by_series)
         return out
+
+    def _arb_breaker_note(self, budget: dict, kind: str, out: str, op: Any, cash: float,
+                          by_series: dict) -> None:
+        """L1: after a set was sent, queue an equity reading for the breaker from the gate's own read just before the
+        set (cash + open exposure; a filled set swaps cash for position value at cost, so equity is unchanged) minus
+        a contained partial's realised loss. Uncontained partials and errors are left to the legging kill switch.
+        Worker thread; no I/O; never raises."""
+        try:
+            if not out.startswith("FILLED"):
+                note = ((budget.get("notes") or {}).get(id(op)) or {})
+                if note.get("type") != "contained":
+                    return
+                loss = breakersvc._num((note.get("contain") or {}).get("loss"))
+                if loss is None or loss < 0:
+                    return                                   # unusable loss: never a reading built on bad data
+            else:
+                loss = 0.0
+            eq = float(cash) + float(sum(by_series.values())) - loss
+            with self._arb_budget_lock:
+                budget.setdefault("breaker", []).append(("live" if kind == "live" else "demo", eq, utcnow()))
+        except Exception as e:  # noqa: BLE001
+            log.warning("breaker reading after an arbitrage set skipped: %s", type(e).__name__)
 
     def _arb_write_kill(self, reason: str, event: Any, **extra: Any) -> None:
         """Writes the arb kill switch (legging kind: restart needs the owner's acknowledgement). Never raises."""
@@ -3193,6 +3243,9 @@ class Runner:
                                             f"{op.event} {op.kind} profit ${op.profit}{where}{done}")
             if self.arb_kill_switch() and self.arb_desired == "running":
                 await self._arb_tripped()
+            for env_name, eq, ts in list((budget or {}).get("breaker") or []):
+                # L1: one breaker check per set sent (the first trip stops everything; later ones are no-ops)
+                await self._breaker_observe(env_name, eq, ts, source="arbitrage")
             return {"scanned": True, "found": len(results)}
 
     async def _send_legging_alert(self, op: Any, executed: str, note: dict | None) -> None:
@@ -3251,6 +3304,7 @@ class Runner:
         if isinstance(self.cloud, dict):
             for k in (arbguard.CLOUD_CONTAIN, arbguard.CLOUD_KILL, arbguard.CLOUD_OVERRUN):
                 self.cloud[k] = cloud.get(k)
+        self._breaker_apply_cloud(cloud)                 # L1: a trip (and the marks) survive a leader change
         self._restore_arb_kill(cloud)
         overrun = arbguard.overrun_kill(cloud.get(arbguard.CLOUD_OVERRUN), self.instance_id)
         if overrun is not None and self.lease.role == LEADER:
@@ -3317,7 +3371,8 @@ class Runner:
         with contextlib.suppress(Exception):
             await self.alerter.send("Arbitrage stopped: kill switch", f"reason: {reason}", priority="urgent")
 
-    async def set_arb(self, *, enabled: bool | None, live: bool | None, by: str, ack_legging: bool = False) -> dict:
+    async def set_arb(self, *, enabled: bool | None, live: bool | None, by: str, ack_legging: bool = False,
+                      ack_breaker: bool = False) -> dict:
         """Arb on/off and the arb-live switch (the route enforces fresh 2FA and typed LIVE). Store first (fail-safe).
         Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error."""
         gen = self._stop_gen
@@ -3340,6 +3395,12 @@ class Runner:
             raise PermissionError("arb_legging_kill")    # also when only the persisted copy is left
         if desired is None and mode is None:
             return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode}
+        cleared = False
+        if turning_on:
+            # L1: refused while the circuit breaker is tripped unless acknowledged (the ack clears it, store first)
+            cleared = await self._breaker_gate(ack=ack_breaker, by=by)
+            if gen != self._stop_gen or self._stopping or self._stop_writes:
+                raise StopInProgress("stopped_during_start")
         if desired == "running" and stored_kill:
             # the acknowledged restart clears the persisted legging kill first (a failure raises: nothing changes)
             await asyncio.wait_for(self.store.save_cloud_settings({arbguard.CLOUD_KILL: None}, by=by), timeout=5)
@@ -3361,7 +3422,8 @@ class Runner:
             self.arb_desired = desired
         if mode == "live":
             self._spawn(self.alerter.send("Arbitrage LIVE enabled", f"arb_mode=live set by {by}", priority="urgent"))
-        return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode}
+        return {"arb_desired": self.arb_desired, "arb_mode": self.arb_mode,
+                **({"breaker_cleared": True} if cleared else {})}
 
     def arb_status(self) -> dict:
         return {"state": self.arb_state(), "running": self.arb_running_scan, "kill_switch": self.arb_kill_switch(),
@@ -3372,6 +3434,185 @@ class Runner:
                 "demo_execute": self.arb_state() != "stopped" and self.arb_exec_kind() == "demo-execute",
                 # item 3 (additive): series paused after a contained partial, and the 24 h contained counts
                 **self.arb_contain_status()}
+
+    # ---- L1 loss/drawdown circuit breaker (services/breaker.py). Nothing here is ever on the Stop path: Stop reads and
+    # writes none of it; the breaker only CALLS Stop.
+    BREAKER_STORE_TIMEOUT_S = 5.0
+    BREAKER_RETRY_FIRST_S = 5.0
+
+    def breaker_settings(self) -> dict:
+        return breakersvc.settings_of((self.cloud or {}).get(breakersvc.CLOUD_SETTINGS))
+
+    def breaker_tripped(self) -> bool:
+        return bool((self.breaker_state or {}).get("tripped"))
+
+    def breaker_status(self, *, full: bool = False) -> dict:
+        fn = breakersvc.status_view if full else breakersvc.short_status
+        return fn(self.breaker_settings(), self.breaker_state, readable=self._breaker_loaded,
+                  warning=self.breaker_warning, mode=self.mode)
+
+    def _breaker_apply_cloud(self, cloud: dict | None) -> None:
+        """Adopt the stored breaker settings and state from a cloud doc that was read successfully (None = the read
+        failed: a state never loaded stays unreadable, a loaded one is kept). A trip or mark held only in memory
+        (its store write still pending) is kept over the stored copy. Never raises."""
+        try:
+            if cloud is None:
+                if not self._breaker_loaded:
+                    self.breaker_warning = "breaker state unreadable (database): checks skipped"
+                return
+            if isinstance(self.cloud, dict) and cloud is not self.cloud:
+                for k in (breakersvc.CLOUD_SETTINGS, breakersvc.CLOUD_STATE):
+                    self.cloud[k] = cloud.get(k)
+            stored, warns = breakersvc.normalize_state(cloud.get(breakersvc.CLOUD_STATE))
+            mem = self.breaker_state or breakersvc.empty_state()
+            if self._breaker_loaded and self._breaker_unsaved:
+                stored = {"tripped": mem.get("tripped") or stored.get("tripped"),
+                          "envs": mem.get("envs") or stored.get("envs") or {}}
+            elif mem.get("tripped") and not stored.get("tripped") and self._breaker_unsaved:
+                stored = {**stored, "tripped": mem["tripped"]}
+            self.breaker_state = stored
+            self._breaker_loaded = True
+            self.breaker_warning = "; ".join(warns)[:300] or None
+        except Exception as e:  # noqa: BLE001
+            log.error("breaker state not applied: %s", type(e).__name__)
+
+    async def _breaker_save(self, by: str = "breaker") -> bool:
+        """Write the breaker state to the cloud doc. False (logged, memory kept, marked unsaved) on failure."""
+        doc = breakersvc.encode_state(self.breaker_state)
+        try:
+            await asyncio.wait_for(self.store.save_cloud_settings({breakersvc.CLOUD_STATE: doc}, by=by),
+                                   self.BREAKER_STORE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            self._breaker_unsaved = True
+            log.error("breaker state not persisted: %s", type(e).__name__)
+            return False
+        if isinstance(self.cloud, dict):
+            self.cloud[breakersvc.CLOUD_STATE] = doc
+        if breakersvc.encode_state(self.breaker_state) == doc:      # nothing changed during the write
+            self._breaker_unsaved = False
+        lasts = [breakersvc._parse_ts(d.get("last_utc")) for d in (doc.get("envs") or {}).values()]
+        lasts = [t for t in lasts if t is not None]
+        self._breaker_saved_utc = max(lasts) if lasts else None
+        return True
+
+    def _breaker_ensure_retry(self) -> None:
+        try:
+            if self._breaker_retry is None or self._breaker_retry.done():
+                self._breaker_retry = asyncio.create_task(self._breaker_retry_save())
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _breaker_retry_save(self) -> None:
+        """A trip whose store write failed is retried (backoff to 300 s) until it lands or is acknowledged, so a
+        restart or a new leader still sees it."""
+        delay = self.BREAKER_RETRY_FIRST_S
+        while self.breaker_tripped() and self._breaker_unsaved:
+            await asyncio.sleep(delay)
+            if not (self.breaker_tripped() and self._breaker_unsaved):
+                return
+            if await self._breaker_save():
+                log.warning("breaker trip persisted after retry")
+                return
+            delay = min(delay * 2, 300)
+
+    async def _audit_system(self, action: str, *, ok: bool = True, details: Any = None, user: str = "breaker") -> bool:
+        """An audit row written by the runner itself (no request). Bounded; never raises."""
+        try:
+            doc = {"ts": datetime.now(timezone.utc), "user": user, "action": action, "ok": bool(ok),
+                   "details": details, "ip": None, "ua": "runner"}
+            await asyncio.wait_for(self.store.add_audit(doc), self.BREAKER_STORE_TIMEOUT_S)
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("audit write failed for action=%s: %s", action, type(e).__name__)
+            return False
+
+    async def _breaker_after_pass(self, mode: str, pass_equity: tuple | None) -> None:
+        """After a maker pass: check the breaker on the pass's own account equity. Never raises."""
+        try:
+            env = breakersvc.env_of(mode)
+            if pass_equity is None or pass_equity[0] != env:
+                if self.breaker_settings().get(f"{env}_enabled") is True and not self.breaker_tripped():
+                    self.breaker_warning = f"{env}: no account equity in the last pass; check skipped"
+                return
+            await self._breaker_observe(env, pass_equity[1], pass_equity[2], source="maker")
+        except Exception as e:  # noqa: BLE001
+            log.error("breaker check after pass failed: %s", type(e).__name__)
+
+    async def _breaker_observe(self, env: str, equity: Any, ts: Any, *, source: str) -> dict | None:
+        """One equity reading through the breaker. Returns the trip doc when this reading tripped it. Never raises;
+        bad data or an unreadable state skips the check with a warning (never a trip)."""
+        try:
+            if self.breaker_tripped():
+                return None                              # already tripped: no second Stop, alert or audit row
+            if not self._breaker_loaded:
+                try:
+                    cloud = await asyncio.wait_for(self.store.get_cloud_settings(), self.BREAKER_STORE_TIMEOUT_S)
+                except Exception as e:  # noqa: BLE001
+                    self.breaker_warning = f"breaker state unreadable ({type(e).__name__}): check skipped"
+                    return None
+                self._breaker_apply_cloud(dict(cloud or {}))
+                if self.breaker_tripped():
+                    return None
+            res = breakersvc.evaluate(self.breaker_settings(), self.breaker_state, env, equity, ts,
+                                      saved_utc=self._breaker_saved_utc, source=source)
+            # no await since the tripped check above: a concurrent reading (pass vs arbitrage) sees this trip
+            self.breaker_state = res["state"]
+            self.breaker_warning = res["warning"]
+            if res["warning"]:
+                log.warning("breaker: %s", res["warning"])
+            if res["trip"]:
+                self._breaker_unsaved = True
+                await self._breaker_trip(res["trip"])
+            elif res["persist"]:
+                await self._breaker_save()
+            return res["trip"]
+        except Exception as e:  # noqa: BLE001
+            log.error("breaker check failed: %s", type(e).__name__)
+            return None
+
+    async def _breaker_trip(self, trip: dict) -> None:
+        """A limit was reached: the full Stop (maker + arbitrage: flags, kill switches, cancel resting bot orders,
+        persisted stop), then persist the trip, one urgent `breaker` alert and one `breaker.trip` audit row."""
+        log.error("circuit breaker tripped: %s (%s, from %s)", trip.get("reason"), trip.get("env"), trip.get("source"))
+        res: dict = {}
+        try:
+            res = await self.stop(by="breaker")
+        except Exception as e:  # noqa: BLE001   (Stop never raises; belt and braces)
+            res = {"errors": [f"stop: {type(e).__name__}"]}
+        if not await self._breaker_save():
+            self._breaker_ensure_retry()
+        try:
+            await self.alerter.send_alert(breakersvc.alert(trip))
+        except Exception as e:  # noqa: BLE001
+            log.error("breaker alert failed: %s", type(e).__name__)
+            with contextlib.suppress(Exception):
+                await self.alerter.send(f"{breakersvc.ALERT_TITLE}: {trip.get('reason')}",
+                                        "Trading stopped. Start needs fresh 2FA and the breaker acknowledgement.",
+                                        priority="urgent")
+        await self._audit_system("breaker.trip", details={
+            **breakersvc.audit_details(trip), "cancelled": res.get("cancelled"),
+            "stop_errors": [str(x)[:80] for x in (res.get("errors") or [])][:5]})
+
+    async def _breaker_gate(self, *, ack: bool, by: str) -> bool:
+        """Start / arbitrage enable: re-read the stored breaker state (another instance may have tripped it). While
+        tripped: PermissionError("breaker_tripped") unless `ack`; with it the trip is cleared in the store FIRST and
+        the marks re-based (services/breaker.acknowledge). True when a trip was cleared. A store error raises (the
+        caller refuses: fail-safe)."""
+        cloud = await asyncio.wait_for(self.store.get_cloud_settings(), self.BREAKER_STORE_TIMEOUT_S)
+        self._breaker_apply_cloud(dict(cloud or {}))
+        if not self.breaker_tripped():
+            return False
+        if not ack:
+            raise PermissionError("breaker_tripped")
+        new = breakersvc.acknowledge(self.breaker_state)
+        doc = breakersvc.encode_state(new)
+        await asyncio.wait_for(self.store.save_cloud_settings({breakersvc.CLOUD_STATE: doc}, by=by),
+                               self.BREAKER_STORE_TIMEOUT_S)
+        if isinstance(self.cloud, dict):
+            self.cloud[breakersvc.CLOUD_STATE] = doc
+        self.breaker_state, self._breaker_unsaved = new, False
+        self.breaker_warning, self._breaker_saved_utc = None, None
+        return True
 
     # ---- controls
     async def stop(self, by: str) -> dict:
@@ -3515,10 +3756,12 @@ class Runner:
             except Exception:  # noqa: BLE001
                 delay = min(delay * 2, 300)
 
-    async def start_trading(self, by: str) -> dict:
+    async def start_trading(self, by: str, *, ack_breaker: bool = False) -> dict:
         """Removes the kill switch and sets desired=running (store first: fail-safe).
         Stop always wins a race: if a Stop is running, or one ran while the store write was in flight, the start is
-        refused (StopInProgress) and stopped is re-asserted in the store. Arbitrage is not started by this."""
+        refused (StopInProgress) and stopped is re-asserted in the store. Arbitrage is not started by this.
+        L1: while the circuit breaker is tripped, PermissionError("breaker_tripped") unless `ack_breaker` (then the
+        trip is cleared first); the result says `breaker_cleared`."""
         if not self.settings.runner_enabled:
             raise RunnerDisabled("runner_disabled")
         if self.mode == "live" and botfiles.is_standin():
@@ -3537,6 +3780,9 @@ class Runner:
             raise ConfigInvalid(f"invalid_config: {self.last_error or 'stored config failed validation'}"[:400])
         if isinstance(self.last_error, str) and self.last_error.startswith(INVALID_CONFIG_PREFIXES):
             self.last_error = None
+        if gen != self._stop_gen or self._stopping or self._stop_writes:
+            raise StopInProgress("stopped_during_start")
+        cleared = await self._breaker_gate(ack=ack_breaker, by=by)     # L1; refuses while tripped without the ack
         if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
@@ -3558,7 +3804,7 @@ class Runner:
             self.kill_path.unlink()
         self.desired = "running"
         self.store_ok = True
-        return {"desired": "running"}
+        return {"desired": "running", **({"breaker_cleared": True} if cleared else {})}
 
     async def set_mode(self, mode: str, by: str) -> dict:
         if mode not in ("demo", "live"):
@@ -3767,5 +4013,7 @@ class Runner:
                 "write_report": self.last_write_report,
                 # item 10 (additive): per-strategy LIVE arming
                 "arming": {"maker": self.armed("maker"), "arbitrage": self.armed("arbitrage")},
+                # L1 (additive): circuit breaker summary; the full view is GET /api/breaker
+                "breaker": self.breaker_status(),
                 # R4 version handshake + R1 lease (additive fields)
                 **ver.handshake(), **self.lease_status(), "instance_id": self.instance_id}

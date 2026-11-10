@@ -20,7 +20,7 @@ from ..services import arbsets
 from ..services import pnl as pnlsvc
 
 router = APIRouter(prefix="/api")
-CONTROL_KEYS = ("enabled", "live", "confirm", "ack_legging")
+CONTROL_KEYS = ("enabled", "live", "confirm", "ack_legging", "ack_breaker")
 
 
 def _iso(doc: dict) -> dict:
@@ -122,7 +122,7 @@ async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> 
     if not isinstance(body, dict):
         raise HTTPException(400, ["body: must be a JSON object"])
     errs: list[str] = []
-    for k in ("enabled", "live", "ack_legging"):
+    for k in ("enabled", "live", "ack_legging", "ack_breaker"):
         if k in body and body[k] is not None and not isinstance(body[k], bool):
             errs.append(f"{k}: must be true/false")
     if "confirm" in body and body["confirm"] is not None and not isinstance(body["confirm"], str):
@@ -163,7 +163,8 @@ async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> 
 
     if enabled is not None or live is not None:
         try:
-            res = await r.set_arb(enabled=enabled, live=live, by=by, ack_legging=bool(body.get("ack_legging")))
+            res = await r.set_arb(enabled=enabled, live=live, by=by, ack_legging=bool(body.get("ack_legging")),
+                                  ack_breaker=body.get("ack_breaker") is True)
         except PermissionError as e:
             await audit(request, "arb.toggle", ok=False, user=user, details={"error": str(e)})
             raise HTTPException(409, str(e)) from e
@@ -173,6 +174,8 @@ async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> 
         except Exception as e:  # noqa: BLE001   (fail-safe: no store write -> no change)
             await audit(request, "arb.toggle", ok=False, user=user, details={"error": type(e).__name__})
             raise HTTPException(503, "store_unavailable") from e
+        if res.get("breaker_cleared"):
+            await audit(request, "breaker.ack", user=user, details={"via": "arb"})
         await audit(request, "arb.live" if live is not None else "arb.toggle", user=user,
                     details={"enabled": enabled, "live": live, **res})
     return await arb_view(request)

@@ -18,6 +18,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
+from .. import cpuyield as cy
 from . import pnl as pnlsvc
 
 OUTCOMES = ("filled", "partial", "error", "skipped", "log_only")
@@ -132,6 +133,7 @@ def counters(docs: Iterable[dict], *, env: str, since: datetime | None = None, u
     events: set[str] = set()
     sets = sightings = 0
     for d in docs:
+        cy.checkpoint()
         t = _ts(d.get("ts")) if isinstance(d, dict) else None
         if t is None or (since is not None and t < since) or (until is not None and t >= until):
             continue
@@ -165,6 +167,7 @@ def build_sets(docs: Iterable[dict], rows: Iterable[dict], *, env: str, since: d
     else null)."""
     sets = []
     for d in docs:
+        cy.checkpoint()
         t = _ts(d.get("ts")) if isinstance(d, dict) else None
         if t is None or not env_match(d, env) or outcome_of(d.get("executed")) not in EXECUTED_OUTCOMES:
             continue
@@ -178,6 +181,7 @@ def build_sets(docs: Iterable[dict], rows: Iterable[dict], *, env: str, since: d
         for leg in s["legs"]:
             index.setdefault((leg["ticker"], leg["side"]), []).append(s)
     for r in rows:
+        cy.checkpoint()
         if r.get("strategy") != "arb":
             continue
         cands = [s for s in index.get((r.get("ticker"), r.get("side")), ())

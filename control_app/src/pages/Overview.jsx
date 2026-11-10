@@ -18,6 +18,8 @@ import { useResource } from '../hooks/useResource.js';
 import useRange from '../hooks/useRange.js';
 import useStrategySummary from '../hooks/useStrategySummary.js';
 import { api } from '../services/api.js';
+import BreakerBanner from '../components/BreakerBanner.jsx';
+import { BREAKER_ACK_LABEL, breaker409, isTripped } from '../utils/breaker.js';
 import { riskLimit } from '../utils/status.js';
 import { edgeSummary, headlineParts, headlineTotal } from '../utils/overview.js';
 import { rangeLabel } from '../utils/range.js';
@@ -143,6 +145,23 @@ export default function Overview() {
 
   async function onStart() {
     const mode = (status && status.mode) || 'demo';
+    // After a breaker trip, Start needs an explicit acknowledgement; it is sent as ack_breaker.
+    const ackBreaker = isTripped(status);
+    if (ackBreaker) {
+      const ok = await confirm({
+        title: 'Restart after the breaker tripped?',
+        message: (
+          <>
+            <p>The loss circuit breaker stopped trading. Starting again clears the trip and resets its reference levels to the latest equity.</p>
+            <p className="hint">Stop still works at any time. You will need a 2FA code next.</p>
+          </>
+        ),
+        confirmLabel: 'Continue',
+        requireCheck: BREAKER_ACK_LABEL,
+        danger: true,
+      });
+      if (!ok) return;
+    }
     setBusy('start');
     try {
       const r = await twoFactor({
@@ -156,11 +175,11 @@ export default function Overview() {
           </>
         ),
         confirmLabel: 'Start',
-        action: (code) => api.start(code),
+        action: (code) => api.start(code, { ackBreaker }),
       });
       if (r) notify({ kind: 'ok', title: 'Started', text: `Bot is ${r.desired || 'running'}.` });
     } catch (err) {
-      const why = START_409[err.detail];
+      const why = START_409[err.detail] || breaker409(err);
       notify({ kind: 'error', title: 'Start failed', text: why || err.message, details: why ? undefined : err.details });
     } finally {
       setBusy(null);
@@ -197,6 +216,7 @@ export default function Overview() {
       <h1>Home</h1>
       <SinceCard />
       {status && <Headline state={headlineParts(status)[0]} pnl={head.pnl} range={range} edge={edgeSummary(edge.data)} />}
+      <BreakerBanner breaker={status && status.breaker} onRestart={onStart} busy={!!busy} />
       <StatusCard ref={cardRef} status={status} busy={busy} onStart={onStart} onRunOnce={onRunOnce} />
       <StatusWidget status={status} cardRef={cardRef} />
       {loading && !status && <Loading text="Loading status…" />}

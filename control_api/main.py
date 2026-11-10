@@ -8,9 +8,11 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
+from . import cpuyield
 from .settings import Settings
 
 log = logging.getLogger("control_api")
+STOP_PATH = "/api/bot/stop"
 
 
 def create_app(settings: Settings | None = None, store: Any = None,
@@ -67,6 +69,11 @@ def create_app(settings: Settings | None = None, store: Any = None,
         now = datetime.now(timezone.utc)
         request.app.state.last_inbound_utc = now
         runner.last_inbound_utc = now
+        if request.url.path == STOP_PATH:
+            # Stop is urgent: while it is in flight, Analytics builds step aside at their next checkpoint so the
+            # loop gets the whole CPU share (control_api/cpuyield.py). A counter only; it never raises or blocks.
+            with cpuyield.urgent():
+                return await call_next(request)
         return await call_next(request)
 
     install_security(app, settings)
@@ -82,6 +89,7 @@ def create_app(settings: Settings | None = None, store: Any = None,
     app.include_router(__import__("control_api.routes.preflight", fromlist=["router"]).router)
     app.include_router(__import__("control_api.routes.dayview", fromlist=["router"]).router)
     app.include_router(__import__("control_api.routes.arming", fromlist=["router"]).router)
+    app.include_router(__import__("control_api.routes.breaker", fromlist=["router"]).router)
     return app
 
 

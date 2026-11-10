@@ -250,6 +250,62 @@ function seedRelease(sc) {
 export function setMockScenario(...names) {
   S.scenario = new Set(names.flat());
   S.release = seedRelease(S.scenario);
+  S.breaker = seedBreaker(S.scenario);
+}
+
+const BREAKER_SCHEMA = {
+  live_enabled: { type: 'bool', label: 'Live protection', help: 'Stop and block restarts when a loss limit is reached in live mode.' },
+  demo_enabled: { type: 'bool', label: 'Demo protection', help: 'The same check for demo mode.' },
+  drawdown_frac: { type: 'number', unit: 'share', min: 0.02, max: 0.3, help: 'Stop when equity falls this far below its high-water mark.' },
+  day_loss_frac: { type: 'number', unit: 'share', min: 0.01, max: 0.25, help: "Stop when the day's loss reaches this share of the day's starting equity." },
+};
+const BREAKER_CEILINGS = { drawdown_frac: { min: 0.02, max: 0.3 }, day_loss_frac: { min: 0.01, max: 0.25 } };
+const BREAKER_DEFAULTS = { live_enabled: true, demo_enabled: false, drawdown_frac: 0.15, day_loss_frac: 0.1 };
+
+// Scenario names: breaker-tripped, breaker-warning, breaker-unreadable.
+function seedBreaker(scn) {
+  const tripped = scn.has('breaker-tripped');
+  return {
+    settings: { ...BREAKER_DEFAULTS, updated: iso(now() - 3 * 24 * 60 * MIN), by: 'owner' },
+    trip: tripped
+      ? { reason: 'drawdown', limits: { drawdown_frac: 0.15, day_loss_frac: 0.1 }, env: 'demo', utc: iso(now() - 90 * MIN), equity: 205, hwm: 250, drawdown: 45, drawdown_frac: 0.15, source: 'maker' }
+      : null,
+    warning: scn.has('breaker-warning') ? 'Equity reading was missing on the last pass, so the check was skipped.' : null,
+    readable: !scn.has('breaker-unreadable'),
+  };
+}
+
+function breakerEnv(on) {
+  return { enabled: on, hwm: 250, hwm_utc: iso(now() - 5 * 24 * 60 * MIN), drawdown: 12.5, drawdown_share: 0.05, day: iso(now()).slice(0, 10), day_start_equity: 245, day_loss: 7.5, day_loss_share: 0.0306, last_equity: 237.5, last_utc: iso(now() - 4 * MIN) };
+}
+
+function breakerState() {
+  const b = S.breaker;
+  const st = b.settings;
+  return {
+    readable: b.readable,
+    tripped: !!b.trip,
+    warning: b.warning,
+    env: S.mode,
+    trip: b.trip,
+    envs: b.readable ? { live: breakerEnv(st.live_enabled), demo: breakerEnv(st.demo_enabled) } : { live: null, demo: null },
+  };
+}
+
+function breakerResponse() {
+  return { settings: S.breaker.settings, schema: BREAKER_SCHEMA, ceilings: BREAKER_CEILINGS, defaults: BREAKER_DEFAULTS, state: breakerState() };
+}
+
+function breakerStatus() {
+  const b = S.breaker;
+  return {
+    tripped: !!b.trip,
+    reason: b.trip ? b.trip.reason : null,
+    utc: b.trip ? b.trip.utc : null,
+    enabled: !!b.settings[`${S.mode}_enabled`],
+    readable: b.readable,
+    warning: b.warning,
+  };
 }
 
 function initialState() {
@@ -267,6 +323,7 @@ function initialState() {
     summary,
     report: reportText(summary),
     cloud: { keepalive_minutes: 10, pinger_minutes: 5, pinger_enabled: true, silent_alert_minutes: 30, shadow_enabled: true, shadow_capital: 150 },
+    breaker: seedBreaker(readScenario()),
     periods: [],
     cashFlows: [],
     pinger: { configured: true, job_id: 5813377, synced: true, last_sync_utc: iso(now() - 2 * 60 * MIN), error: null },
@@ -454,6 +511,7 @@ function status() {
     pnl_total: { d7: 5.73, d30: 19.52 },
     expected_roi: null,
     queue_stats: queueStats(),
+    breaker: breakerStatus(),
     arb: { state: arbState(), last_scan_utc: arbState() !== 'stopped' ? iso(now() - 9 * 1000) : null },
     // UX contract section 5 additions (read-only).
     pnl_today: { maker: 1.4, arb: 0.35, you: -0.8, bot: 1.75, total: 0.95 },
@@ -690,6 +748,11 @@ async function route(method, url, headers, body) {
   if (method === 'POST' && p === '/api/bot/start') {
     const bad = check2fa(headers);
     if (bad) return bad;
+    if (S.breaker.trip && !(body && body.ack_breaker === true)) return reply(409, { detail: 'breaker_tripped' });
+    if (S.breaker.trip) {
+      S.breaker.trip = null;
+      audit('breaker.ack', true, null);
+    }
     S.desired = 'running';
     S.kill_switch = false;
     S.last_error = null;
@@ -886,6 +949,26 @@ async function route(method, url, headers, body) {
     }
   }
 
+  if (method === 'GET' && p === '/api/breaker') return reply(200, breakerResponse());
+  if (method === 'PUT' && p === '/api/breaker') {
+    const bad = check2fa(headers);
+    if (bad) return bad;
+    const patch = body || {};
+    const errs = [];
+    for (const [k, v] of Object.entries(patch)) {
+      const sc = BREAKER_SCHEMA[k];
+      if (!sc) errs.push(`unknown field ${k}`);
+      else if (sc.type === 'bool') {
+        if (typeof v !== 'boolean') errs.push(`${k} must be true or false`);
+      } else if (typeof v !== 'number' || !Number.isFinite(v) || v < sc.min || v > sc.max) {
+        errs.push(`${k} must be between ${sc.min} and ${sc.max}`);
+      }
+    }
+    if (errs.length) return reply(400, { detail: errs });
+    S.breaker.settings = { ...S.breaker.settings, ...patch, updated: iso(now()), by: 'owner' };
+    audit('breaker.set', true, patch);
+    return reply(200, breakerResponse());
+  }
   if (method === 'GET' && p === '/api/cloud') return reply(200, cloudResponse());
   if (method === 'PUT' && p === '/api/cloud') {
     const bad = check2fa(headers);
@@ -1008,6 +1091,8 @@ async function route(method, url, headers, body) {
     const ack = patch.ack_legging;
     delete patch.confirm;
     delete patch.ack_legging;
+    const ackBreaker = patch.ack_breaker;
+    delete patch.ack_breaker;
     const errs = [];
     for (const [k, v] of Object.entries(patch)) {
       if (k === 'enabled' || k === 'live') {
@@ -1029,6 +1114,11 @@ async function route(method, url, headers, body) {
     if (patch.live === true) {
       if (confirm !== 'LIVE') return reply(400, { detail: ['type LIVE to confirm arbitrage live'] });
       if (!S.live_allowed) return reply(409, { detail: 'live_not_allowed' });
+    }
+    if (patch.enabled === true && S.breaker.trip && ackBreaker !== true) return reply(409, { detail: 'breaker_tripped' });
+    if (patch.enabled === true && S.breaker.trip) {
+      S.breaker.trip = null;
+      audit('breaker.ack', true, null);
     }
     if (patch.enabled === true && S.arb.kill_reason === 'legging' && !ack) {
       return reply(409, { detail: 'arb_legging_kill' });

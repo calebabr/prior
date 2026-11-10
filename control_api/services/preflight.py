@@ -41,7 +41,7 @@ RECON_REPORT_MAX_AGE_H = 36                     # a daily report older than this
 AUDIT_SCAN = 500                                # newest audit rows searched for the last approved release
 DETAIL_MAX = 300
 # Checks that only gate real money: on target=demo a "fail" here is shown as "warn".
-LIVE_ONLY = frozenset({"strategy", "live_gate", "release", "reconciliation"})
+LIVE_ONLY = frozenset({"strategy", "live_gate", "release", "reconciliation", "breaker"})
 
 LABELS = {
     "keys": "Kalshi keys for the target environment",
@@ -57,6 +57,7 @@ LABELS = {
     "kill_switch": "No kill switch active",
     "stop_path": "Stop path writable",
     "arb_paused": "No series paused by arbitrage containment",
+    "breaker": "Loss/drawdown circuit breaker on for live",
     "alerts": "Alert channel configured",
     "release": "Approved release is the running version",
     "reconciliation": "Reconciliation residual within $0.10",
@@ -285,6 +286,25 @@ def check_arb_paused(runner: Any) -> tuple[str, str]:
     return _res(PASS, "no series paused (this process's memory, rebuilt from the store on the first scan)")
 
 
+def check_breaker(runner: Any) -> tuple[str, str]:
+    """L1: fail when the live breaker is off or its state cannot be read; warn while it is tripped (Start then needs
+    fresh 2FA plus the acknowledgement). Memory only (the runner's copy of the stored state)."""
+    st = runner.breaker_status(full=True)
+    cfg = runner.breaker_settings()
+    if not st.get("readable"):
+        return _res(FAIL, "breaker state cannot be read (database); checks are being skipped")
+    if cfg.get("live_enabled") is not True:
+        return _res(FAIL, "the live circuit breaker is switched off")
+    limits = (f"drawdown {float(cfg['drawdown_frac']) * 100:.1f}% of the high-water mark, day loss "
+              f"{float(cfg['day_loss_frac']) * 100:.1f}% of the day's starting equity")
+    if st.get("tripped"):
+        why = (st.get("trip") or {}).get("reason") or "unknown"
+        return _res(WARN, f"tripped ({why}); Start needs fresh 2FA and the acknowledgement. Limits: {limits}")
+    if st.get("warning"):
+        return _res(WARN, f"on ({limits}); {st['warning']}")
+    return _res(PASS, f"on for live: {limits}")
+
+
 def check_alerts(settings: Any, push_count: int | None) -> tuple[str, str]:
     ntfy = bool(getattr(settings, "ntfy_topic", None))
     vapid = bool(getattr(settings, "vapid_private_key", None))
@@ -511,6 +531,7 @@ async def run_preflight(target: str, *, runner: Any, store: Any, settings: Any, 
     run("kill_switch", lambda: check_kill_switch(runner))
     run("stop_path", lambda: check_stop_path(runner))
     run("arb_paused", lambda: check_arb_paused(runner))
+    run("breaker", lambda: check_breaker(runner))
     run("alerts", lambda: check_alerts(settings, push if push_ok else None))
     run("release", lambda: check_release(rel, ver.API_VERSION) if rel_ok
         else _res(FAIL, f"release read failed: {rel}"))

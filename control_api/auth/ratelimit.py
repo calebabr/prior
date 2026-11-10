@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import math
 import time
@@ -80,9 +81,22 @@ class SlidingWindowLimiter:
             self._hits.clear()
 
 
+_KEY_SECRET: bytes = b""
+
+
+def configure_key_secret(secret: "str | bytes | None") -> None:
+    """Key the counter hashes with a server secret (the JWT secret, the same on every instance), so stored keys
+    cannot be reversed by hashing guessed IP addresses. Unset (tests, tools): plain unkeyed hashing, as before."""
+    global _KEY_SECRET
+    _KEY_SECRET = secret.encode("utf-8") if isinstance(secret, str) else (secret or b"")
+
+
 def counter_key(bucket: str, key: str) -> str:
     """Stable, hashed store key for (bucket, client key): the same on every instance, no raw IP / username."""
-    return hashlib.sha256(f"ratelimit\x00{bucket}\x00{key}".encode("utf-8", "replace")).hexdigest()[:40]
+    msg = f"ratelimit\x00{bucket}\x00{key}".encode("utf-8", "replace")
+    if _KEY_SECRET:
+        return hmac.new(_KEY_SECRET, msg, hashlib.sha256).hexdigest()[:40]
+    return hashlib.sha256(msg).hexdigest()[:40]
 
 
 def sliding_estimate(cur: int, prev: int, elapsed: float, window: float) -> float:
@@ -172,16 +186,20 @@ def _limited(retry: int) -> HTTPException:
     return HTTPException(status_code=429, detail="rate_limited", headers={"Retry-After": str(max(1, int(retry)))})
 
 
-async def check(request: Request, bucket: str, key: str, limit: tuple[int, float] | None = None) -> None:
+async def check(request: Request, bucket: str, key: str, limit: tuple[int, float] | None = None,
+                local_only: bool = False) -> None:
     """Count one attempt for ``key`` in ``bucket``; raise 429 ``rate_limited`` (Retry-After) if either layer is over.
 
-    ``limit`` registers the bucket's (max, window) the first time it is seen (the route's own constant)."""
+    ``limit`` registers the bucket's (max, window) the first time it is seen (the route's own constant).
+    ``local_only`` skips the shared store counter (for a safety action such as Disarm that must never wait on the store)."""
     lim = get_limiter(request)
     if limit is not None:
         lim.limits.setdefault(bucket, limit)
     ok, retry = lim.hit(bucket, key)
     if not ok:                      # refused locally: no store write (a flood never reaches Atlas)
         raise _limited(retry)
+    if local_only:
+        return
     n, window = lim.limits[bucket]
     shared_ok, retry = await get_shared(request).hit(getattr(request.app.state, "store", None), bucket, key,
                                                      int(n), float(window))
@@ -189,9 +207,10 @@ async def check(request: Request, bucket: str, key: str, limit: tuple[int, float
         raise _limited(retry)
 
 
-async def check_user(request: Request, user: dict, bucket: str, limit: tuple[int, float]) -> None:
+async def check_user(request: Request, user: dict, bucket: str, limit: tuple[int, float],
+                     local_only: bool = False) -> None:
     """Per-user bucket (the authenticated username), as the route helpers use."""
-    await check(request, bucket, "user:" + str(user.get("username") or "?"), limit)
+    await check(request, bucket, "user:" + str(user.get("username") or "?"), limit, local_only=local_only)
 
 
 async def enforce(request: Request, bucket: str) -> None:

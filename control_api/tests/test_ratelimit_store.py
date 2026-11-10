@@ -313,3 +313,48 @@ async def test_stop_never_counts_against_or_waits_for_the_limiter(shared):
         r = await asyncio.wait_for(c.post("/api/bot/stop", headers=auth), 5)
         assert r.status_code == 200
     assert calls == [] and app.state.runner.desired == "stopped"
+
+
+def test_counter_keys_are_keyed_with_the_server_secret_and_stable_across_instances():
+    from control_api.auth import ratelimit as rl
+    rl.configure_key_secret(None)
+    try:
+        plain = rl.counter_key("login", "203.0.113.9")
+        rl.configure_key_secret("secret-one")
+        k1 = rl.counter_key("login", "203.0.113.9")
+        assert k1 == rl.counter_key("login", "203.0.113.9")          # same secret: same key on every instance
+        assert k1 != plain                                           # not the plain hash of the address
+        rl.configure_key_secret("secret-two")
+        assert rl.counter_key("login", "203.0.113.9") != k1          # a different secret gives different keys
+        assert "203.0.113.9" not in k1 and len(k1) == 40
+        assert rl.counter_key("login", "203.0.113.10") != rl.counter_key("login", "203.0.113.9")
+    finally:
+        rl.configure_key_secret(None)                                # leave the module as the other tests expect it
+
+
+async def test_local_only_check_never_touches_the_shared_counter():
+    """Disarm uses the in-memory limit only: a hung store must not delay it."""
+    from types import SimpleNamespace
+    from control_api.auth import ratelimit as rl
+
+    class Boom:
+        async def hit(self, *a, **k):
+            raise AssertionError("the shared counter must not be called")
+    app = SimpleNamespace(state=SimpleNamespace(store=object(), ratelimit=rl.RateLimiter() if hasattr(rl, "RateLimiter") else None,
+                                                  ratelimit_shared=Boom()))
+    req = SimpleNamespace(app=app, client=SimpleNamespace(host="198.51.100.7"), headers={})
+    orig_limiter, orig_shared = rl.get_limiter, rl.get_shared
+    rl.get_limiter = lambda r: _LocalLimiter()
+    rl.get_shared = lambda r: Boom()
+    try:
+        await rl.check(req, "disarm-test", "user:o", (5, 60.0), local_only=True)      # no AssertionError
+    finally:
+        rl.get_limiter, rl.get_shared = orig_limiter, orig_shared
+
+
+class _LocalLimiter:
+    def __init__(self):
+        self.limits = {}
+
+    def hit(self, bucket, key):
+        return True, 0

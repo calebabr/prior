@@ -76,6 +76,10 @@ def create_app(settings: Settings | None = None, store: Any = None,
                 return await call_next(request)
         return await call_next(request)
 
+    # Key the shared rate-limit counter hashes with the JWT secret (same on every instance): stored keys then cannot
+    # be reversed by hashing guessed IP addresses.
+    from .auth import ratelimit as _rl
+    _rl.configure_key_secret(settings.jwt_secret)
     install_security(app, settings)
 
     @app.get("/healthz")

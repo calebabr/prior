@@ -40,8 +40,9 @@ class ArmingIn(BaseModel):
     armed: bool = Field(strict=True)
 
 
-async def _rate_limit(request: Request, user: dict, bucket: str = BUCKET, limit: tuple = LIMIT) -> None:
-    await check_user(request, user, bucket, limit)
+async def _rate_limit(request: Request, user: dict, bucket: str = BUCKET, limit: tuple = LIMIT,
+                      local_only: bool = False) -> None:
+    await check_user(request, user, bucket, limit, local_only=local_only)
 
 
 async def live_recheck(request: Request, *, user: dict, action: str, details: dict | None = None) -> None:
@@ -80,7 +81,7 @@ async def put_arming(request: Request, user: dict = Depends(current_user)) -> di
     by = str(user.get("username") or "user")
     details = {"strategy": body.strategy, "armed": body.armed}
     if not body.armed:
-        await _rate_limit(request, user, DISARM_BUCKET, DISARM_LIMIT)
+        await _rate_limit(request, user, DISARM_BUCKET, DISARM_LIMIT, local_only=True)   # Disarm never waits on the store
         res = await r.set_armed(body.strategy, False, by=by)
         await audit(request, "arming.set", ok=True, user=user,
                     details={**details, "persisted": res["persisted"], "cancelled": res["cancelled"]})

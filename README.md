@@ -41,6 +41,7 @@ far careful AI-assisted development could take a project like this. My workflow 
 - **Run and supervise from a phone** – Start, Stop, mode (demo or live), settings, logs, activity and account state in
   an installable PWA (`docs/PHONE.md`)
 - **Stop always works** – One tap, no 2FA, and it does not depend on the database, the exchange or the network
+- **Circuit breaker** – Stops everything on its own when equity falls past an owner-set drawdown or daily-loss limit (on by default in live, off in demo); restarting after a trip needs fresh 2FA and an explicit acknowledgement (`docs/API.md`)
 - **Shadow mode** – Estimates what the strategy would have quoted on public market data without placing orders
   (`docs/SHADOW_CONTRACT.md`)
 - **Demo periods** – Named evaluation windows with cash flows tracked per period, so results are never mixed across
@@ -188,6 +189,8 @@ verified within the last few minutes. Request and response details for the perio
 - `PUT /api/mode` – Switch demo or live (fresh 2FA; live also needs a typed confirmation and a server gate)
 - `POST /api/tick` – External keep-awake and scheduler tick (`X-Tick-Token` header, no session)
 - `POST /api/monitor/run` – Run the periodic health check
+- `GET /api/breaker`, `PUT /api/breaker` – Circuit breaker settings, ceilings and live state (write: fresh 2FA); `status.breaker` shows a trip, and Start or arbitrage enable then need `ack_breaker`
+- `GET /api/arming`, `PUT /api/arming` – Live arming (arm: fresh 2FA; disarm: session only); `GET /api/preflight` – live readiness checks
 
 ### Settings
 - `GET /api/config`, `PUT /api/config` – Read, or validate and atomically write, the bot settings (write: fresh 2FA)
@@ -235,11 +238,14 @@ verified within the last few minutes. Request and response details for the perio
 1. The runner wakes on its timer or on an external tick and checks that it holds the leader lease and is not stopped.
 2. It reads account state, calls the installed strategy for the quotes it wants, and applies the shared risk gate:
    caps on total exposure, per-category exposure, and per-scan and per-day spend, failing closed on unreadable inputs.
-3. It places or cancels orders, writes the journal and a heartbeat, and sends alerts for anything notable.
+3. It places or cancels orders, writes the journal and a heartbeat, and sends alerts for anything notable. The order step
+   has a hard time limit (25 s by default); a pass that hits it is recorded as `pass_timeout`, and the alert is sent only
+   when two passes in a row time out.
 
 ### Stop
 Stop sets in-memory kill flags first, then cancels resting orders, then persists the stopped state. It runs on its own
-executor, so a slow database or exchange cannot delay it, and it works with no network.
+executor, so a slow database or exchange cannot delay it, and it works with no network. Its store reads and its response
+wait are cut to about half a second, Analytics builds pause while it runs, and it is never rate limited.
 
 ### Release with a lease handover
 The release workflow registers a pending release, waits for my approval with a fresh 2FA code, passes a safety gate,
@@ -258,6 +264,9 @@ assumptions, and scores them when the market settles.
 - **Start, live mode and settings changes** require a fresh TOTP 2FA code. Live mode also needs a typed confirmation
   and a server-side environment gate.
 - **Live is never restored automatically** after a restart: the runner comes back in demo and alerts me.
+- **Circuit breaker:** a drawdown or daily-loss limit runs the normal full Stop, persists the trip and sends an urgent
+  alert; it survives restarts and needs fresh 2FA plus an acknowledgement to clear.
+- **Rate limits** are shared through the store with keyed-hash counters, answer 429 and never block Stop.
 - **Live refused without the real strategy:** while the public stand-in is installed, the API rejects live mode with
   `strategy_not_installed`.
 - **Account-level risk gate** caps total exposure, per-category exposure and per-scan and per-day spend, and fails
@@ -283,10 +292,11 @@ All variables are listed with placeholders in `deploy/env.example`; real values 
 - **Storage:** `STORE`, `MONGODB_URI`, `MONGODB_DB`
 - **Auth:** `JWT_SECRET`, `TOTP_ENC_KEY`, `ALLOWED_ORIGIN`, `DEV_MODE`
 - **Scheduler and alerts:** `TICK_TOKEN`, `CRONJOB_API_KEY`, `PUBLIC_URL`, `NTFY_TOPIC`, `NTFY_SERVER`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (Web Push, see `docs/DEPLOY.md`)
-- **Runner limits:** `RUNNER_ENABLED`, `MAX_RUN_BUDGET`, `MAX_OPEN_FRAC`, `MAX_POLL_MINUTES`, `MAX_ARB_CONTRACTS`
+- **Runner limits:** `RUNNER_ENABLED`, `MAX_RUN_BUDGET`, `MAX_OPEN_FRAC`, `MAX_POLL_MINUTES`, `MAX_ARB_CONTRACTS`, `PASS_BUDGET_S` (order-step time limit, default 25)
 - **Kalshi:** `KALSHI_DEMO_*` and `KALSHI_PROD_*` key ids and private keys, `KALSHI_LIVE_CONFIRM`
 - **Release:** `APP_VERSION`, `HANDOVER_HMAC_KEY`, `DEPLOY_STATUS_KEY`, `RELEASE_TOKEN`
-- **Shadow and overlay:** `SHADOW_ENABLED`, `PRIVATE_REPO_TOKEN`, `PRIVATE_REPO_REF`
+- **Monitoring:** `HEALTHCHECKS_PING_URL` (optional dead-man switch, see `docs/MONITORING.md`)
+- **Shadow and overlay:** `SHADOW_ENABLED`, `PRIVATE_REPO_TOKEN`, `PRIVATE_REPO_REF` (set to a commit SHA for each release)
 
 Generate the secrets with `python -m control_api.auth.bootstrap --gen-keys`. Never commit real values.
 
@@ -314,10 +324,12 @@ marked `slow`; skip them while iterating with `-m "not slow"`, but run everythin
 | Doc | What it covers |
 |---|---|
 | `docs/DEPLOY.md` | Step-by-step runbook: Atlas, secrets, Render, Vercel, cron-job.org, ntfy, first demo run, updating, rollback, troubleshooting |
-| `docs/ARCHITECTURE.md` | System diagram and data flows |
-| `docs/API.md` | Request and response details for the periods and cash-flow endpoints; the endpoint list above covers the rest |
+| `docs/ARCHITECTURE.md` | System diagram and data flows, including Stop, the circuit breaker, the pass time limit and the caches |
+| `docs/API.md` | Request and response details for the periods, cash-flow, circuit breaker and Stop/rate-limit/cache behaviour; the endpoint list above covers the rest |
+| `docs/MONITORING.md`, `docs/BACKUP_RESTORE.md` | External monitoring setup, weekly backup, restore and rebuild drills |
+| `docs/load-tests/README.md` | The load and contention test suite and how to run it |
 | `docs/PHONE.md` | Installing the PWA and what each screen does |
-| `docs/RELEASE_PROCESS.md` | CI/CD, release workflow, lease handover, compatibility rules |
+| `docs/RELEASE_PROCESS.md` | CI/CD, release workflow (only the tip of `main` can be released), lease handover, compatibility rules |
 | `docs/SHADOW_CONTRACT.md`, `docs/ANALYTICS_CONTRACT.md` | Design and interface of Shadow mode, and what the analytics endpoints return |
 | `deploy/*.md` | Per-service setup notes (Atlas, Vercel, cron-job.org, release secrets, private overlay, optional VM) |
 | `CONTRIBUTING.md`, `CHANGELOG.md` | Commit conventions and release notes |

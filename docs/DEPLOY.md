@@ -43,9 +43,11 @@ Demo only: Kalshi **demo** keys, no real money. Keep every secret in a password 
 | `ALLOWED_ORIGIN` | step 7 (Vercel URL) | no |
 | `CRONJOB_API_KEY` | step 8 | yes |
 | `PRIVATE_REPO_TOKEN` | step 9 (build time) | yes |
-| `PRIVATE_REPO_REF` | optional, default `main`; for live set a tag or full commit SHA (see Maintenance) | no |
+| `PRIVATE_REPO_REF` | default `main` only until the first release; before every release set it to the private repo's full commit SHA (see Maintenance) | no |
 | `KALSHI_PROD_*`, `KALSHI_LIVE_CONFIRM` | leave empty until going live | yes |
 | `PUBLIC_URL` | leave empty (Render sets it) | no |
+| `HEALTHCHECKS_PING_URL` | optional, after the first release; the healthchecks.io ping URL (`docs/MONITORING.md`) | yes |
+| `PASS_BUDGET_S` | optional, default 25: the time limit of one maker order step | no |
 
 Never set `DEV_MODE=true` on Render.
 
@@ -220,7 +222,7 @@ Start in **demo** mode. Do not create a production Kalshi key until step 15 is d
     - Auto-deploy is off: ship with the `release` workflow (see `docs/RELEASE_PROCESS.md`). To roll back, redeploy an earlier deploy in Render (Events tab).
     - After rotating `TICK_TOKEN`, press Sync on the Server page.
     - **Adding or upgrading a Python package:** edit `control_api/requirements.in`, regenerate both locks with the command in the header of the `.in` files (needs `uv`; Python 3.11 target), commit `requirements.txt` and `requirements-dev.txt`. Never hand-edit them. Installs always use `pip install --require-hashes --only-binary :all: --no-deps -r ...`.
-    - **Pin the private strategy per release (SC-7).** The overlay is fetched by Render at build time, not by a GitHub workflow, and the release workflow's deploy hook can only carry the public SHA, so the private half cannot be pinned from CI. Before approving a release, set `PRIVATE_REPO_REF` in the Render environment to the private repo's tag or full 40-character commit SHA you reviewed (the fetch script accepts both), then run the release. The build log prints `private commit: <sha>`; check it matches. Leaving `main` means whatever is newest on the private `main` ships.
+    - **Pin the private strategy per release (SC-7).** The overlay is fetched by Render at build time, not by a GitHub workflow, and the release workflow's deploy hook can only carry the public SHA, so the private half cannot be pinned from CI. Before every release, set `PRIVATE_REPO_REF` in the Render environment to the private repo's full 40-character commit SHA you reviewed (the fetch script also accepts a tag), then run the release. Saving the variable restarts the service, so do it while the bot is stopped or accept one graceful handover. The build log prints `private commit: <sha>`; check it matches. Leaving `main` means whatever is newest on the private `main` ships.
     - **Install scripts are off.** CI and Vercel install with `npm ci --ignore-scripts` (set as `installCommand` in `control_app/vercel.json`); no current package needs an install script. If a future dependency does, the build will fail visibly rather than run it silently.
     - **Python advisory check.** The `advisories` job in the tests workflow queries OSV for every pinned package (`scripts/check_advisories.py`). It is non-blocking: a red job means a pinned package has a published fix, so refresh the lock. Review exceptions go in `scripts/advisory_allowlist.txt` (id plus a mandatory reason comment). Also turn on Dependabot security updates in the repo settings (Settings > Code security).
     - Atlas pauses after 30 days inactive: log in and Resume.
@@ -244,7 +246,8 @@ Use this for a clean performance window (for example Period 2).
 - **Restore drill** (into a database whose name contains `scratch`, never the live one) and the **rebuild-from-scratch
   drill** (new Render + Atlas + Vercel from the repo and your env list): checklists and a results template in
   `docs/BACKUP_RESTORE.md`. Do the restore drill before the live date and quarterly after it.
-- New optional Render env var: `HEALTHCHECKS_PING_URL` (secret, see `deploy/env.example`).
+- New optional Render env var: `HEALTHCHECKS_PING_URL` (secret, see `deploy/env.example`). The app pings it after each keep-awake cycle (plain URL when healthy, `/fail` when the bot is running but has produced no pass for `silent_alert_minutes`); a stopped bot never raises a false alarm.
+- **Load tests:** `docs/load-tests/README.md` (local run needs no accounts; the remote form runs only against a demo-only deploy with `--confirm-demo`). Run it again after each large release (it refuses a live-capable deploy).
 
 ## Emergency stop without the app
 
@@ -269,6 +272,9 @@ Use if the app, Vercel or your phone login is unavailable.
 | Start refused with `stop_in_progress` / `stopped_during_start` | A Stop was running or happened during Start (Stop always wins); wait a few seconds and Start again. |
 | App cannot reach the API after a fresh Vercel deploy | The CSP in `control_app/vercel.json` still has the placeholder origin (step 8). |
 | Start refused | Check that the store is up (Start fails safe without it). |
+| Start or arbitrage enable refused with 409 `breaker_tripped` | The circuit breaker tripped (urgent alert, red banner on Home). Look at the account first, then Start with fresh 2FA and tick the acknowledgement box. Limits are under Settings > Circuit Breaker. |
+| "Trading pass error" alert mentioning `pass_timeout` | Kalshi was slow or dropping connections and the order step hit its 25 s limit. One is logged only; the alert comes from the second in a row. The next pass carries on by itself; if it repeats, check Kalshi's status page and press Stop if unsure. |
+| 429 `rate_limited` | Too many requests from one place; wait for `Retry-After`. Stop is never limited. |
 | Live mode refused ("live_not_allowed") | Prod key or `KALSHI_LIVE_CONFIRM` missing in Render. |
 | Heartbeat age grows | Service asleep or crashed; check Render logs and the cron-job.org execution history. |
 | Render region has no free plan | Edit `region` in `render.yaml` to `ohio` or `oregon`. |

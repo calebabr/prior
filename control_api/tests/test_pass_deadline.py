@@ -16,7 +16,7 @@ from control_api.runner import Runner
 
 pytestmark = pytest.mark.asyncio
 
-EXIT = 3
+EXIT = 3                      # must equal the runner's PASS_TIMEOUT_RC
 
 
 class Alerter:
@@ -67,7 +67,6 @@ def hooks(monkeypatch, bot_paths):
     h = Hooks()
     monkeypatch.setattr(ms, "set_pass_deadline", h.set, raising=False)
     monkeypatch.setattr(ms, "clear_pass_deadline", h.clear, raising=False)
-    monkeypatch.setattr(ms, "PASS_DEADLINE_EXIT", EXIT, raising=False)
     return ms, h
 
 
@@ -115,7 +114,7 @@ async def test_deadline_cleared_when_main_raises(settings, kalshi, demo_keys, ho
 async def test_strategy_without_deadline_hooks_runs_as_before(settings, kalshi, demo_keys, bot_paths, monkeypatch):
     from control_api.services import botfiles
     ms = botfiles.strategy()
-    for name in ("set_pass_deadline", "clear_pass_deadline", "PASS_DEADLINE_EXIT"):
+    for name in ("set_pass_deadline", "clear_pass_deadline"):
         monkeypatch.delattr(ms, name, raising=False)
     ran = []
     monkeypatch.setattr(ms, "main", lambda: ran.append(1) or 0)
@@ -234,3 +233,8 @@ async def test_stop_and_arb_pool_unaffected_while_the_deadline_thread_is_blocked
     await asyncio.wait_for(task, 10)
     assert h.calls[-1][0] == "clear"
     await r.shutdown()
+
+
+def test_the_runner_exit_code_contract_is_three():
+    from control_api import runner
+    assert runner.PASS_TIMEOUT_RC == EXIT == 3

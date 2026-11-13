@@ -4,6 +4,7 @@
 
 - **Data worth keeping** lives only in MongoDB Atlas: fills, settlements, journal rows, heartbeats, snapshots,
   config versions, periods, cash flows, reconciliation reports, alert history, shadow data, audit log.
+- The circuit breaker settings and trip state live in the cloud-settings document and are included in the export. The `rate_limits` counters (short-lived, TTL) are also exported but are safe to lose; they rebuild themselves.
 - **Not in the database, so nothing to back up:** Kalshi keys and every other secret (Render environment only;
   keep them in your password manager), the code (GitHub), the app (Vercel).
 - Atlas **M0 has no continuous or snapshot backups** (those start at M10). Your backup is the export below, which

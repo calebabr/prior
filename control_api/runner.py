@@ -451,13 +451,17 @@ def _pass_deadline_hooks(ms: Any) -> tuple[Callable | None, Callable | None]:
     return (s, c) if callable(s) and callable(c) else (None, None)
 
 
+PASS_TIMEOUT_RC = 3                 # the order step's exit code when the strategy stopped at the pass time limit
+
+
 def _is_pass_timeout(ms: Any, rc: Any = None, exc: BaseException | None = None) -> bool:
-    """The order step stopped at the pass time limit: the strategy's PASS_DEADLINE_EXIT code, or its client's
-    PassDeadlineExceeded escaping main(). A strategy without the limit never matches."""
+    """The order step stopped at the pass time limit: the strategy exited with PASS_TIMEOUT_RC, or its client's
+    PassDeadlineExceeded escaping main(). Only a strategy that has the time-limit hooks can match: for any other
+    strategy (the stand-in, an older overlay) the same exit code stays a plain failure."""
     if exc is not None:
         return getattr(exc, "pass_deadline", False) is True
-    code = getattr(ms, "PASS_DEADLINE_EXIT", None)
-    return isinstance(code, int) and not isinstance(code, bool) and code != 0 and rc == code
+    setter, _clear = _pass_deadline_hooks(ms)
+    return setter is not None and isinstance(rc, int) and not isinstance(rc, bool) and rc == PASS_TIMEOUT_RC
 
 
 class PassTimeout(RuntimeError):

@@ -55,8 +55,9 @@ into chat, git or a screenshot: anyone who has it can fake a healthy signal.
    integration instead and keep the ntfy app for the in-app alerts.)
 6. Open the check > **Integrations** tab and make sure the new ntfy integration is switched on for this check.
 7. Render dashboard > `kalshi-control` > **Environment** > add `HEALTHCHECKS_PING_URL` = the ping URL. Save (Render
-   redeploys; wait for green). The backend change that sends the pings is described in
-   `docs/agent-reports/2026-11-09-w1-infra.md` (hook for the backend agent); until it ships the variable is ignored.
+   redeploys; wait for green). The app sends the pings itself, once after each keep-awake cycle: the plain URL when
+   healthy, `<URL>/fail` when the bot is set to run but has produced no pass for `silent_alert_minutes`. A stopped bot
+   sends the plain URL, so pressing Stop never raises a false alarm.
 8. *Check:* within 15 minutes the check turns green ("up") and shows recent pings. To test the alarm: Render >
    Suspend service for 30 minutes; you must get a DOWN alert. Resume afterwards. (Do this when the bot is stopped.)
 

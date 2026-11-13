@@ -27,6 +27,11 @@ If the app looks out of date, close and reopen it, or tap the update banner ("A 
 
 If you get "session expired" at login, all sessions were logged out; just log in again.
 
+## Circuit breaker (Settings)
+The **Circuit Breaker** card in **More > You > Settings** sets two limits: the drawdown from your account's high-water mark and the loss since midnight (New York time), both as percentages of equity. It is on for live and off for demo by default. When a limit is reached the app runs the normal **Stop**, sends an **urgent alert**, and shows a **red banner on Home** saying which limit and when. It stays tripped across restarts.
+
+To start again: look at the account first, then tap **Start**, tick **the acknowledgement checkbox** and enter a fresh 2FA code. Changing a limit also needs a fresh code. If the card shows a warning (for example "cannot read state"), the breaker is skipping its check until the data is readable; Stop still works.
+
 ## Push notifications on iPhone (step by step)
 Push only works from the Home Screen app, not from a normal browser tab. iOS 16.4 or newer is needed.
 1. Open the app URL in Safari (or Chrome) on the iPhone.

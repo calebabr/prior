@@ -444,6 +444,31 @@ def _scanner_takes(scanner: Any, name: str) -> bool:
         return False
 
 
+def _pass_deadline_hooks(ms: Any) -> tuple[Callable | None, Callable | None]:
+    """(set_pass_deadline, clear_pass_deadline) of the installed strategy, or (None, None) when it has no whole-pass
+    time limit (the stand-in or an older overlay): feature-detected, never required."""
+    s, c = getattr(ms, "set_pass_deadline", None), getattr(ms, "clear_pass_deadline", None)
+    return (s, c) if callable(s) and callable(c) else (None, None)
+
+
+def _is_pass_timeout(ms: Any, rc: Any = None, exc: BaseException | None = None) -> bool:
+    """The order step stopped at the pass time limit: the strategy's PASS_DEADLINE_EXIT code, or its client's
+    PassDeadlineExceeded escaping main(). A strategy without the limit never matches."""
+    if exc is not None:
+        return getattr(exc, "pass_deadline", False) is True
+    code = getattr(ms, "PASS_DEADLINE_EXIT", None)
+    return isinstance(code, int) and not isinstance(code, bool) and code != 0 and rc == code
+
+
+class PassTimeout(RuntimeError):
+    """The order step stopped at the whole-pass time limit (pass_budget_s): one failed pass, alerted only when two
+    passes in a row time out."""
+
+
+PASS_TIMEOUT_ALERT_AFTER = 2         # consecutive timed-out passes before a "Trading pass error" alert
+_ORDER_STEP = threading.local()      # .deadline: the running order step's deadline, in its own worker thread only
+
+
 def _scanner_can_complete(scanner: Any) -> bool:
     """The installed arb_scanner.execute takes `complete` (an older overlay without it never completes)."""
     return _scanner_takes(scanner, "complete")
@@ -584,6 +609,7 @@ class Runner:
         self._schema_alerted = False
         self._shutting_down = False
         self._strategy_running = False    # the order step (maker_strategy.main in its thread) is executing
+        self.pass_timeouts_in_row = 0     # whole-pass time limit: consecutive passes that stopped at pass_budget_s
         self._state_seen_utc: Any = None  # updated_utc of the stored state last applied (remote-Stop detection)
         self._start_epoch = 0             # bumped by every local Start (state sync ignores reads that raced it)
         self._stop_persisted = False      # a Stop in THIS process reached the store
@@ -1418,21 +1444,42 @@ class Runner:
     # ---- a pass
     def _run_strategy_sync(self, mode: str) -> tuple[int, str]:
         buf = io.StringIO()
+        ms = self.ms
+        deadline = getattr(_ORDER_STEP, "deadline", None)   # set by _run_order_step in this same thread
         with kalshi_env(mode), contextlib.redirect_stdout(buf):
             # R1 fence, re-checked in the worker thread right before the strategy can send anything (the env lock
             # above may have been waited on): the lease must outlive the whole pass budget
             if not self._fence_ok(min_remaining_s=self.pass_budget_s):
                 raise FenceBlocked("lease not confirmed before the order step")
-            rc = self.ms.main()
+            # whole-pass time limit: a thread-local deadline in THIS worker thread only (Stop's pool, the arb and
+            # telemetry threads never see it). A strategy without set_pass_deadline (the stand-in, an older overlay)
+            # runs exactly as before.
+            set_dl, clear_dl = _pass_deadline_hooks(ms) if deadline is not None else (None, None)
+            if set_dl is not None:
+                set_dl(deadline)
+            try:
+                rc = ms.main()
+            finally:
+                if clear_dl is not None:
+                    try:
+                        clear_dl()                         # the pool thread is reused: never leak the deadline
+                    except Exception as e:  # noqa: BLE001
+                        log.error("pass deadline clear failed: %s", type(e).__name__)
         return rc, buf.getvalue()
 
     def _run_order_step(self, mode: str) -> tuple[int, str]:
-        """The order step in its worker thread, with the R1 fence checked first."""
+        """The order step in its worker thread, with the R1 fence checked first. The pass deadline is the step's
+        start + pass_budget_s (the budget the lease fence assumes)."""
+        deadline = time.monotonic() + self.pass_budget_s
         if not self._fence_ok(min_remaining_s=self.pass_budget_s):
             raise FenceBlocked("lease not confirmed before the order step")
         if mode == "live" and not self.armed("maker"):
             raise NotArmed("maker not armed for live")     # item 10: a disarm that landed during the pass setup
-        return self._run_strategy_sync(mode)
+        _ORDER_STEP.deadline = deadline
+        try:
+            return self._run_strategy_sync(mode)
+        finally:
+            _ORDER_STEP.deadline = None
 
     async def _pre_order_fence(self) -> bool:
         """Before a pass: renew the lease (fresh TTL for the whole pass), adopt a Stop persisted by another
@@ -1453,6 +1500,7 @@ class Runner:
             self.last_pass_started_utc = started
             ok, err = True, None
             strategy_ran = False
+            timed_out = False
             mode = self.mode
             try:
                 kid, pk = mode_keys(mode)
@@ -1477,6 +1525,11 @@ class Runner:
                 t0 = time.monotonic()
                 try:
                     rc, out = await asyncio.to_thread(self._run_order_step, mode)
+                except Exception as e:  # noqa: BLE001
+                    if _is_pass_timeout(None, exc=e):          # the client's deadline error escaped main()
+                        raise PassTimeout(f"order step stopped at the {self.pass_budget_s:.0f} s pass time limit "
+                                          f"after {time.monotonic() - t0:.1f} s") from e
+                    raise
                 finally:
                     self._strategy_running = False
                 took = time.monotonic() - t0
@@ -1484,6 +1537,9 @@ class Runner:
                     log.warning("order step took %.1f s (budget %.0f s)", took, self.pass_budget_s)
                 self.logs.add(out)
                 await self._handle_write_report(out, mode)     # grouped order-error alerts; the pass stays ok
+                if rc and _is_pass_timeout(self.ms, rc):
+                    raise PassTimeout(f"order step stopped at the {self.pass_budget_s:.0f} s pass time limit "
+                                      f"after {took:.1f} s")
                 if rc:
                     raise RuntimeError(f"maker_strategy exited {rc}")
             except FenceBlocked as e:
@@ -1495,9 +1551,14 @@ class Runner:
                 log.warning("pass skipped: %s", e)
                 self.running_pass = False
                 return                                   # item 10: nothing sent; not an error
+            except PassTimeout as e:
+                ok, err, timed_out = False, f"pass_timeout: {e}", True
+                log.error("pass failed: %s", err)
             except Exception as e:  # noqa: BLE001
                 ok, err = False, f"{type(e).__name__}: {e}"
                 log.error("pass failed: %s", err)
+            if strategy_ran:                             # whole-pass time limit: consecutive timed-out passes
+                self.pass_timeouts_in_row = self.pass_timeouts_in_row + 1 if timed_out else 0
             if strategy_ran and (self.desired != "running" or self.kill_switch()
                                  or (mode == "live" and not self.armed("maker"))):
                 # S-4: a Stop (or item 10: a maker disarm) landed during the pass; an order POST in flight at that
@@ -1519,8 +1580,15 @@ class Runner:
                                                 "duration_s": round((self.last_run_utc - started).total_seconds(), 1)})
             except Exception as e:  # noqa: BLE001
                 log.error("heartbeat write failed: %s", type(e).__name__)
-            if not ok:
-                await self.alerter.send("Trading pass error", err or "unknown", priority="high")
+            if not ok and timed_out and self.pass_timeouts_in_row < PASS_TIMEOUT_ALERT_AFTER:
+                log.warning("pass timed out (%d in a row); no alert below %d", self.pass_timeouts_in_row,
+                            PASS_TIMEOUT_ALERT_AFTER)        # a lone timeout: the next timer pass carries on
+            elif not ok:
+                if timed_out:
+                    err_alert = f"{err} ({self.pass_timeouts_in_row} passes in a row)"
+                else:
+                    err_alert = err or "unknown"
+                await self.alerter.send("Trading pass error", err_alert, priority="high")
             self.running_pass = False
             pass_equity, self._pass_equity = self._pass_equity, None
         if strategy_ran:

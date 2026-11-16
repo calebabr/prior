@@ -37,6 +37,7 @@ POSITION_LOOKBACK = timedelta(days=35)  # same reach as pnl.FILL_LOOKBACK: fills
 KALSHI_TIMEOUT_S = 120.0
 STORE_TIMEOUT_S = 30.0
 POSITION_PAGES = 20
+RECON_FILL_FIELDS = tuple(pnlsvc.FILL_FIELDS) + ("book_side",)   # book_side gives the position sign of a V2 fill
 SEVERITIES = ("info", "warn", "error")
 
 
@@ -91,6 +92,20 @@ def _fill_cost(f: dict) -> float:
 
 def _fill_contracts(f: dict) -> float:
     return _sign(f) * pnlsvc.fill_count(f)
+
+
+def _yes_delta(f: dict) -> float:
+    """Change in the net YES-equivalent position from one fill: YES contracts positive, NO contracts negative (the
+    sign Kalshi's `position_fp` uses). Kalshi's V2 fills describe the YES-book order: a `bid` adds YES, an `ask`
+    removes YES, which is the same as buying NO, so buying NO arrives as action "sell", book_side "ask",
+    outcome_side "no". For those the book side alone gives the sign (flipping again for the outcome side would count
+    a NO purchase as YES). Fills without a book side (the older shape: side + buy/sell) use action and side."""
+    n = pnlsvc.fill_count(f)
+    book = str(f.get("book_side") or "").lower()
+    if book in ("bid", "ask"):
+        return n if book == "bid" else -n
+    n = _sign(f) * n
+    return n if pnlsvc.fill_side(f) == "yes" else -n
 
 
 def _mk_diff(kind: str, ident: str, store_value: Any, kalshi_value: Any, severity: str, **extra: Any) -> dict:
@@ -256,8 +271,7 @@ def store_position_map(fills: list[dict], settled: set[str]) -> dict[str, float]
         t, side = _fill_ticker(f), pnlsvc.fill_side(f)
         if not t or side is None or t in settled:
             continue
-        n = _fill_contracts(f)
-        out[t] = out.get(t, 0.0) + (n if side == "yes" else -n)
+        out[t] = out.get(t, 0.0) + _yes_delta(f)
     return {t: v for t, v in out.items() if abs(v) > 1e-9}
 
 
@@ -354,11 +368,11 @@ async def run_daily_recon(store: Any, client_factory: Callable[[str], Any], mode
         return await _save(store, _finish(report))
     try:                                                    # 2. the store
         env_ok = lambda d: d.get("env") in (None, mode)  # noqa: E731   (demo and live books never mix)
-        s_fills = [f for f in await st(store.list_fills(since=start, until=end, limit=50000, fields=pnlsvc.FILL_FIELDS))
+        s_fills = [f for f in await st(store.list_fills(since=start, until=end, limit=50000, fields=RECON_FILL_FIELDS))
                    if env_ok(f)]
         s_settle = [x for x in await st(store.list_settlements(since=start, until=end, limit=20000)) if env_ok(x)]
         open_fills = [f for f in await st(store.list_fills(since=now - POSITION_LOOKBACK, limit=50000,
-                                                           fields=pnlsvc.FILL_FIELDS)) if env_ok(f)]
+                                                           fields=RECON_FILL_FIELDS)) if env_ok(f)]
         settled = {str(x["ticker"]) for x in await st(store.list_settlements(
             since=now - POSITION_LOOKBACK, limit=20000, fields=("ticker",))) if x.get("ticker")}
         snaps = await st(store.list_account_snapshots(limit=1, env=mode))

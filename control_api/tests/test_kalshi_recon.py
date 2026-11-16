@@ -435,3 +435,53 @@ async def test_route_validation(env):
 async def test_route_rate_limit(env):
     codes = [(await env.client.get("/api/recon/latest", headers=env.auth)).status_code for _ in range(32)]
     assert codes[:30] == [200] * 30 and 429 in codes[30:]
+
+
+# ---------------------------------------------------------------- positions from Kalshi's V2 fill shape
+def v2(fid, action, book, outcome, count="10", ticker="KXTEST-26NOV06-B1", price="0.90"):
+    """A fill as Kalshi's V2 API returns it: the YES-book order (action, book_side) plus the outcome side held."""
+    return {"fill_id": fid, "ticker": ticker, "action": action, "book_side": book, "outcome_side": outcome,
+            f"{outcome}_price_dollars": price, "count_fp": count, "created_time": T_IN.isoformat(),
+            "fee_cost": "0.00"}
+
+
+def test_v2_buy_yes_is_positive():
+    assert kr.store_position_map([v2("a", "buy", "bid", "yes")], set()) == {"KXTEST-26NOV06-B1": 10.0}
+
+
+def test_v2_buy_no_is_negative():
+    # a NO purchase arrives as action "sell", book_side "ask", outcome_side "no" and must read as -10, like Kalshi
+    assert kr.store_position_map([v2("a", "sell", "ask", "no")], set()) == {"KXTEST-26NOV06-B1": -10.0}
+
+
+def test_v2_sell_yes_reduces_a_yes_position():
+    fills = [v2("a", "buy", "bid", "yes"), v2("b", "sell", "ask", "yes", count="4")]
+    assert kr.store_position_map(fills, set()) == {"KXTEST-26NOV06-B1": 6.0}
+
+
+def test_v2_sell_no_reduces_a_no_position():
+    fills = [v2("a", "sell", "ask", "no"), v2("b", "buy", "bid", "no", count="4")]
+    assert kr.store_position_map(fills, set()) == {"KXTEST-26NOV06-B1": -6.0}
+
+
+def test_v2_yes_and_no_in_one_market_net_like_kalshi():
+    fills = [v2("a", "buy", "bid", "yes", count="4"), v2("b", "sell", "ask", "no", count="10")]
+    assert kr.store_position_map(fills, set()) == {"KXTEST-26NOV06-B1": -6.0}
+    fills.append(v2("c", "buy", "bid", "yes", count="6"))
+    assert kr.store_position_map(fills, set()) == {}                  # a full pair nets to nothing
+
+
+def test_older_fill_shape_is_unchanged():
+    # no book_side: action and side decide, exactly as before the V2 fix
+    assert kr.store_position_map([fill("a", side="no", action="buy")], set()) == {"KXTEST-26NOV06-B1": -10.0}
+    assert kr.store_position_map([fill("a", side="yes", action="buy"), fill("b", side="yes", action="sell",
+                                                                           count="3")], set()) == \
+        {"KXTEST-26NOV06-B1": 7.0}
+
+
+async def test_v2_no_position_matches_kalshi_with_no_difference():
+    f = v2("n1", "sell", "ask", "no")
+    pos = [{"ticker": "KXTEST-26NOV06-B1", "position_fp": "-10", "market_exposure_dollars": "9.00"}]
+    store, client = await seeded(kalshi=FakeClient(fills=[f], positions=pos), store_fills=[f])
+    rep = await run(store, client)
+    assert [d for d in rep["differences"] if d["kind"].startswith("position")] == []

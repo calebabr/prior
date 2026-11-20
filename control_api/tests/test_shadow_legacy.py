@@ -20,6 +20,9 @@ NOW = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
 def _no_private_files(tmp_path, monkeypatch):
     monkeypatch.setenv(sh.FEE_SCHEDULE_ENV, str(tmp_path / "absent_fees.json"))
     monkeypatch.setenv(sh.SHADOW_LIMITS_ENV, str(tmp_path / "absent_limits.json"))
+    # These tests use fixed October 2026 dates (the legacy/corrected boundary is a fixed date), while the summary only
+    # reads the last SHADOW_SUMMARY_DAYS days of the real clock: without this the episodes age out and the counts drift.
+    monkeypatch.setattr(sh, "SHADOW_SUMMARY_DAYS", 36500)
 
 
 def _ep(i, *, day, methodology=None, result="no", price=0.9, fill=10.0, ticker=None):

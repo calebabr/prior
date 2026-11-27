@@ -38,11 +38,19 @@ function ArbLoadState({ arb, reload }) {
 
 // Turn on / off and Go live / Log only: each one confirms and asks for a fresh 2FA code (live also asks for LIVE).
 function ArbModeButtons({ c }) {
-  const { enabled, live, liveAllowed, busy, setEnabled, setLive } = c;
+  const { enabled, live, state, liveAllowed, busy, setEnabled, setLive } = c;
   return (
     <>
+      {/* `live` is the configured mode; say so whenever it is not what the scanner is doing right now. */}
+      {live && state !== 'live' && (
+        <p className="hint error-text" data-testid="arb-set-live">
+          {state === 'stopped'
+            ? 'Set to LIVE. Turning arbitrage on will trade real money.'
+            : 'Set to LIVE, but it is not placing live orders right now. Check Live Arming.'}
+        </p>
+      )}
       <div className="btn-row">
-        <button type="button" className={`btn ${enabled ? '' : 'primary'}`} onClick={() => setEnabled(!enabled)} disabled={!!busy}>
+        <button type="button" className={`btn ${enabled ? '' : live ? 'danger-outline' : 'primary'}`} onClick={() => setEnabled(!enabled)} disabled={!!busy}>
           {busy === 'enabled' ? 'Working…' : <><IconLock /> {enabled ? 'Turn off' : 'Turn on'}</>}
         </button>
         {live ? (

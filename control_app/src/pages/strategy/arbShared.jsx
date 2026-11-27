@@ -198,7 +198,9 @@ export function useArbController() {
   const restartUtc = sinceRestart.since_utc || st.since_restart_utc || null;
   const state = arbState(settings, data && data.status);
   const enabled = (settings && 'enabled' in settings ? !!settings.enabled : state !== 'stopped') && !st.kill_switch;
-  const live = state === 'live';
+  // SAFETY: the CONFIGURED mode (settings.live), not the running state. While arbitrage is off the state is "stopped"
+  // even when it is set to live, and "Turn on" then trades real money. Either source saying live counts as live.
+  const live = !!(settings && settings.live) || state === 'live';
   const liveAllowed = !!st.live_allowed;
   const legging = st.kill_reason === 'legging';
 
@@ -311,7 +313,7 @@ export function useArbController() {
         title: on ? 'Turn arbitrage on?' : 'Turn arbitrage off?',
         message: on
           ? live
-            ? 'The scanner starts and trades LIVE when it finds a set.'
+            ? 'Arbitrage is set to LIVE. The scanner starts and trades real money when it finds a set.'
             : 'The scanner starts in log-only mode: it records opportunities and places no orders.'
           : 'The scanner stops. Stop (no code needed) also turns it off.',
         confirmLabel: on ? 'Turn on' : 'Turn off',
@@ -358,7 +360,13 @@ export function useArbController() {
       });
       if (r) {
         applyResult(r);
-        notify({ kind: 'ok', title: on ? 'Arbitrage is LIVE' : 'Arbitrage is log-only' });
+        // Saving LIVE while arbitrage is off must not read as "off therefore safe", nor as already trading.
+        const stillOff = !!(r.status && r.status.state === 'stopped');
+        notify(
+          on && stillOff
+            ? { kind: 'ok', title: 'Arbitrage is set to LIVE', text: 'It is off now. Turning it on will trade real money.' }
+            : { kind: 'ok', title: on ? 'Arbitrage is LIVE' : 'Arbitrage is log-only' },
+        );
       }
     } catch (err) {
       errorToast(err, 'Arbitrage mode not changed');

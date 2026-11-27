@@ -85,7 +85,7 @@ export function EdgeRow({ tab, g, domain }) {
             <dd>{cents(g.avg_price)}</dd>
           </div>
           <div>
-            <dt>Profit per $1 Spent</dt>
+            <dt>Return</dt>
             <dd className={signCls(g.roi)}>{formatPct(g.roi, { digits: 1 })}</dd>
           </div>
           {isNum(g.expected_win_rate) && (

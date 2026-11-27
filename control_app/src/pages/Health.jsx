@@ -8,7 +8,8 @@ import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
-import { formatAgo, formatMoney, formatPct, humanize, num, titleCase } from '../utils/format.js';
+import { countWord, formatAgo, formatMoney, formatPct, humanize, num, titleCase } from '../utils/format.js';
+import { TOO_FEW_TEXT, tooFewForRange, winRecords } from '../utils/ci.js';
 import { seriesName } from '../utils/analytics.js';
 import '../styles/settings.css';
 
@@ -22,20 +23,20 @@ function likelyRange(s) {
   return isNum(s && s.ci_low) && isNum(s && s.ci_high) ? `${formatPct(s.ci_low)} to ${formatPct(s.ci_high)}` : null;
 }
 
-// One plain sentence for the whole window.
-export function overallSentence(summary) {
+// One plain sentence for the whole window. `record` ({n, wins}) is the window's win record when known.
+export function overallSentence(summary, record) {
   const o = summary && summary.overall;
   if (!o) return null;
-  const parts = [`${num(o.fills)} fills`, `${formatMoney(o.pnl, { sign: true })} P&L`, `return ${formatPct(o.roi)}`];
+  const parts = [`${num(o.fills)} ${countWord(o.fills, 'fill')}`, `${formatMoney(o.pnl, { sign: true })} P&L`, `return ${formatPct(o.roi)}`];
   const range = likelyRange(o);
-  if (range) parts.push(`likely range ${range}`);
+  if (range) parts.push(tooFewForRange(o, record) ? 'too few results for a range' : `likely range ${range}`);
   if (isNum(summary.expected_roi)) parts.push(`expected ${formatPct(summary.expected_roi)}`);
   return parts.join(' · ');
 }
 
-function OverallStats({ s }) {
+function OverallStats({ s, record }) {
   if (!s || typeof s !== 'object') return null;
-  const range = likelyRange(s);
+  const range = likelyRange(s) && tooFewForRange(s, record) ? TOO_FEW_TEXT : likelyRange(s);
   return (
     <dl className="stats">
       <div>
@@ -58,19 +59,20 @@ function OverallStats({ s }) {
   );
 }
 
-function MarketRow({ id, v, paused, needMore }) {
+function MarketRow({ id, v, paused, needMore, record }) {
   const range = likelyRange(v || {});
+  const tooFew = !!range && tooFewForRange(v, record);
   return (
     <li className="market-row">
       <div className="market-row-top">
         <span className="market-name">{titleCase(seriesName(id))}</span>
-        {paused ? <Chip tone="danger">Pause</Chip> : needMore > 0 ? <Chip tone="muted">{`${needMore} More Fills Needed`}</Chip> : <Chip tone="ok">Keep</Chip>}
+        {paused ? <Chip tone="danger">Pause</Chip> : needMore > 0 ? <Chip tone="muted">{`${needMore} More ${countWord(needMore, 'Fill')} Needed`}</Chip> : <Chip tone="ok">Keep</Chip>}
       </div>
       <div className="market-row-meta num">
-        <span>{num(v && v.fills)} fills</span>
+        <span>{num(v && v.fills)} {countWord(v && v.fills, 'fill')}</span>
         <span className={signCls(v && v.pnl)}>{formatMoney(v && v.pnl, { sign: true })}</span>
         <span className={signCls(v && v.roi)}>return {formatPct(v && v.roi)}</span>
-        {range && <span>range {range}</span>}
+        {range && <span>{tooFew ? TOO_FEW_TEXT : `range ${range}`}</span>}
       </div>
     </li>
   );
@@ -80,6 +82,9 @@ export default function Health() {
   const { data, error, loading, staleAt, reload, setData } = useResource(() => api.getHealth(), '/api/health');
   const { confirm, notify } = useDialogs();
   const [running, setRunning] = useState(false);
+  // Only to learn whether a market has had a loss yet: without it the range rule still uses the market count.
+  const wins = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
+  const records = winRecords(wins.data);
   const summary = data && data.summary;
   const report = data && data.report_text;
 
@@ -109,7 +114,7 @@ export default function Health() {
   const paused = Array.isArray(actions.pause) ? actions.pause : [];
   const needMore = actions.need_more && typeof actions.need_more === 'object' ? actions.need_more : {};
   const acct = hasSummary && summary.last_account && typeof summary.last_account === 'object' ? summary.last_account : null;
-  const sentence = overallSentence(summary);
+  const sentence = overallSentence(summary, records.all);
 
   return (
     <div className="page">
@@ -139,7 +144,7 @@ export default function Health() {
               .join(' · ')}
           >
             {sentence && <p className="health-line">{sentence}</p>}
-            <OverallStats s={summary.overall} />
+            <OverallStats s={summary.overall} record={records.all} />
             {(isNum(summary.quoted_dollars) || isNum(summary.filled_dollars)) && (
               <p className="hint num">
                 Quoted {formatMoney(summary.quoted_dollars)} · Filled {formatMoney(summary.filled_dollars)}
@@ -152,7 +157,7 @@ export default function Health() {
             <Card title="By Market">
               <ul className="market-rows">
                 {Object.entries(summary.per_series).map(([s, v]) => (
-                  <MarketRow key={s} id={s} v={v} paused={paused.includes(s)} needMore={Number(needMore[s]) || 0} />
+                  <MarketRow key={s} id={s} v={v} paused={paused.includes(s)} needMore={Number(needMore[s]) || 0} record={records[s]} />
                 ))}
               </ul>
             </Card>

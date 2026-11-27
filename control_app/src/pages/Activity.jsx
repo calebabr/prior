@@ -69,7 +69,7 @@ export default function Activity() {
       </p>
       {status && (
         <section className="activity-pnl" aria-label="Realized profit and loss">
-          <PnlStats pnl={status.pnl} big={false} emptyText="P&L appears once fills settle." />
+          <PnlStats pnl={status.pnl} big={false} emptyText="P&L appears once fills settle." scope="maker" />
         </section>
       )}
       <StaleNotice staleAt={error ? staleAt : null} />

@@ -5,8 +5,13 @@ import { useCancellableResource } from '../../hooks/useCancellableResource.js';
 import { api, query } from '../../services/api.js';
 import { isNum, rate } from '../../utils/analytics.js';
 import { duration, formatMoney, num } from '../../utils/format.js';
+import { useStatus } from '../../context/StatusContext.jsx';
 
 export const NOT_TRACKED = 'not tracked yet';
+
+// What the money behind the return is. Unknown environment: no claim either way.
+const RETURN_HINT = { demo: 'Play money and a small sample.', live: 'Real money, but a small sample.', all: 'Demo and live mixed, small sample.' };
+export const returnHint = (env) => `${RETURN_HINT[env] || 'A small sample.'} Do not read this as a forecast.`;
 
 function Val({ v, children }) {
   return v === null || v === undefined ? <span className="na">{NOT_TRACKED}</span> : <>{children ?? String(v)}</>;
@@ -17,6 +22,8 @@ export default function ScorecardView({ days, env }) {
   const path = `/api/analytics/scorecard${query({ days, env })}`;
   const { data, error, loading, reload } = useCancellableResource((signal) => api.analyticsScorecard({ days, env }, { signal }), path);
   const d = data || {};
+  const { status } = useStatus();
+  const shownEnv = d.env || env || (status && status.mode);
   const notes = Array.isArray(d.notes) ? d.notes : [];
   const passes = d.passes || {};
   const ret = d.return || {};
@@ -94,14 +101,14 @@ export default function ScorecardView({ days, env }) {
           <div className="recon" data-testid="sc-return">
             <h3 className="subhead">Return</h3>
             <p>
-              <b data-testid="sc-return-label">{ret.label || 'demo, indicative only'}</b>
+              <b data-testid="sc-return-label">{ret.label || 'indicative only'}</b>
               {': '}
               <Val v={ret.roi}>
                 {rate(ret.roi)} on {formatMoney(ret.cost)}
               </Val>{' '}
               from {num(ret.sample_settled_fills)} settled fills.
             </p>
-            <p className="hint">Play money and a small sample. Do not read this as a forecast.</p>
+            <p className="hint" data-testid="sc-return-hint">{returnHint(shownEnv)}</p>
           </div>
           {notes.map((n, i) => (
             <p className="hint" key={i}>{n}</p>

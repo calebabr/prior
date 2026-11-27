@@ -26,7 +26,7 @@ export function riskBySource(positions) {
 }
 
 /**
- * P&L by source (Y2): today's realised P&L per strategy (names and colours come from /api/strategies,
+ * P&L by source (Y2): today's realized P&L per strategy (names and colours come from /api/strategies,
  * so a new strategy shows up with no change here) plus one split bar of $ at risk, Bot vs You.
  * Manual trades ("You") are shown here only; they never count in bot statistics.
  */

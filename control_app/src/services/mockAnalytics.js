@@ -822,8 +822,10 @@ export function mockLedger(q, mode = 'demo') {
 
 /** GET /api/analytics/scorecard (UI-1a shape). */
 export function mockScorecard(q, mode = 'demo') {
+  const env = q.get('env') || mode;
+  const returnLabel = { demo: 'demo, indicative only', live: 'live, small sample, indicative only' }[env] || 'mixed demo and live, indicative only';
   return {
-    env: q.get('env') || mode, label: 'last 7 days',
+    env, label: 'last 7 days',
     passes: { n: 480, ok: 476, ok_pct: 0.9917, errors: 4, median_duration_s: 3.2, max_duration_s: 21 },
     order_errors: { value: null, error_alerts: 1 },
     churn: { quotes: 300, cancels: 120, cancels_per_quote: 0.4 },
@@ -834,7 +836,7 @@ export function mockScorecard(q, mode = 'demo') {
     alerts_by_type: {},
     arbitrage_per_set: { legged: 0, complete: 2, skipped_by_gate: 0, skipped_by_rule: {}, log_only: 5, settled_sets: 2, set_wins: 2, distinct_sets_logged: 7 },
     stop_start_log: { stops: 1, stop_failures: 0, starts: 2 },
-    return: { label: 'demo, indicative only', sample_settled_fills: 12, realized_pnl: 2.25, cost: 50.5, roi: 0.0446 },
+    return: { label: returnLabel, sample_settled_fills: 12, realized_pnl: 2.25, cost: 50.5, roi: 0.0446 },
     notes: ['Order-error counters and maker cap bindings are not stored yet.'],
   };
 }

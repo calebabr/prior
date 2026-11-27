@@ -41,7 +41,7 @@ export default function FillQuality({ fq, compact = false }) {
         </div>
       </dl>
       <p className="hint">
-        {num(n)} fills measured against the market tape.
+        {num(n)} {n === 1 ? 'fill' : 'fills'} measured against the market tape.
         {!enough
           ? ` Too few fills to compare (${n}/${MIN_FILLS_TO_COMPARE}).`
           : shareWorse || moveWorse

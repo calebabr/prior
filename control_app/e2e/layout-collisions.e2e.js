@@ -13,7 +13,8 @@ import { LEGACY_REDIRECTS, ROUTE_TITLES } from '../src/utils/routes.js';
 //   clipped  - text cut off by overflow with no ellipsis
 //   small    - interactive element under 40 px in either direction
 //   cover    - a fixed / sticky floating element (status widget, toast, banner) over content text
-//   stop     - the header Stop button not the top element at its own points
+//   stop     - the header Stop button not the top element at its own points; with a dialog open, the Stop button above
+//              the card missing, covered, small, under the status bar or overlapping the card
 // Findings are collected (not failing on first), written with a screenshot to LAYOUT_SHOTS (default: the OS temp
 // dir, never the repo) as findings.json, and the test fails if any remain that are not in KNOWN.
 const SHOTS = process.env.LAYOUT_SHOTS || path.join(os.tmpdir(), 'layout-collision-shots');
@@ -216,7 +217,8 @@ function auditOverlay({ safeTop, safeBottom }) {
   const out = [];
   const vh = window.innerHeight;
   const R = (n) => Math.round(n);
-  const dlg = document.querySelector('.modal');
+  const all = document.querySelectorAll('.modal');
+  const dlg = all[all.length - 1] || null; // the Stop confirm is stacked above any other dialog
   const pop = document.querySelector('.popover');
   const onTop = (el, x, y) => {
     const t = document.elementFromPoint(x, y);
@@ -245,6 +247,24 @@ function auditOverlay({ safeTop, safeBottom }) {
     if (sc && getComputedStyle(sc).overflowY !== 'auto') out.push({ kind: 'modal', selector: 'body', detail: 'body does not scroll inside the card' });
     const oy = getComputedStyle(dlg).overflowY;
     if (oy === 'auto' || oy === 'scroll') out.push({ kind: 'modal', selector: 'card', detail: 'card itself scrolls (header would scroll away)' });
+    const layer = dlg.closest('.modal-backdrop');
+    if (layer && !layer.classList.contains('modal-layer-stop')) {
+      const stop = layer.querySelector('.modal-stop button');
+      if (!stop) out.push({ kind: 'stop', selector: 'dialog', detail: 'no Stop above the dialog' });
+      else {
+        const b = stop.getBoundingClientRect();
+        if (b.width < 39.5 || b.height < 39.5) out.push({ kind: 'stop', selector: 'dialog Stop', detail: `${R(b.width)}x${R(b.height)}` });
+        if (b.top < safeTop - 0.5 || b.right > window.innerWidth + 0.5) out.push({ kind: 'stop', selector: 'dialog Stop', detail: `outside the safe area (top ${R(b.top)})` });
+        if (b.bottom > r.top + 0.5) out.push({ kind: 'stop', selector: 'dialog Stop', detail: `overlaps the card (${R(b.bottom)} > ${R(r.top)})` });
+        const hidden = [[0.5, 0.5], [0.15, 0.25], [0.85, 0.25], [0.15, 0.75], [0.85, 0.75]].filter(([fx, fy]) => !onTop(stop, b.left + b.width * fx, b.top + b.height * fy));
+        if (hidden.length) out.push({ kind: 'stop', selector: 'dialog Stop', detail: `${hidden.length}/5 points covered` });
+      }
+    }
+  }
+  if (pop && !dlg) {
+    const head = document.querySelector('header.appbar button.stop-btn');
+    const b = head && head.getBoundingClientRect();
+    if (!b || !onTop(head, b.left + b.width / 2, b.top + b.height / 2)) out.push({ kind: 'stop', selector: 'popover', detail: 'header Stop covered by the popover' });
   }
   if (pop) {
     const r = pop.getBoundingClientRect();
@@ -565,7 +585,7 @@ for (const scenario of NUMBER_SCENARIOS) {
           }
         }
         if (scenario.id === 'numbers') {
-          for (const name of ['Market Value', 'Paid for Positions', 'Unrealised P&L']) {
+          for (const name of ['Market Value', 'Paid for Positions', 'Unrealized P&L']) {
             await go('/');
             await page.getByTestId('home-account').getByRole('button', { name: `What is ${name}?` }).click();
             await overlay(`help-${name}`, safeTop, safeBottom);
@@ -594,6 +614,218 @@ for (const scenario of NUMBER_SCENARIOS) {
   }
 }
 
+// Design audit A1-A24: the persistent Stop warning (failed and partial), the "Stopped at" line, the LIVE tag, the
+// "Not Confirmed" badge, the demo-switch warning, the kill-switch steps, the "too few results" lines, long period
+// lists, the demo-only group, and every dialog layering (Stop above a dialog, above a dialog whose request is in
+// flight, and the Stop confirm on top). Every page is audited at every scroll position.
+const AUDIT_SCENARIOS = [
+  { id: 'audit-live', mock: 'live', pages: ['/', '/more', '/activity', '/strategies', '/performance', '/strategies/arb/controls', '/arming', '/analytics?tab=scorecard'] },
+  { id: 'audit-stop-fail', mock: 'live,stop-fail', stop: true, pages: ['/', '/settings', '/strategies/arb/controls', '/performance'] },
+  { id: 'audit-stop-partial', mock: 'live,stop-partial', stop: true, pages: ['/', '/mode', '/analytics'] },
+  { id: 'audit-stop-ok', mock: 'live', stop: true, pages: ['/'] },
+  { id: 'audit-stale', mock: 'live,status-drop', refresh: true, pages: ['/', '/strategies', '/strategies/maker'] },
+  { id: 'audit-status-down', mock: 'status-down', pages: ['/'] },
+  { id: 'audit-stopped', mock: 'live,stopped', pages: ['/', '/arming', '/strategies'] },
+  { id: 'audit-few', mock: 'few-results', pages: ['/strategies/maker/results', '/health'] },
+  { id: 'audit-periods', mock: 'periods-many', pages: ['/performance/periods'] },
+];
+
+async function expectAudit(page, id, route) {
+  if (id === 'audit-live' && route === '/') await expect(page.getByTestId('live-tag')).toBeVisible();
+  if (id === 'audit-live' && route === '/arming') await expect(page.getByTestId('arm-note')).toContainText('Live is on');
+  if (id === 'audit-live' && route === '/strategies/arb/controls') await expect(page.getByTestId('demo-only-settings')).toBeVisible();
+  if (id === 'audit-stop-fail') await expect(page.getByTestId('stop-alert')).toContainText('Stop did NOT reach the server');
+  if (id === 'audit-stop-partial') await expect(page.getByTestId('stop-alert')).toContainText('not everything was cancelled');
+  if (id === 'audit-stop-ok') await expect(page.getByTestId('stopped-line')).toContainText('9 orders cancelled');
+  if (id === 'audit-stale') await expect(page.locator('header.appbar .badge-label')).toHaveText('Not Confirmed');
+  if (id === 'audit-stale') await expect(page.locator('header.appbar .badge-label')).toBeVisible();
+  if (id === 'audit-status-down') await expect(page.getByTestId('state-label')).toHaveText('Status unknown');
+  if (id === 'audit-stopped' && route === '/') await expect(page.getByTestId('already-stopped')).toContainText('leftover live orders');
+  if (id === 'audit-stopped' && route === '/arming') await expect(page.getByTestId('kill-switch-help')).toBeVisible();
+  if (id === 'audit-few' && route === '/health') await expect(page.getByText('Too few results for a range.').first()).toBeVisible();
+  if (id === 'audit-few' && route !== '/health') {
+    const card = page.getByRole('button', { name: /^Demo Series A/ });
+    if ((await card.getAttribute('aria-expanded')) !== 'true') await card.click();
+    await expect(page.getByTestId('range-too-few').first()).toBeVisible();
+  }
+  if (id === 'audit-periods') await expect(page.getByLabel('Period timeline')).toContainText('Test period 7');
+  if (id === 'audit-live' && route === '/performance') {
+    await expect(page.getByTestId('perf-table')).toContainText('Value now');
+    // A20: every column is on screen, with no sideways scrolling inside the table either.
+    await expect.poll(() => page.locator('.perf-scroll').evaluate((el) => el.scrollWidth - el.clientWidth), { message: 'performance table scrolls sideways' }).toBeLessThanOrEqual(1);
+  }
+}
+
+function collector(page, id, width, findings) {
+  const seen = new Set();
+  return async (raw, label) => {
+    let shot = null;
+    for (const f of raw) {
+      const key = `${f.kind}|${label}|${f.selector}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!shot) {
+        shot = path.join(SHOTS, `${id}-${width}-${findings.length}-${label.replace(/[^a-z0-9]+/gi, '_')}.png`);
+        await page.screenshot({ path: shot });
+      }
+      findings.push({ ...f, route: label, width, theme: id, screenshot: shot });
+    }
+  };
+}
+const clientGo = async (page, p) => {
+  await page.evaluate((x) => {
+    window.history.pushState({}, '', x);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, p);
+  await page.waitForTimeout(450);
+};
+const insets = (page, top, bottom) =>
+  page.evaluate(([t, b]) => {
+    const s = document.documentElement.style;
+    if (t) {
+      s.setProperty('--safe-top', `${t}px`);
+      s.setProperty('--safe-bottom', `${b}px`);
+    } else {
+      s.removeProperty('--safe-top');
+      s.removeProperty('--safe-bottom');
+    }
+  }, [top, bottom]);
+const report = (id, width, findings) => {
+  fs.writeFileSync(path.join(SHOTS, `findings-${id}-${width}.json`), JSON.stringify(findings, null, 2));
+  expect(
+    findings.map((f) => `${f.kind} ${f.route} @${f.width} ${f.selector} (${f.detail}) -> ${f.screenshot}`),
+    `layout findings (screenshots in ${SHOTS})`,
+  ).toEqual([]);
+};
+// Full-page shots of the audit screens, for looking at (not for assertions).
+const look = (page, name) => (process.env.AUDIT_LOOK ? page.screenshot({ path: path.join(SHOTS, `look-${name}.png`) }) : null);
+
+for (const scenario of AUDIT_SCENARIOS) {
+  for (const width of WIDTHS) {
+    test(`layout collisions: ${scenario.id} at ${width}px`, async ({ page }) => {
+      test.setTimeout(240_000);
+      await page.setViewportSize({ width, height: 740 });
+      await page.addInitScript((s) => {
+        try { window.sessionStorage.setItem('keel.mock', s); } catch { /* storage may be blocked */ }
+      }, scenario.mock);
+      await login(page);
+      const findings = [];
+      const record = collector(page, scenario.id, width, findings);
+      if (scenario.stop) {
+        await page.locator('header.appbar').getByRole('button', { name: /stop the bot/i }).click();
+        await page.getByRole('button', { name: 'Stop now' }).click();
+        await expect(page.locator('.modal')).toHaveCount(0);
+        await page.waitForTimeout(600);
+        // The success toast floats over the page for a few seconds by design; the lasting screen is what is scanned.
+        await expect(page.locator('.toast')).toHaveCount(0, { timeout: 10_000 });
+      }
+      if (scenario.refresh) {
+        await expect(page.getByTestId('live-tag')).toBeVisible();
+        await page.evaluate(() => window.dispatchEvent(new Event('km:stopped'))); // forces a second status read, which fails
+      }
+      for (const [safeTop, safeBottom] of [[0, 0], [47, 34]]) {
+        await insets(page, safeTop, safeBottom);
+        for (const route of scenario.pages) {
+          await clientGo(page, route);
+          await expectAudit(page, scenario.id, route);
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await page.waitForTimeout(150);
+          await look(page, `${scenario.id}-${width}-safe${safeTop}-${route.replace(/[^a-z0-9]+/gi, '_')}`);
+          const height = await page.evaluate(() => document.documentElement.scrollHeight);
+          for (let y = 0; y < height; y += 360) {
+            await page.evaluate((to) => window.scrollTo(0, to), y);
+            await page.waitForTimeout(120);
+            await record(await page.evaluate(auditInPage, { smallOk: SMALL_OK, labelTargets: true }), `${scenario.id}:${route}@safe${safeTop}`);
+          }
+        }
+      }
+      await insets(page, 0, 0);
+      report(scenario.id, width, findings);
+    });
+  }
+}
+
+for (const width of WIDTHS) {
+  test(`layout collisions: Stop above dialogs at ${width}px`, async ({ page }) => {
+    test.setTimeout(240_000);
+    await page.setViewportSize({ width, height: 740 });
+    await page.addInitScript(() => {
+      try { window.sessionStorage.setItem('keel.mock', 'live,mode-hang'); } catch { /* storage may be blocked */ }
+    });
+    await login(page);
+    const findings = [];
+    const record = collector(page, 'stop-layers', width, findings);
+    const overlay = async (name, safeTop, safeBottom) => {
+      await page.waitForTimeout(400);
+      await look(page, `stop-layers-${width}-safe${safeTop}-${name}`);
+      const res = await page.evaluate(auditOverlay, { safeTop, safeBottom });
+      expect(res.found, `${name} did not open`).toBe(true);
+      await record(res.out, `${name}@safe${safeTop}`);
+    };
+    const dialogStop = page.getByTestId('modal-stop').getByRole('button', { name: /stop the bot/i });
+    // The visual viewport also shrinks when the keyboard is open: 420 px stands in for that.
+    for (const [safeTop, safeBottom, height] of [[0, 0, 740], [47, 34, 740], [59, 34, 740], [47, 0, 420]]) {
+      await page.setViewportSize({ width, height });
+      await insets(page, safeTop, safeBottom);
+      const tag = height === 420 ? '-short' : '';
+      await clientGo(page, '/mode');
+      await page.getByRole('button', { name: /switch to demo/i }).click();
+      await expect(page.getByTestId('to-demo-warning')).toBeVisible();
+      await overlay(`to-demo${tag}`, safeTop, safeBottom);
+      await dialogStop.click(); // a real tap: fails if anything covers it
+      await expect(page.getByRole('dialog', { name: 'Stop all trading?' })).toBeVisible();
+      await overlay(`stop-over-dialog${tag}`, safeTop, safeBottom);
+      await page.getByRole('button', { name: 'Cancel' }).last().click();
+      await expect(page.getByRole('dialog', { name: 'Switch to DEMO?' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.modal')).toHaveCount(0);
+    }
+    await page.setViewportSize({ width, height: 740 });
+    await insets(page, 47, 34);
+    await clientGo(page, '/analytics');
+    const details = page.getByRole('button', { name: 'Details' }).first();
+    await details.scrollIntoViewIfNeeded();
+    await details.click();
+    await overlay('returns-sheet', 47, 34);
+    await page.keyboard.press('Escape');
+    await clientGo(page, '/settings');
+    await page.locator('button.help-icon').first().click();
+    await overlay('help-popover', 47, 34);
+    await page.keyboard.press('Escape');
+    // Last: a mode switch that never answers. The dialog cannot be closed, Stop still works.
+    await clientGo(page, '/mode');
+    await page.getByRole('button', { name: /switch to demo/i }).click();
+    await page.getByLabel('6-digit code').fill('482913');
+    await page.getByRole('button', { name: 'Switch to demo' }).click();
+    await expect(page.getByRole('dialog').getByRole('button', { name: 'Working…' })).toBeVisible();
+    await overlay('busy-2fa', 47, 34);
+    await dialogStop.click();
+    await overlay('stop-over-busy', 47, 34);
+    await page.getByRole('button', { name: 'Stop now' }).click();
+    await expect(page.getByText('This request had already left')).toBeVisible();
+    await overlay('busy-after-stop', 47, 34);
+    await insets(page, 0, 0);
+    report('stop-layers', width, findings);
+  });
+}
+
+// A24: the Terminology section links and "See also" links are 40 px targets all the way down the page.
+for (const width of WIDTHS) {
+  test(`layout collisions: terminology link targets at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 740 });
+    await login(page);
+    await clientGo(page, '/terminology');
+    const links = page.locator('.term-jump a, .term-related a');
+    await expect(links.first()).toBeVisible();
+    const small = await links.evaluateAll((els) =>
+      els.map((e) => ({ text: e.textContent, w: e.getBoundingClientRect().width, h: e.getBoundingClientRect().height })).filter((r) => r.h < 39.5 || r.w < 38),
+    );
+    expect(small).toEqual([]);
+    const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(sideways).toBeLessThanOrEqual(0);
+  });
+}
+
 // The signed-out page (its footer lost the demo / live wording). It has no header, so there is no Stop to check.
 for (const width of WIDTHS) {
   test(`layout collisions: login at ${width}px`, async ({ page }) => {
@@ -605,5 +837,17 @@ for (const width of WIDTHS) {
       (f) => f.kind !== 'stop' && !(f.kind === 'overlap' && f.selector.includes('button.pw-eye')),
     );
     expect(found.map((f) => `${f.kind} ${f.selector} (${f.detail})`)).toEqual([]);
+    // With a Stop warning left over (a Stop refused because the session had expired).
+    await page.evaluate(() => {
+      const result = { kind: 'failed', title: 'Stop was refused: sign in again', text: 'Session expired. Please sign in again. Tap Stop again.', sentAt: 1, resolvedAt: 1 };
+      window.localStorage.setItem('prior.stop', JSON.stringify({ result, pending: [] }));
+    });
+    await page.reload();
+    await expect(page.getByTestId('stop-alert')).toBeVisible();
+    await page.evaluate(() => document.documentElement.style.setProperty('--safe-top', '47px'));
+    const again = (await page.evaluate(auditInPage, { smallOk: SMALL_OK, labelTargets: true })).filter(
+      (f) => f.kind !== 'stop' && !(f.kind === 'overlap' && f.selector.includes('button.pw-eye')),
+    );
+    expect(again.map((f) => `${f.kind} ${f.selector} (${f.detail})`)).toEqual([]);
   });
 }

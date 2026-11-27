@@ -53,7 +53,7 @@ describe('Analytics page', () => {
     renderApp('/analytics');
     expect(await screen.findByRole('heading', { name: 'Analytics' })).toBeInTheDocument();
     const totals = await screen.findByTestId('totals');
-    expect(within(totals).getByText('Profit per $1 Spent')).toBeInTheDocument();
+    expect(within(totals).getByText('Return')).toBeInTheDocument();
     expect(within(totals).getByText('Max Drawdown')).toBeInTheDocument();
     expect(screen.getByTestId('pnl-curve')).toBeInTheDocument();
     expect(await screen.findByTestId('bot-vs-you')).toHaveTextContent(/Bot.*You/);

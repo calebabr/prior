@@ -368,7 +368,7 @@ describe('Terminology page search', () => {
     await user.type(box, 'P&L');
     // Related link inside a result that is itself in the results: filter kept.
     const pnl = container.querySelector('li#pnl');
-    await user.click(within(pnl).getByRole('link', { name: 'Realised P&L' }));
+    await user.click(within(pnl).getByRole('link', { name: 'Realized P&L' }));
     expect(box).toHaveValue('P&L');
     expect(container.querySelector('li#realised-pnl')).toHaveClass('highlight');
     // Related link to a term the filter hides: filter cleared so the target exists.

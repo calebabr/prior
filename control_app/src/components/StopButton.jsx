@@ -1,36 +1,35 @@
 import { useState } from 'react';
 import { api } from '../services/api.js';
 import { useDialogs } from '../context/DialogContext.jsx';
-import { useStatus } from '../context/StatusContext.jsx';
 import { IconStop } from './Icons.jsx';
-import { stopToastTitle } from '../utils/overview.js';
+import { STOPPED_EVENT, beginStop, describeFailure, describeStop, resolveStop, useStopPending } from '../services/stopResult.js';
 
-// Fired on window after every Stop request (ok or not) so open pages can reload.
-export const STOPPED_EVENT = 'km:stopped';
+export { STOPPED_EVENT };
+
+/** Run bookkeeping around a Stop: a failure here must never keep the Stop from being sent or reported. */
+function attempt(fn) {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * STOP: one tap + one confirm, no 2FA. Stops BOTH strategies (maker + arbitrage).
- * Calls POST /api/bot/stop and reports
- * exactly what the server said (kill switch, cancelled orders, errors).
- * Never assumes success: a failed request is shown as an error with a retry hint.
+ * Calls POST /api/bot/stop and reports exactly what the server said (kill switch, cancelled orders, errors).
+ * Never assumes success: a failed or partial Stop is recorded (services/stopResult.js) and stays on screen until a
+ * later Stop succeeds or the owner dismisses it. Needs nothing but the dialog provider, so it also works inside a
+ * dialog and while nothing else has loaded.
  */
-function arbText(r) {
-  if (!r) return '';
-  const a = r.arb && typeof r.arb === 'object' ? r.arb : r;
-  const kill = a.arb_kill_switch ?? a.kill_switch_arb ?? (r.arb ? a.kill_switch : undefined);
-  if (kill === true) return ' Arbitrage stopped.';
-  if (kill === false) return ' Arbitrage kill switch NOT confirmed.';
-  return '';
-}
-
 export default function StopButton({ compact = false }) {
-  const { confirm, notify } = useDialogs();
-  const { refresh } = useStatus();
+  const { confirmStop, dismissDialogs, notify } = useDialogs();
   const [busy, setBusy] = useState(false);
+  const pending = useStopPending();
 
   async function onStop() {
     if (busy) return;
-    const ok = await confirm({
+    const ok = await confirmStop({
       title: 'Stop all trading?',
       message: (
         <>
@@ -42,31 +41,23 @@ export default function StopButton({ compact = false }) {
       danger: true,
     });
     if (!ok) return;
+    // Any dialog underneath (Start, arm, mode...) is closed, so nothing else can be sent without a new tap.
+    attempt(dismissDialogs);
+    const token = attempt(beginStop);
     setBusy(true);
+    let outcome;
     try {
-      const r = await api.stop();
-      const errors = (r && r.errors) || [];
-      notify({
-        kind: errors.length ? 'info' : 'ok',
-        title: stopToastTitle(r) || (r && r.kill_switch ? 'Stopped. Kill switch set.' : 'Stop sent'),
-        text: `Bot is ${r && r.desired ? r.desired : 'stopped'}; cancelled ${r && r.cancelled != null ? r.cancelled : '?'} resting order(s).${arbText(r)}`,
-        details: errors.length ? errors.map((e) => `Not done: ${typeof e === 'string' ? e : JSON.stringify(e)}`) : undefined,
-      });
+      outcome = describeStop(await api.stop());
     } catch (err) {
-      notify({
-        kind: 'error',
-        title: 'Stop did NOT reach the server',
-        text: `${err.message} Tap Stop again.`,
-      });
-    } finally {
-      setBusy(false);
-      refresh();
-      try {
-        window.dispatchEvent(new Event(STOPPED_EVENT));
-      } catch {
-        /* non-browser test env */
-      }
+      outcome = describeFailure(err);
     }
+    const recorded = !!token && attempt(() => (resolveStop(token, outcome), true)) === true;
+    // A success is announced; anything else stays in the banner, or in a notice if it could not be recorded.
+    if (outcome.kind === 'ok' || !recorded) {
+      notify({ kind: outcome.kind === 'ok' ? 'ok' : 'error', title: outcome.title, text: outcome.text });
+    }
+    setBusy(false);
+    attempt(() => window.dispatchEvent(new Event(STOPPED_EVENT)));
   }
 
   return (
@@ -78,7 +69,7 @@ export default function StopButton({ compact = false }) {
       aria-label="Stop the bot (maker and arbitrage)"
     >
       <IconStop />
-      <span>{busy ? 'Stopping…' : compact ? 'Stop' : 'Stop bot'}</span>
+      <span>{busy || pending ? 'Stopping…' : compact ? 'Stop' : 'Stop bot'}</span>
     </button>
   );
 }

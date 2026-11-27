@@ -22,7 +22,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const MARKETS = {
   markets: [
-    { series: 'KXDEMOA', enabled: true, fills: 40, cost: 180, pnl: 3.2, events: 12, roi: 0.021, ci_low: -0.014, ci_high: 0.056, verdict: 'keep', need_more: null },
+    { series: 'KXDEMOA', enabled: true, fills: 40, cost: 180, pnl: 3.2, events: 24, roi: 0.021, ci_low: -0.014, ci_high: 0.056, verdict: 'keep', need_more: null },
     { series: 'KXDEMOF', enabled: false, fills: 8, cost: 40, pnl: -1.1, events: 4, roi: -0.02, ci_low: null, ci_high: null, verdict: null, need_more: 30 },
   ],
   report_utc: null,

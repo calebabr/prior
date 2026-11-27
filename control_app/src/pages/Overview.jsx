@@ -24,7 +24,8 @@ import { BREAKER_ACK_LABEL, breaker409, isTripped } from '../utils/breaker.js';
 import { riskLimit } from '../utils/status.js';
 import { edgeSummary, headlineParts, headlineTotal } from '../utils/overview.js';
 import { rangeLabel } from '../utils/range.js';
-import { TODAY_EMPTY, TODAY_UNAVAILABLE, todayKind } from '../utils/pnlScopes.js';
+import { TODAY_BOT_EMPTY, TODAY_EMPTY, TODAY_UNAVAILABLE, todayFigure, todayKind } from '../utils/pnlScopes.js';
+import { clearStopSuccess } from '../services/stopResult.js';
 import { DASH, NA_TITLE, dateTime, formatMoney, money, sentenceCase } from '../utils/format.js';
 import { shortDate } from '../utils/analytics.js';
 import { moneyDigits } from '../utils/chart.js';
@@ -72,11 +73,13 @@ function Fig({ value, signed = false }) {
 }
 
 // One sentence-case line: "Demo running. +$17.12 over 30 days. Edge below expected."
-// Text colour; only the figure is coloured, and a problem state is red.
-function Headline({ state, pnl, range, edge }) {
+// Text colour; only the figure is coloured, and a problem state is red. An old reading starts "Last known:".
+function Headline({ state, pnl, range, edge, unconfirmed }) {
   return (
     <p className="ov-headline" data-testid="headline">
-      <span className={`ov-hl ov-hl-${state.tone === 'danger' ? 'danger' : 'muted'}`}>{sentenceCase(state.text.toLowerCase())}.</span>
+      <span className={`ov-hl ov-hl-${state.tone === 'danger' ? 'danger' : 'muted'}`}>
+        {unconfirmed ? `Last known: ${state.text.toLowerCase()}` : sentenceCase(state.text.toLowerCase())}.
+      </span>
       {isNum(pnl) && (
         <>
           {' '}
@@ -159,7 +162,7 @@ function ManualRow({ manual }) {
 }
 
 export default function Overview() {
-  const { status, error, loading, updatedAt, stale, refresh } = useStatus();
+  const { status, error, loading, updatedAt, stale, unconfirmed, refresh } = useStatus();
   const { confirm, twoFactor, notify } = useDialogs();
   const [range, setRange] = useRange();
   const summary = useStrategySummary({ range, status, positionsPollMs: ACCOUNT_POLL_MS });
@@ -174,7 +177,7 @@ export default function Overview() {
   const equity = snaps.map((s) => (s.cash || 0) + (s.exposure || 0));
   const equityDates = snaps.map((s) => shortDate(s.ts));
   const { strategies, total, manual, errors } = summary;
-  const todayTotal = status && status.pnl_today && status.pnl_today.total;
+  const today = todayFigure(status);
   const head = headlineTotal(status, range, total.pnl);
   const totalLoading = summary.ledgerLoading && !isNum(head.pnl); // only a ledger-fed headline ever waits
   const ledgerError = errors.ledger;
@@ -219,9 +222,13 @@ export default function Overview() {
           </>
         ),
         confirmLabel: 'Start',
+        resumesTrading: true,
         action: (code) => api.start(code, { ackBreaker }),
       });
-      if (r) notify({ kind: 'ok', title: 'Started', text: `Bot is ${r.desired || 'running'}.` });
+      if (r) {
+        clearStopSuccess();
+        notify({ kind: 'ok', title: 'Started', text: `Bot is ${r.desired || 'running'}.` });
+      }
     } catch (err) {
       const why = START_409[err.detail] || breaker409(err);
       notify({ kind: 'error', title: 'Start failed', text: why || err.message, details: why ? undefined : err.details });
@@ -259,10 +266,10 @@ export default function Overview() {
       {/* Visual title is the sticky PageTitle bar (aria-hidden); this is the page's one accessible heading. */}
       <h1>Home</h1>
       <SinceCard />
-      {status && <Headline state={headlineParts(status)[0]} pnl={head.pnl} range={range} edge={edgeSummary(edge.data)} />}
+      {status && <Headline state={headlineParts(status)[0]} pnl={head.pnl} range={range} edge={edgeSummary(edge.data)} unconfirmed={unconfirmed} />}
       <BreakerBanner breaker={status && status.breaker} onRestart={onStart} busy={!!busy} />
-      <StatusCard ref={cardRef} status={status} busy={busy} onStart={onStart} onRunOnce={onRunOnce} />
-      <StatusWidget status={status} cardRef={cardRef} />
+      <StatusCard ref={cardRef} status={status} busy={busy} onStart={onStart} onRunOnce={onRunOnce} unconfirmed={unconfirmed} failed={!status && !!error} />
+      <StatusWidget status={status} cardRef={cardRef} unconfirmed={unconfirmed} />
       {loading && !status && <Loading text="Loading status…" />}
       <ErrorNotice error={error} onRetry={refresh} />
       {stale && updatedAt && <p className="hint">Last update {dateTime(updatedAt)} (could not refresh).</p>}
@@ -285,11 +292,12 @@ export default function Overview() {
               <p className="home-scope">Settled P&amp;L, by settlement date, your time zone. Maker and arbitrage.</p>
               {todayKind(status) === 'unavailable' ? (
                 <p className="home-today muted" data-testid="today-unavailable">Today: {TODAY_UNAVAILABLE}</p>
-              ) : todayKind(status) === 'none' || !isNum(todayTotal) ? (
-                <p className="home-today muted" data-testid="today-empty">{TODAY_EMPTY}</p>
+              ) : todayKind(status) === 'none' || !isNum(today.value) ? (
+                <p className="home-today muted" data-testid="today-empty">{today.onlyYours ? TODAY_BOT_EMPTY : TODAY_EMPTY}</p>
               ) : (
                 <p className="home-today" data-testid="home-today">
-                  Today <span className={tone(todayTotal)}>{formatMoney(todayTotal, { sign: true })}</span>
+                  {today.withYou ? 'Today, incl. your trades' : 'Today'}{' '}
+                  <span className={tone(today.value)}>{formatMoney(today.value, { sign: true })}</span>
                 </p>
               )}
               {ledgerError && head.source !== 'status' && ledgerRetry}

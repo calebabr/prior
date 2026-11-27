@@ -209,7 +209,7 @@ describe('Home headline and status card', () => {
     renderApp('/');
     expect(await screen.findByTestId('home-ledger-error')).toHaveTextContent("Couldn't load P&L");
     expect(screen.getByTestId('home-total-figure')).toHaveTextContent('—');
-    expect(within(screen.getByTestId('home-row-maker')).queryByText('$0.00')).toBeNull();
+    expect(screen.getByTestId('home-row-maker').querySelector('.home-row-fig > .num')).toHaveTextContent('—');
   });
 
   it('the page has one h1, Home', async () => {

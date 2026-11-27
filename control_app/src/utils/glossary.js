@@ -219,7 +219,7 @@ const RAW_GLOSSARY = [
     aliases: ['cost', 'cost basis', 'amount paid'],
     short: 'The money spent to buy the positions that are still open.',
     body:
-      'Paid is what the open positions cost to buy, whatever they are worth now. It covers the bot\'s positions and your own. A balance "with positions at cost", as on the 30-day chart, is cash plus this amount, so it differs from the total Kalshi shows by the unrealised P&L.',
+      'Paid is what the open positions cost to buy, whatever they are worth now. It covers the bot\'s positions and your own. A balance "with positions at cost", as on the 30-day chart, is cash plus this amount, so it differs from the total Kalshi shows by the unrealized P&L.',
     related: ['market-value', 'unrealised-pnl', 'exposure', 'position'],
   },
   {
@@ -235,11 +235,11 @@ const RAW_GLOSSARY = [
   {
     id: 'unrealised-pnl',
     group: 'money',
-    term: 'Unrealised P&L',
+    term: 'Unrealized P&L',
     aliases: ['unrealized pnl', 'unrealized p&l', 'unrealised pnl', 'paper profit', 'paper loss'],
-    short: 'Market value minus the amount paid. Not realised until settlement.',
+    short: 'Market value minus the amount paid. Not realized until settlement.',
     body:
-      'Unrealised P&L is the market value of open positions minus what was paid for them. It is not realised until settlement: it changes with prices and can reverse completely, since each contract ends at $1 or $0. It is never added to the realised P&L figures.',
+      'Unrealized P&L is the market value of open positions minus what was paid for them. It is not realized until settlement: it changes with prices and can reverse completely, since each contract ends at $1 or $0. It is never added to the realized P&L figures.',
     related: ['market-value', 'paid', 'realised-pnl', 'settlement'],
   },
   {
@@ -323,11 +323,11 @@ const RAW_GLOSSARY = [
   {
     id: 'realised-pnl',
     group: 'money',
-    term: 'Realised P&L',
+    term: 'Realized P&L',
     aliases: ['realized pnl', 'realized p&l', 'realised pnl'],
     short: 'P&L from trades that have already settled. Open positions are not counted.',
     body:
-      'Realised P&L only includes fills whose market has settled, so it is money actually won or lost. Open positions have no realised P&L yet. The Home account card shows their unrealised P&L separately, and it is never part of a realised figure.',
+      'Realized P&L only includes fills whose market has settled, so it is money actually won or lost. Open positions have no realized P&L yet. The Home account card shows their unrealized P&L separately, and it is never part of a realized figure.',
     related: ['pnl', 'settlement'],
   },
   {
@@ -335,9 +335,9 @@ const RAW_GLOSSARY = [
     group: 'money',
     term: 'P&L window (7 / 30 days)',
     aliases: ['7 day pnl', '30 day pnl', '7 / 30 day p&l'],
-    short: 'Realised P&L over the last 7 or 30 days, by settlement date.',
+    short: 'Realized P&L over the last 7 or 30 days, by settlement date.',
     body:
-      'The 7-day and 30-day figures add up realised P&L for trades that settled in that window. Short windows are noisy: a single loss can make a week negative even when the strategy is fine. Judge the strategy on longer windows and on the confidence intervals in Analytics.',
+      'The 7-day and 30-day figures add up realized P&L for trades that settled in that window. Short windows are noisy: a single loss can make a week negative even when the strategy is fine. Judge the strategy on longer windows and on the confidence intervals in Analytics.',
     related: ['realised-pnl', 'confidence-interval', 'sample-size'],
   },
   {
@@ -409,7 +409,7 @@ const RAW_GLOSSARY = [
     aliases: ['health scorecard'],
     short: 'Run reliability, order errors, churn, settlement follow-through and a tiny-sample return.',
     body:
-      'A one-page health check of the bot over the chosen window. Metrics the bot does not record yet say "not tracked yet" instead of showing zero. The return shown is from demo play money with a small sample and is indicative only.',
+      'A one-page health check of the bot over the chosen window. Metrics the bot does not record yet say "not tracked yet" instead of showing zero. The return shown comes from a small sample and is indicative only. In demo it is play money; in live it is real money.',
     related: ['ledger', 'sample-size'],
   },
   {
@@ -425,11 +425,11 @@ const RAW_GLOSSARY = [
   {
     id: 'roi',
     group: 'performance',
-    term: 'ROI (return on cost)',
-    aliases: ['return', 'return on investment'],
+    term: 'Return (ROI)',
+    aliases: ['return', 'return on investment', 'return on cost', 'profit per $1 spent'],
     short: 'P&L divided by what was paid for the contracts.',
     body:
-      'ROI = P&L ÷ cost. If the bot spent $100 on contracts that settled and made $1.50, ROI is 1.5%. ROI is per trade cost, not per year.',
+      'Return (ROI) = P&L ÷ cost. If the bot spent $100 on contracts that settled and made $1.50, the return is 1.5%. It is per trade cost, not per year.',
     related: ['pnl', 'edge'],
   },
   {
@@ -439,7 +439,7 @@ const RAW_GLOSSARY = [
     aliases: ['daily return', 'weekly return', 'monthly return', 'return rate'],
     short: 'Profit settled in a day, week or month as a share of the account at the start of it.',
     body:
-      'Return = realized P&L settled in the period ÷ the base. The dollar figure is always shown; the percent is a dash when the base cannot be trusted. Each period has its own base, so daily percentages do not add up to the weekly one, but the dollars do. This is account growth, not the same as Profit per $1 Spent, which divides by what was paid for contracts.',
+      'Return = realized P&L settled in the period ÷ the base. The dollar figure is always shown; the percent is a dash when the base cannot be trusted. Each period has its own base, so daily percentages do not add up to the weekly one, but the dollars do. This is account growth, not the same as the return of a strategy or market, which divides profit by what was paid for contracts.',
     related: ['return-base', 'partial-period', 'small-sample', 'roi'],
   },
   {

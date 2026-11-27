@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import WakingBanner from '../components/WakingBanner.jsx';
 import PriorLogo from '../components/PriorLogo.jsx';
 import CodeInput from '../components/CodeInput.jsx';
+import StopAlert from '../components/StopAlert.jsx';
 import { IconEye, IconEyeOff } from '../components/Icons.jsx';
 import { isMockMode } from '../services/api.js';
 import { APP_NAME, TAGLINE_LEAD, TAGLINE_ACCENT } from '../utils/routes.js';
@@ -71,6 +72,8 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-line" aria-hidden="true" />
+      {/* A Stop that failed (an expired session, say) is still reported here. */}
+      <StopAlert />
       <WakingBanner />
       <div className="login-card card">
         <div className="login-brand">

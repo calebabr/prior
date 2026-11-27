@@ -6,6 +6,7 @@ import { ErrorNotice, Loading } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useStatus } from '../context/StatusContext.jsx';
 import { api } from '../services/api.js';
+import { TO_DEMO_ARB, TO_DEMO_ARB_LIVE, TO_DEMO_WARNING } from '../utils/stopCopy.js';
 
 export default function Mode() {
   const { status, error, loading, refresh } = useStatus();
@@ -13,6 +14,18 @@ export default function Mode() {
   const [busy, setBusy] = useState(false);
   const mode = status && status.mode;
   const liveAllowed = !!(status && status.live_allowed);
+  const arbLive = !!(status && status.arb && status.arb.state === 'live');
+  const toDemo = (
+    <>
+      <p>The bot will trade on the Kalshi demo exchange (play money).</p>
+      <div className="mode-warning" data-testid="to-demo-warning">
+        {TO_DEMO_WARNING.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+        <p>{arbLive ? TO_DEMO_ARB_LIVE : TO_DEMO_ARB}</p>
+      </div>
+    </>
+  );
 
   async function switchTo(target) {
     if (busy) return;
@@ -35,10 +48,7 @@ export default function Mode() {
     try {
       const r = await twoFactor({
         title: target === 'live' ? 'Confirm LIVE mode' : 'Switch to DEMO?',
-        message:
-          target === 'live'
-            ? 'Final Step: Enter your code to switch to LIVE.'
-            : 'The bot will trade on the Kalshi demo exchange (play money).',
+        message: target === 'live' ? 'Final Step: Enter your code to switch to LIVE.' : toDemo,
         confirmLabel: target === 'live' ? 'Go LIVE' : 'Switch to demo',
         danger: target === 'live',
         action: (code) => api.setMode(target, target === 'live' ? 'LIVE' : undefined, code),

@@ -145,6 +145,15 @@ export function stopToastTitle(r) {
   return n == null ? `Stopped at ${t}` : `Stopped at ${t} · ${titleCase(plural(n, 'order cancelled', 'orders cancelled'))}`;
 }
 
+/** The status card line for a successful Stop: "Stopped at 9:41 PM, 3 orders cancelled" (only reported facts). */
+export function stoppedLine(rec, now = Date.now()) {
+  const at = rec && rec.stoppedAt ? sinceLabel(rec.stoppedAt, now) : '';
+  // "at 9:41 PM" today; "Yesterday 9:41 PM" and "Oct 12, 9:41 PM" read without "at".
+  const head = !at ? 'Stopped' : /^\d/.test(at) ? `Stopped at ${at}` : `Stopped ${at.replace(/^Yesterday/, 'yesterday')}`;
+  const n = rec && rec.cancelled;
+  return isNum(n) ? `${head}, ${plural(n, 'order', 'orders')} cancelled` : head;
+}
+
 const SETTING_LABELS = { run_budget: 'Run Budget', poll_minutes: 'Poll Minutes', max_open_frac: 'Max Open Fraction' };
 
 /**

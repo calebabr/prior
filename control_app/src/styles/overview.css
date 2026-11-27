@@ -64,6 +64,7 @@
 .hb-warn { background: var(--warn); }
 .hb-empty { margin-top: 12px; }
 
+.ov-stopped { margin: 10px 0 0; font-size: 0.9375rem; font-weight: 500; overflow-wrap: anywhere; }
 .ov-timing { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ov-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .ov-actions .btn { width: 100%; }
@@ -128,6 +129,13 @@ a.home-row:hover { text-decoration: none; background: color-mix(in srgb, var(--a
 .perf-table tr.perf-manual td { border-top: 1px dashed var(--border-strong, var(--border)); color: var(--muted); }
 .perf-table tfoot td { font-weight: 600; }
 .perf-scroll { overflow-x: auto; }
+.perf-table .perf-you-sub { display: block; font-size: var(--fs-xs, 0.75rem); font-weight: 400; color: var(--muted); }
+/* Narrow phones: tighter cells and two-line headers, so all five columns fit without sideways scrolling. */
+@media (max-width: 400px) {
+  .perf-table { font-size: var(--fs-sm, 0.8125rem); }
+  .perf-table th, .perf-table td { padding-left: 2px; padding-right: 2px; }
+  .perf-table thead th { white-space: normal; font-size: var(--fs-xs, 0.75rem); vertical-align: bottom; }
+}
 .perf-links { list-style: none; margin: 0; padding: 0; }
 .perf-links a { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 56px; color: var(--text); text-decoration: none; border-top: 1px solid var(--border); }
 .perf-links li:first-child a { border-top: 0; }

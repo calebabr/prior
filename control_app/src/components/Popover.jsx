@@ -123,11 +123,12 @@ export default function Popover({ open, onClose, anchorRef, label, children, cla
       aria-label={label}
       tabIndex={-1}
       style={{
-        // never above the safe-area inset (status bar) and never taller than the space below it; long text scrolls inside
-        top: `max(${pos.top}px, calc(var(--safe-top) + 8px))`,
+        // never over the header (Stop lives there, and above every dialog) or the status-bar inset, and never taller than
+        // the space below it; long text scrolls inside
+        top: `max(${pos.top}px, calc(var(--appbar-h, calc(var(--safe-top) + 65px)) + 4px))`,
         left: pos.left,
         width: pos.width,
-        maxHeight: 'calc(100dvh - var(--safe-top) - var(--safe-bottom) - 24px)',
+        maxHeight: 'calc(100dvh - var(--appbar-h, calc(var(--safe-top) + 65px)) - var(--safe-bottom) - 16px)',
         overflowY: 'auto',
       }}
     >

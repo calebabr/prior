@@ -42,11 +42,11 @@ const DEFAULT_SCHEMA = {
   },
   arb_scan_cap: {
     type: 'number', unit: 'USD per scan', min: 1, max: 100,
-    help: 'Most money one scan may spend on sets in demo-execute. Sets over this are skipped.',
+    help: 'Most money one scan may put into arbitrage sets. Sets over this are skipped.',
   },
   arb_day_cap: {
     type: 'number', unit: 'USD per day', min: 1, max: 500,
-    help: 'Most money arbitrage may spend per UTC day in demo-execute.',
+    help: 'Most money arbitrage may spend in one UTC day.',
   },
   arb_series_cap_frac: {
     type: 'number', unit: 'fraction of the open-exposure ceiling', min: 0.05, max: 0.9, step: 0.01,
@@ -73,6 +73,9 @@ const DEFAULT_SCHEMA = {
     help: 'Place the sets it finds as real orders on the Kalshi demo account (play money). Never on live.',
   },
 };
+
+// Settings that only change what happens on the demo exchange: shown in their own group.
+export const DEMO_ONLY_FIELDS = ['arb_demo_execute'];
 
 const STATES = [
   { key: 'stopped', label: 'Off' },
@@ -318,6 +321,7 @@ export function useArbController() {
           : 'The scanner stops. Stop (no code needed) also turns it off.',
         confirmLabel: on ? 'Turn on' : 'Turn off',
         danger: on && live,
+        resumesTrading: on, // sent before a Stop, it could turn arbitrage back on: see DialogContext
         action: (code) => api.putArb(body, code),
       });
       if (r) {
@@ -427,7 +431,7 @@ export function useArbController() {
           <legend>{label}</legend>
           <div className="checks">
             {options.map((o) => (
-              <label key={o} className="check">
+              <label key={o} className="ux-check">
                 <input
                   type="checkbox"
                   checked={cur.includes(o)}
@@ -447,7 +451,7 @@ export function useArbController() {
     if (kind === 'bool') {
       return (
         <div className="field" key={k}>
-          <label className="check">
+          <label className="ux-check">
             <input type="checkbox" checked={!!draft[k]} onChange={(ev) => setField(k, ev.target.checked)} />
             {label}
           </label>

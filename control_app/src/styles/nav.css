@@ -58,7 +58,9 @@
 .strategy-card:hover { text-decoration: none; background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .strategy-card-head { display: flex; align-items: center; gap: var(--sp-2); min-height: var(--tap); }
 .strategy-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--strategy-color, var(--muted)); }
-.strategy-name { flex: 1; min-width: 0; font-size: var(--fs-lg); font-weight: 600; letter-spacing: -0.01em; }
+.strategy-name { flex: 1 0 auto; min-width: 0; font-size: var(--fs-lg); font-weight: 600; letter-spacing: -0.01em; }
+/* A long run state ("Last known: log only, no orders") wraps inside its chip instead of running into the name. */
+.strategy-card-head .tag { flex: 0 1 auto; min-width: 0; white-space: normal; }
 .strategy-chevron { display: flex; color: var(--muted); }
 .strategy-figures { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3) var(--sp-4); margin: var(--sp-2) 0 0; }
 .strategy-figure dt { margin: 0 0 var(--sp-1); color: var(--muted); font-size: var(--fs-xs); }

@@ -10,6 +10,7 @@ vi.setConfig({ testTimeout: 30000 });
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  localStorage.removeItem('prior.stop'); // the last Stop result outlives a page on purpose (services/stopResult.js)
 });
 
 if (!window.matchMedia) {

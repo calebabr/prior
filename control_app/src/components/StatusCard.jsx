@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 import Chip from './Chip.jsx';
 import HelpIcon from './HelpIcon.jsx';
 import StopButton from './StopButton.jsx';
+import { useStopRecord } from '../services/stopResult.js';
+import { STOP_COPY } from '../utils/stopCopy.js';
 import { IconLock } from './Icons.jsx';
 import { formatAgo, formatUntil } from '../utils/format.js';
-import { abnormalities, isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
+import { abnormalities, isRunning, overallState, ringProgress, runTimes, stoppedLine } from '../utils/overview.js';
 import '../styles/overview.css';
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -100,21 +102,29 @@ function ActionsMenu({ onRunOnce, disabled }) {
  * context button (Stop while running, Start otherwise; Stop is ALWAYS present and identical to the header one).
  * Money figures live in the Total P&L section of Home; the heartbeat strip moved to the Maker page. Abnormal facts show in red on their own.
  */
-const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRunOnce }, ref) {
+const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRunOnce, unconfirmed = false, failed = false }, ref) {
   const now = useNow();
+  const stop = useStopRecord();
   const running = isRunning(status);
   const st = overallState(status, now);
-  const bad = abnormalities(status, now);
+  // "Overdue" is judged from the clock, so it says nothing about an old reading.
+  const bad = abnormalities(status, now).filter((b) => !(unconfirmed && b.key === 'overdue'));
   const { last, next } = runTimes(status);
   const overdue = bad.some((b) => b.key === 'overdue');
   const mode = status && status.mode === 'live' ? 'live' : 'demo';
+  const label = !status && failed ? 'Status unknown' : unconfirmed ? `Last known: ${st.label}` : st.label;
+  const shown = unconfirmed ? 'unknown' : st.key;
+  // Only what the server reported: shown until a newer status says the bot runs again.
+  const stopLine = stop && stop.kind === 'ok' && (!running || unconfirmed || !status) ? stoppedLine(stop) : null;
+  const justStopped = stop && stop.kind === 'ok';
+  const alreadyStopped = !!status && !unconfirmed && !running && (!stop || justStopped);
 
   return (
-    <section className={`card hero status-card state-${st.key}`} ref={ref} data-testid="status-card" data-state={st.key}>
+    <section className={`card hero status-card state-${shown}`} ref={ref} data-testid="status-card" data-state={shown}>
       <div className="ov-top">
-        <StatusRing state={st.key} progress={ringProgress(status, now)} />
+        <StatusRing state={shown} progress={unconfirmed ? 0 : ringProgress(status, now)} />
         <div className="ov-state">
-          <div className="ov-state-label" data-testid="state-label">{st.label}</div>
+          <div className="ov-state-label" data-testid="state-label">{label}</div>
           <div className="ov-chips">
             {status && <Chip tone={mode === 'live' ? 'danger' : 'warn'}>{mode === 'live' ? 'Live' : 'Demo'}</Chip>}
             <HelpIcon term="stop" />
@@ -131,9 +141,15 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
         </ul>
       )}
 
+      {stopLine && (
+        <p className="ov-stopped" data-testid="stopped-line" role="status">
+          {stopLine}
+        </p>
+      )}
+
       <p className="ov-timing" data-testid="timing-line">
         <span>Last run {last ? formatAgo(last) : '—'}</span>
-        {running && next && (
+        {running && !unconfirmed && next && (
           <>
             {' · '}
             <span className={overdue ? 'error-text' : undefined}>Next {formatUntil(next)}</span>
@@ -160,6 +176,11 @@ const StatusCard = forwardRef(function StatusCard({ status, busy, onStart, onRun
           </>
         )}
       </div>
+      {alreadyStopped && (
+        <p className="hint" data-testid="already-stopped">
+          {STOP_COPY.alreadyStopped(mode)}
+        </p>
+      )}
       {busy === 'run' && <p className="hint">Running one pass…</p>}
     </section>
   );

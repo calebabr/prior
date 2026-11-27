@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { renderApp, STATUS } from './helpers.jsx';
 import LedgerView from '../components/analytics/LedgerView.jsx';
 
@@ -38,7 +38,8 @@ function stub(ledger) {
     'GET /api/status': RUNNING,
     'GET /api/history': { snapshots: [] },
     'GET /api/strategies': STRATS,
-    'GET /api/account/positions': [],
+    // Open, paid comes from the positions open now, not from the ledger.
+    'GET /api/account/positions': [{ kind: 'position', source: 'bot', strategy: 'maker', cost: 8.2, value: 8.9 }],
     'GET /api/markets': { markets: [] },
     'GET /api/analytics/ledger': ledger,
   };
@@ -69,7 +70,7 @@ describe('Home rows use the settlement-date rule', () => {
     expect(within(maker).queryByText('−$3.64')).toBeNull();
     expect(screen.getByTestId('home-total-figure')).toHaveTextContent('+$13.58');
     expect(0.18 + 13.4).toBeCloseTo(13.58, 2);
-    expect(within(maker).getByText(/Open/)).toHaveTextContent('$8.20'); // open cost unchanged
+    await waitFor(() => expect(within(maker).getByText(/Open/)).toHaveTextContent('$8.20'));
   });
 
   it('an API without settled_by_strategy shows a dash, never the fill-date number', async () => {

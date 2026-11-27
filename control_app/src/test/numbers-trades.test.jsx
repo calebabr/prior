@@ -81,9 +81,9 @@ describe('Home account card (/api/account/summary)', () => {
     expect(figure('paid')).toHaveTextContent('$40.00');
     expect(figure('unrealised')).toHaveTextContent('−$3.00');
     expect(figure('unrealised')).toHaveClass('neg');
-    expect(acct('unrealised')).toHaveTextContent('not realised until settlement');
+    expect(acct('unrealised')).toHaveTextContent('not realized until settlement');
     expect(screen.getByTestId('home-account')).toHaveTextContent('From Kalshi (live)');
-    for (const name of ['What is Market Value?', 'What is Paid for Positions?', 'What is Unrealised P&L?']) {
+    for (const name of ['What is Market Value?', 'What is Paid for Positions?', 'What is Unrealized P&L?']) {
       expect(within(screen.getByTestId('home-account')).getByRole('button', { name })).toBeInTheDocument();
     }
     // The realised headline is still the ledger's settled figure for the bot (your own trades are not in it).
@@ -156,7 +156,7 @@ describe('Home You row (live positions)', () => {
   it('bot rows say the open figure is what was paid', async () => {
     stubApi(routes());
     renderApp('/');
-    await waitFor(() => expect(screen.getByTestId('home-row-maker')).toHaveTextContent('Open, paid $8.20'));
+    await waitFor(() => expect(screen.getByTestId('home-row-maker')).toHaveTextContent('Open, paid $4.00'));
   });
 
   it('a row without a paid figure (older API) gives a dash, not a smaller total', async () => {

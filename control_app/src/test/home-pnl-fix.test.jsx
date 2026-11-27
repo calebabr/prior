@@ -102,7 +102,7 @@ describe('Home headline does not wait for the ledger', () => {
     const err = await screen.findByTestId('home-ledger-error');
     expect(err).toHaveTextContent("Couldn't load P&L by strategy");
     expect(screen.getByTestId('home-total-figure')).toHaveTextContent('+$19.52');
-    expect(within(screen.getByTestId('home-row-maker')).queryByText('$0.00')).toBeNull();
+    expect(screen.getByTestId('home-row-maker').querySelector('.home-row-fig > .num')).toHaveTextContent('—');
     expect(calls.ledger).toBe(1); // a 500 is not retried
     await userEvent.click(within(err).getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.queryByTestId('home-ledger-error')).toBeNull());

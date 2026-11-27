@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import Card from '../components/Card.jsx';
 import Chip from '../components/Chip.jsx';
 import CheckStatusIcon from '../components/CheckStatusIcon.jsx';
@@ -10,6 +11,7 @@ import { useDialogs } from '../context/DialogContext.jsx';
 import { useStatus } from '../context/StatusContext.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
+import { armNote, armWarning, killSwitchHelp } from '../utils/arming.js';
 import '../styles/arming.css';
 
 const STRATEGIES = [
@@ -28,6 +30,31 @@ export function armBlockReason({ liveAllowed, ready, hasPreflight }) {
   if (!hasPreflight) return 'Run the checks first.';
   if (!ready) return 'Not ready: fix the items under "Needs fixing" first.';
   return null;
+}
+
+/** Why the kill-switch check fails and the steps that clear it (utils/arming.js). */
+function KillSwitchHelp({ help }) {
+  return (
+    <div className="arm-fix" data-testid="kill-switch-help">
+      <p>{help.cause}</p>
+      <ol>
+        {help.steps.map((s) => (
+          <li key={s}>{s}</li>
+        ))}
+      </ol>
+      <p className="arm-fix-links">
+        <Link className="btn small" to="/">
+          Home
+        </Link>
+        <Link className="btn small" to="/strategies/arb/controls">
+          Arbitrage
+        </Link>
+        <Link className="btn small" to="/mode">
+          Mode
+        </Link>
+      </p>
+    </div>
+  );
 }
 
 export default function Arming() {
@@ -51,6 +78,10 @@ export default function Arming() {
   const ready = !!(pre.data && pre.data.ready);
   const hasPreflight = !!pre.data;
   const liveAllowed = !!(arm.data && arm.data.live_allowed);
+  const makerArmed = !!(arm.data && arm.data.maker && arm.data.maker.armed);
+  const arbMode = arm.data && arm.data.arbitrage && arm.data.arbitrage.mode;
+  const arbOn = !!(status && status.arb && status.arb.state && status.arb.state !== 'stopped');
+  const arbLive = arbMode === 'live' && arbOn;
   const block = armBlockReason({ liveAllowed, ready, hasPreflight });
 
   async function change(s, next) {
@@ -71,12 +102,13 @@ export default function Arming() {
       }
       return;
     }
+    const warning = armWarning(s.id, { demo, arbMode, arbOn });
     const ok = await confirm({
       title: `Arm ${name}?`,
       message: (
         <>
           <p>Arming lets this strategy trade in live mode.</p>
-          {demo && <p>This arms the strategy for live. It does not start live trading.</p>}
+          <p className={warning.danger ? 'error-text' : undefined}>{warning.text}</p>
           <p className="hint">Stop still works at any time. You will need a 2FA code next.</p>
         </>
       ),
@@ -136,9 +168,8 @@ export default function Arming() {
               </p>
             </div>
           </div>
-          <p className="hint" data-testid="arm-note">
-            Arming only takes effect when live mode is on. You can arm now while in demo mode, then switch to live.
-            {demo ? ' Checks are for live.' : ''}
+          <p className={`hint${!demo || arbLive ? ' error-text' : ''}`} data-testid="arm-note">
+            {armNote({ demo, arbLive })}
           </p>
           <div className="arm-meta">
             <span className="hint">
@@ -173,6 +204,9 @@ export default function Arming() {
                           <div className="arm-check-body">
                             <div className="arm-check-label">{c.label}</div>
                             {c.detail && <div className="arm-check-detail">{c.detail}</div>}
+                            {c.id === 'kill_switch' && c.status !== 'pass' && (
+                              <KillSwitchHelp help={killSwitchHelp(c, { demo, makerArmed })} />
+                            )}
                           </div>
                         </li>
                       ))}

@@ -49,7 +49,7 @@ export default function AccountCard({ account }) {
             <Row id="cash" label="Cash" help={<HelpIcon term="balance" />} value={live.cash} />
             <Row id="value" label="Positions at market value" help={<HelpIcon term="market-value" />} value={live.positions_value} />
             <Row id="paid" label="Paid for positions" help={<HelpIcon term="paid" />} value={live.positions_cost} />
-            <Row id="unrealised" label="Unrealised P&L" help={<HelpIcon term="unrealised-pnl" />} value={live.unrealized} signed note="not realised until settlement" />
+            <Row id="unrealised" label="Unrealized P&L" help={<HelpIcon term="unrealised-pnl" />} value={live.unrealized} signed note="not realized until settlement" />
           </dl>
           <p className="hint acct-source">
             From Kalshi{envName ? ` (${envName})` : ''}

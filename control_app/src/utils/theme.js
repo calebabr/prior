@@ -103,6 +103,7 @@ export const badgeStyles = {
   demo: { color: 'warn', label: 'Demo Running' },
   stopped: { color: 'off', label: 'Stopped' },
   error: { color: 'danger', label: 'Error' },
+  stale: { color: 'warn', label: 'Not Confirmed' },
   unknown: { color: 'off', label: 'Unknown' },
 };
 

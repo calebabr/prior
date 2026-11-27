@@ -11,7 +11,7 @@ import { useResource } from '../../hooks/useResource.js';
 import { api } from '../../services/api.js';
 import { ago, dateTime, money, num } from '../../utils/format.js';
 import { strategyPath } from '../../utils/routes.js';
-import { StateTrack, executedPill, gateReason, isNum, useArbController, useArbOpportunities } from './arbShared.jsx';
+import { DEMO_ONLY_FIELDS, StateTrack, executedPill, gateReason, isNum, useArbController, useArbOpportunities } from './arbShared.jsx';
 
 // The three Arbitrage views (Overview | Results | Controls). Extracted from the old single page: same cards,
 // same text, same handlers (all in useArbController). Every write keeps its confirm and fresh-2FA path.
@@ -269,7 +269,8 @@ export function ArbResults() {
 
 export function ArbControls() {
   const c = useArbController();
-  const { arb, data, settings, fields, renderField, save, saveError, dirty, hasErrors, busy, resetDraft, reload } = c;
+  const { arb, data, appStatus, settings, fields, renderField, save, saveError, dirty, hasErrors, busy, resetDraft, reload } = c;
+  const demoOnly = fields.filter((k) => DEMO_ONLY_FIELDS.includes(k));
   return (
     <div className="strat-view">
       <Refresh onClick={reload} disabled={arb.loading} />
@@ -285,7 +286,14 @@ export function ArbControls() {
       {settings && fields.length > 0 && (
         <form onSubmit={save}>
           <Card title="Arbitrage settings" subtitle="Applies from the next scan.">
-            <div className="stack">{fields.map(renderField)}</div>
+            <div className="stack">{fields.filter((k) => !DEMO_ONLY_FIELDS.includes(k)).map(renderField)}</div>
+            {demoOnly.length > 0 && (
+              <div className="demo-only" data-testid="demo-only-settings">
+                <h3 className="subhead">Demo only</h3>
+                {appStatus && appStatus.mode === 'live' && <p className="hint">No effect while the app is in live mode.</p>}
+                <div className="stack">{demoOnly.map(renderField)}</div>
+              </div>
+            )}
           </Card>
           {saveError && (
             <div className="notice notice-error" role="alert">

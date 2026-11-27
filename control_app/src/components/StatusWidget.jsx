@@ -5,7 +5,7 @@ import { StatusRing, pnlClass, useNow } from './StatusCard.jsx';
 import { useMediaQuery } from '../hooks/useMediaQuery.js';
 import { formatMoney, formatUntil } from '../utils/format.js';
 import { isRunning, overallState, ringProgress, runTimes } from '../utils/overview.js';
-import { todayKind } from '../utils/pnlScopes.js';
+import { todayFigure, todayKind } from '../utils/pnlScopes.js';
 import '../styles/overview.css';
 
 /** Tablets and desktops only. Phones keep the card plus the header Stop (no floating widget). */
@@ -44,7 +44,7 @@ export function useCardOffscreen(cardRef, enabled) {
  * Shows dot, state, mode, today's P&L and the SAME Stop button as everywhere else (one tap + the same
  * confirm, no 2FA). Tap the body to expand; "Back to Status" scrolls up. Never rendered on phones.
  */
-export default function StatusWidget({ status, cardRef }) {
+export default function StatusWidget({ status, cardRef, unconfirmed = false }) {
   const wide = useMediaQuery(WIDGET_QUERY);
   const off = useCardOffscreen(cardRef, wide);
   const [open, setOpen] = useState(false);
@@ -54,7 +54,7 @@ export default function StatusWidget({ status, cardRef }) {
   const st = overallState(status, now);
   const running = isRunning(status);
   const mode = status.mode === 'live' ? 'live' : 'demo';
-  const today = status.pnl_today && status.pnl_today.total;
+  const { value: today, withYou } = todayFigure(status);
   const { next } = runTimes(status);
 
   function toTop() {
@@ -66,21 +66,21 @@ export default function StatusWidget({ status, cardRef }) {
   }
 
   return (
-    <aside className={`status-widget state-${st.key}`} aria-label="Bot status" data-testid="status-widget">
+    <aside className={`status-widget state-${unconfirmed ? 'unknown' : st.key}`} aria-label="Bot status" data-testid="status-widget">
       <button type="button" className="sw-body" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <StatusRing state={st.key} progress={ringProgress(status, now)} size={30} />
+        <StatusRing state={unconfirmed ? 'unknown' : st.key} progress={unconfirmed ? 0 : ringProgress(status, now)} size={30} />
         <span className="sw-text">
-          <span className="sw-state">{st.label}</span>
+          <span className="sw-state">{unconfirmed ? `Last known: ${st.label}` : st.label}</span>
           <Chip tone={mode === 'live' ? 'danger' : 'warn'}>{mode === 'live' ? 'Live' : 'Demo'}</Chip>
         </span>
         <span className={`sw-pnl ${pnlClass(today)}`}>
-          <span className="sw-pnl-label">Today</span>
+          <span className="sw-pnl-label">{withYou ? 'Today, incl. you' : 'Today'}</span>
           {todayKind(status) === 'unavailable' ? 'Unavailable' : typeof today === 'number' && todayKind(status) === 'value' ? formatMoney(today, { sign: true }) : 'None yet'}
         </span>
       </button>
       {open && (
         <div className="sw-more">
-          {running && next && <p className="hint">Next {formatUntil(next)}</p>}
+          {running && !unconfirmed && next && <p className="hint">Next {formatUntil(next)}</p>}
           <button type="button" className="btn" onClick={toTop}>Back to Status</button>
         </div>
       )}

@@ -226,3 +226,63 @@ describe('Arbitrage enable after a trip', () => {
     expect(calls.find((c) => c.key === 'PUT /api/arb').body).toEqual({ enabled: true, ack_breaker: true });
   });
 });
+
+describe('Settings: your own trades left out of the breaker', () => {
+  const own = (fields) =>
+    base(CLEAR, { 'GET /api/breaker': BREAKER({ state: { env: 'live', envs: { live: { ...ENV, ...fields }, demo: ENV } } }) });
+  const open = async () => {
+    renderApp('/settings');
+    return screen.findByTestId('breaker-state');
+  };
+
+  it('shows the signed amount, the account total beside the figure the limits use, and the unconfirmed count', async () => {
+    own({ account_equity: 234.5, manual_excluded: -3, manual_unproven: 2 });
+    await open();
+    expect(screen.getByTestId('breaker-excluded')).toHaveTextContent('Your own trades left out');
+    expect(screen.getByTestId('breaker-excluded')).toHaveTextContent('\u2212$3.00');
+    expect(screen.getByTestId('breaker-account-total')).toHaveTextContent('$234.50');
+    expect(screen.getByTestId('breaker-limit-figure')).toHaveTextContent('$237.50');
+    expect(screen.getByTestId('breaker-unproven')).toHaveTextContent('2 of your markets still count (not yet confirmed as yours).');
+    const help = screen.getByTestId('breaker-own');
+    expect(help).toHaveTextContent('once Kalshi confirms the bot did not place them');
+    expect(help).toHaveTextContent('Markets both you and the bot traded still count');
+    expect(help).toHaveTextContent("still reduce the bot's budget");
+    expect(screen.getByRole('button', { name: /What is Your Own Trades/i })).toHaveAttribute('type', 'button');
+  });
+
+  it('a manual win shows a plus sign; one unconfirmed market reads in the singular', async () => {
+    own({ account_equity: 240, manual_excluded: 2.5, manual_unproven: 1 });
+    await open();
+    expect(screen.getByTestId('breaker-excluded')).toHaveTextContent('+$2.50');
+    expect(screen.getByTestId('breaker-unproven')).toHaveTextContent('1 of your markets still counts');
+  });
+
+  it.each([
+    ['absent (older API)', {}],
+    ['null', { account_equity: null, manual_excluded: null, manual_unproven: null }],
+  ])('fields %s add nothing', async (_name, fields) => {
+    own(fields);
+    const state = await open();
+    expect(state.querySelectorAll('li')).toHaveLength(5);
+    for (const id of ['breaker-excluded', 'breaker-account-total', 'breaker-limit-figure', 'breaker-unproven', 'breaker-own']) {
+      expect(screen.queryByTestId(id)).toBeNull();
+    }
+  });
+
+  it('shows only what is known: no count line for zero, no amount row when it is unknown', async () => {
+    own({ account_equity: 237.5, manual_excluded: null, manual_unproven: 0 });
+    await open();
+    expect(screen.queryByTestId('breaker-excluded')).toBeNull();
+    expect(screen.queryByTestId('breaker-unproven')).toBeNull();
+    expect(screen.getByTestId('breaker-account-total')).toHaveTextContent('$237.50');
+  });
+
+  it('reads the current mode only', async () => {
+    base(CLEAR, {
+      'GET /api/breaker': BREAKER({ state: { env: 'demo', envs: { demo: ENV, live: { ...ENV, account_equity: 999, manual_excluded: -50 } } } }),
+    });
+    await open();
+    expect(screen.queryByTestId('breaker-excluded')).toBeNull();
+    expect(screen.queryByTestId('breaker-account-total')).toBeNull();
+  });
+});

@@ -65,6 +65,8 @@ FILLS_SYNC_EVERY = timedelta(minutes=30)
 FILLS_SYNC_ON_DEMAND_MIN = timedelta(minutes=2)   # B3: reads / idle loop start a sync at most this often (also after
                                                   # a failure); measured from the last attempt, not the last success
 FILLS_SYNC_TIMEOUT_S = 60
+FILLS_STUCK_AFTER_S = 600                       # security L-1: a fetch busy this long is reported (error + one alert)
+FILLS_MAX_PAGES = 60                            # security L-1: pages per fills endpoint (1000 each) before giving up
 FILLS_FIRST_DAYS = 35
 # fill source attribution (UX item Y1; services/strategies.py)
 MAKER_OID_MAX = 150_000             # journal maker order ids kept in memory (~35 days of quotes)
@@ -300,6 +302,49 @@ def telemetry_kalshi_factory(mode: str):
     key = serialization.load_pem_private_key(pk.replace("\\n", "\n").encode(), password=None)
     return KalshiClient(BASE_URLS["prod" if mode == "live" else "demo"], key_id=kid, private_key=key,
                         max_retries=TELEMETRY_CLIENT_MAX_RETRIES, timeout=TELEMETRY_CLIENT_TIMEOUT_S)
+
+
+def _bounded_fills(client: Any, min_ts: int) -> list[dict]:
+    """Security L-1: the same reads as KalshiClient.get_fills (GET /portfolio/fills, then /historical/fills, newest
+    first, deduplicated), but at most FILLS_MAX_PAGES pages per endpoint and stopping on a repeated cursor, so a bad
+    cursor can never keep the fetch thread (and with it every later sync) busy for ever. Raises when the limit is hit
+    (the sync is recorded as failed; nothing partial is stored). A test double without `request` keeps its own
+    get_fills."""
+    botfiles.ensure_bot_path()
+    try:
+        from kalshi_client import KalshiClient, KalshiError
+    except Exception:  # noqa: BLE001
+        KalshiClient = KalshiError = None   # noqa: N806
+    if KalshiClient is None or not isinstance(client, KalshiClient):
+        return list(client.get_fills(min_ts=min_ts) or [])
+    out: list[dict] = []
+    for path in ("/portfolio/fills", "/historical/fills"):
+        cursor, seen = None, set()
+        for _ in range(FILLS_MAX_PAGES):
+            try:
+                body = client.request("GET", path, params={"min_ts": min_ts, "limit": 1000, "cursor": cursor},
+                                      auth=True)
+            except KalshiError as e:
+                if path == "/historical/fills" and e.status in (400, 404):
+                    break                                   # no archive access/needed (as get_fills)
+                raise
+            body = body if isinstance(body, dict) else {}
+            out.extend(f for f in (body.get("fills") or []) if isinstance(f, dict))
+            cursor = body.get("cursor")
+            if not cursor or not body.get("fills"):
+                break
+            if cursor in seen:
+                raise RuntimeError("fills_cursor_repeated")
+            seen.add(cursor)
+        else:
+            raise RuntimeError("fills_page_limit")
+    uniq, ids = [], set()
+    for f in out:
+        fid = f.get("fill_id") or f.get("trade_id")
+        if fid not in ids:
+            ids.add(fid)
+            uniq.append(f)
+    return uniq
 
 
 def telemetry_public_factory(env: str):
@@ -549,6 +594,13 @@ class Runner:
         self._fills_attempt_utc: datetime | None = None   # last on-demand start (success or failure)
         self.fills_on_demand = False                 # set by start() with the background loops; tests set it
         self.fills_sync_trigger: str | None = None   # what started the last sync: "pass", "read:<route>", "idle"
+        # security M-1: per-env watermark and error (a mode switch never shortens the other env's window)
+        self._fills_synced: dict[str, datetime] = {}
+        self._fills_err: dict[str, str | None] = {}
+        # security L-1: when the running fetch started (monotonic), its env, and the fetch already alerted as stuck
+        self._fills_fetch_started: float | None = None
+        self._fills_fetch_env: str | None = None
+        self._fills_stuck_alerted: Any = None
         # bracket arbitrage (on/off + live live in the store's state doc; numeric settings in config["arb"])
         self.arb_desired = "stopped"
         self.arb_mode = "demo"           # demo = log-only; live = execute on prod (needs the env gates)
@@ -1758,7 +1810,7 @@ class Runner:
         if client is None:
             return [], []
         min_ts = int(since.timestamp())
-        fills = list(client.get_fills(min_ts=min_ts) or [])
+        fills = _bounded_fills(client, min_ts)
         settlements: list[dict] = []
         getter = getattr(client, "get_settlements", None)
         if callable(getter):
@@ -1782,7 +1834,10 @@ class Runner:
         FILLS_SYNC_ON_DEMAND_MIN. Synchronous and non-blocking: the caller (a read route or the idle loop) never
         waits for it. Never raises. Returns True when a sync was started."""
         try:
-            if not self.fills_on_demand or self._shutting_down or self.fills_sync_busy():
+            if self.fills_sync_busy():
+                self._check_fills_stuck()
+                return False
+            if not self.fills_on_demand or self._shutting_down:
                 return False
             if self.role() != "leader":
                 return False                          # one syncing instance during a handover (alerts sent once)
@@ -1810,20 +1865,47 @@ class Runner:
         timeout, this returns {"synced": False, "reason": "in_flight"} at once (the running one covers the same
         window, and its alerts are the only ones sent)."""
         now = utcnow()
-        if not force and self.last_fills_sync_utc and now - self.last_fills_sync_utc < FILLS_SYNC_EVERY:
+        last = self.fills_synced_utc(mode)
+        if not force and last and now - last < FILLS_SYNC_EVERY:
             return {"synced": False, "reason": "not_due"}
         if self.fills_sync_busy():
+            self._check_fills_stuck()
             return {"synced": False, "reason": "in_flight"}
         async with self._fills_lock:
             self.fills_sync_trigger = trigger
             return await self._sync_fills_locked(mode, now)
 
+    def fills_synced_utc(self, mode: str) -> datetime | None:
+        """Security M-1: the start of the last successful sync OF THIS ENV (demo and live are watermarked apart)."""
+        return self._fills_synced.get("live" if mode == "live" else "demo")
+
+    def _check_fills_stuck(self) -> None:
+        """Security L-1: a fetch thread busy for FILLS_STUCK_AFTER is reported (visible error + one alert per stuck
+        fetch). Never raises."""
+        try:
+            cf, started = self._fills_fetch, self._fills_fetch_started
+            if cf is None or cf.done() or started is None or self._fills_stuck_alerted is cf:
+                return
+            if time.monotonic() - started < FILLS_STUCK_AFTER_S:
+                return
+            self._fills_stuck_alerted = cf
+            self.fills_sync_error = "stuck"
+            self._fills_err[self._fills_fetch_env or "demo"] = "stuck"
+            log.error("fills sync stuck: fetch running for over %d s", FILLS_STUCK_AFTER_S)
+            self._spawn(self.alerter.send("Fills sync stuck",
+                                          "Reading fills from Kalshi has not finished for over 10 minutes; new fills "
+                                          "and settlements are not being copied. Trading is not affected.",
+                                          priority="high"))
+        except Exception as e:  # noqa: BLE001
+            log.error("fills stuck check failed: %s", type(e).__name__)
+
     async def _sync_fills_locked(self, mode: str, now: datetime) -> dict:
-        since = (self.last_fills_sync_utc - timedelta(days=2)) if self.last_fills_sync_utc \
-            else now - timedelta(days=FILLS_FIRST_DAYS)
+        env = "live" if mode == "live" else "demo"
+        last = self._fills_synced.get(env)
+        since = (last - timedelta(days=2)) if last else now - timedelta(days=FILLS_FIRST_DAYS)
         try:
             cf = self._tel_executor.submit(self._fetch_fills_sync, mode, since)   # telemetry pool, never Stop's
-            self._fills_fetch = cf
+            self._fills_fetch, self._fills_fetch_started, self._fills_fetch_env = cf, time.monotonic(), env
             fills, settlements = await asyncio.wait_for(asyncio.wrap_future(cf), timeout=FILLS_SYNC_TIMEOUT_S)
             for f in fills:
                 f.setdefault("env", mode)                 # demo and live P&L never mix
@@ -1839,6 +1921,7 @@ class Runner:
             finally:
                 self._pnl_gen += 1                     # /status P&L: the cached value is stale now
             self.last_fills_sync_utc, self.fills_sync_error = now, None
+            self._fills_synced[env], self._fills_err[env] = now, None
             if known is not None:
                 self._alert_new_fills([f for f in fills if str(f.get("fill_id") or f.get("trade_id")) not in known])
             if known_settled is not None:
@@ -1846,6 +1929,7 @@ class Runner:
             return {"synced": True, "fills": nf, "settlements": ns}
         except Exception as e:  # noqa: BLE001
             self.fills_sync_error = type(e).__name__
+            self._fills_err[env] = type(e).__name__
             log.error("fills sync failed: %s", _where(e))
             return {"synced": False, "reason": type(e).__name__}
 
@@ -1887,9 +1971,15 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 log.warning("order lookup failed: %s", type(e).__name__)
                 continue
-            o = body.get("order") if isinstance(body, dict) and isinstance(body.get("order"), dict) else body
-            if isinstance(o, dict) and str(o.get("order_id") or oid) == oid:
-                out.append({"order_id": oid, "client_order_id": o.get("client_order_id")})
+            # Security P2-L1: a lookup counts only with Kalshi's documented shape (an `order` object with this
+            # order_id and a string client_order_id). Anything else stays unresolved, so the fill is never "proven
+            # manual" by a malformed reply (it keeps its weaker label and counts in full for the breaker).
+            o = body.get("order") if isinstance(body, dict) else None
+            if not (isinstance(o, dict) and str(o.get("order_id") or "") == oid
+                    and isinstance(o.get("client_order_id"), str)):
+                log.warning("order lookup: unexpected reply shape; left unresolved")
+                continue
+            out.append({"order_id": oid, "client_order_id": o["client_order_id"]})
         return out
 
     async def _label_fills(self, fills: list[dict], mode: str, since: datetime) -> set[str] | None:
@@ -3680,9 +3770,25 @@ class Runner:
                 self._breaker_apply_cloud(dict(cloud or {}))
                 if self.breaker_tripped():
                     return None
-            res = breakersvc.evaluate(self.breaker_settings(), self.breaker_state, env, equity, ts,
-                                      saved_utc=self._breaker_saved_utc, source=source)
-            # no await since the tripped check above: a concurrent reading (pass vs arbitrage) sees this trip
+            # B5: the owner's own trades (bounded read-only evidence, telemetry pool; never Stop's pool or lock)
+            read = await self._breaker_evidence(env, ts)
+            if self.breaker_tripped():
+                return None
+            res = self._breaker_eval(env, equity, ts, (read or {}).get("evidence"), source)
+            if res["trip"]:
+                # B5 rule 3: one fresh, bounded read of balance + positions at one moment, then recompute. A failed
+                # read keeps the trip; a fresh reading under the line (separable, or with the conservative M) does not.
+                # The arbitrage reading carries a contained partial's loss the balance may not show yet: there only
+                # the evidence is refreshed and the reading itself is kept.
+                maker = source == "maker"
+                fresh = await self._breaker_evidence(env, None if maker else ts, with_balance=maker)
+                if self.breaker_tripped():
+                    return None
+                if fresh is not None and maker and fresh.get("account") is not None:
+                    res = self._breaker_eval(env, fresh["account"], fresh["t"], fresh.get("evidence"), source)
+                elif fresh is not None and not maker:
+                    res = self._breaker_eval(env, equity, ts, fresh.get("evidence"), source)
+            # no await since the last tripped check: a concurrent reading (pass vs arbitrage) sees this trip
             self.breaker_state = res["state"]
             self.breaker_warning = res["warning"]
             if res["warning"]:
@@ -3696,6 +3802,86 @@ class Runner:
         except Exception as e:  # noqa: BLE001
             log.error("breaker check failed: %s", type(e).__name__)
             return None
+
+    # ---- B5: the breaker ignores the owner's own trades (pure rules in services/breaker.py)
+    BREAKER_EVIDENCE_TIMEOUT_S = 8.0
+    BREAKER_POSITION_PAGES = 5            # x 1000 positions (settlement_status=all, count_filter=total_traded)
+    BREAKER_FILLS_MAX = 100_000
+    BREAKER_FILL_FIELDS = ("ticker", "market_ticker", "env", "source", "source_by")
+
+    def _breaker_eval(self, env: str, equity: Any, ts: Any, evidence: dict | None, source: str) -> dict:
+        """Pure: ledger update + evaluate on the CURRENT state (no await, so nothing changes in between)."""
+        prev = ((self.breaker_state or {}).get("envs") or {}).get(env) or {}
+        upd = breakersvc.manual_update(prev.get("manual"), evidence, ts, carry=breakersvc._num(prev.get("last_m")))
+        return breakersvc.evaluate(self.breaker_settings(), self.breaker_state, env, equity, ts,
+                                   saved_utc=self._breaker_saved_utc, source=source, manual=upd)
+
+    def _read_breaker_kalshi(self, env: str, with_balance: bool) -> dict:
+        """Blocking, GET only: (balance and then) every positions page. Raises on a failed read."""
+        client = self._tel_kalshi(env)
+        if client is None or not callable(getattr(client, "get_positions", None)):
+            raise LookupError("not_configured")
+        t = utcnow()                                   # before the balance request: later updates count as late
+        cash = None
+        if with_balance:
+            cash = breakersvc._dollars(client.get_balance() or {}, "balance")
+        positions: list = []
+        cursor, complete = None, False
+        for _ in range(self.BREAKER_POSITION_PAGES):
+            body = client.get_positions(settlement_status="all", count_filter="total_traded", limit=1000,
+                                        cursor=cursor)
+            body = body if isinstance(body, dict) else {}
+            page = body.get("market_positions") or []
+            positions.extend(page)
+            if body.get("truncated") is True:
+                break
+            cursor = body.get("cursor")
+            if not cursor or not page:
+                complete = True
+                break
+        account = None
+        if with_balance and cash is not None:
+            # Security P2-M1: the open cost comes from its OWN open-positions read (count_filter=position, every page),
+            # the account snapshot's rule; never from the ledger read above, which also lists exited and settled
+            # markets. Truncated or unusable -> no fresh account (the trip is evaluated as before and kept).
+            from .services import kalshi_recon as recon
+            open_pos, truncated = recon._read_positions(client)
+            if not truncated:
+                exps = [breakersvc._dollars(p, "market_exposure") if isinstance(p, dict) else None for p in open_pos]
+                if all(x is not None for x in exps):
+                    account = cash + sum(abs(x) for x in exps)
+        return {"t": t, "positions": positions, "complete": complete, "account": account}
+
+    async def _breaker_fills(self, env: str) -> tuple[list | None, bool]:
+        """Stored fills (labels only), cached until the next fills write. (fills, complete)."""
+        key = (env, self._pnl_gen)
+        hit = getattr(self, "_b5_fills", None)
+        if hit and hit[0] == key:
+            return hit[1], hit[2]
+        rows = await asyncio.wait_for(self.store.list_fills(limit=self.BREAKER_FILLS_MAX,
+                                                            fields=self.BREAKER_FILL_FIELDS), 5)
+        complete = len(rows) < self.BREAKER_FILLS_MAX
+        self._b5_fills = (key, rows, complete)
+        return rows, complete
+
+    async def _breaker_evidence(self, env: str, ts: Any, *, with_balance: bool = False) -> dict | None:
+        """{evidence, account, t} for one reading, or None when Kalshi could not be read. Bounded, read-only, on the
+        telemetry pool (never Stop's), outside the pass lock. Never raises."""
+        try:
+            cf = self._tel_executor.submit(self._read_breaker_kalshi, env, with_balance)
+            k = await asyncio.wait_for(asyncio.wrap_future(cf), self.BREAKER_EVIDENCE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            log.warning("breaker: own-trade evidence unreadable (%s)", type(e).__name__)
+            return None
+        try:
+            fills, fills_ok = await self._breaker_fills(env)
+        except Exception as e:  # noqa: BLE001
+            log.warning("breaker: stored fills unreadable (%s)", type(e).__name__)
+            return {"evidence": None, "account": k["account"], "t": k["t"]}
+        ev = breakersvc.manual_evidence(k["positions"], fills, env=env,
+                                        reading_utc=k["t"] if with_balance else ts,
+                                        synced_utc=self.fills_synced_utc(env), complete=k["complete"] and fills_ok)
+        return {"evidence": ev, "account": k["account"], "t": k["t"]}
 
     async def _breaker_trip(self, trip: dict) -> None:
         """A limit was reached: the full Stop (maker + arbitrage: flags, kill switches, cancel resting bot orders,
@@ -4130,12 +4316,15 @@ class Runner:
         return {"strategy": s, "armed": False, "persisted": persisted, "cancelled": cancelled, "errors": errors}
 
     def status(self) -> dict:
+        if self.fills_sync_busy():
+            self._check_fills_stuck()                # L-1: a stuck fetch shows as fills_sync.error = "stuck"
         return {"running_pass": self.running_pass, "last_run_utc": iso(self.last_run_utc),
                 "last_error": self.last_error, "next_due_utc": iso(self.next_due_utc()),
                 "kill_switch": self.kill_switch(), "desired": self.desired, "mode": self.mode,
                 "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
                 "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
-                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error,
+                "fills_sync": {"last_utc": iso(self.fills_synced_utc(self.mode)),
+                               "error": self._fills_err.get("live" if self.mode == "live" else "demo"),
                                # B3 (additive): a sync running now, and what started the last one
                                "in_flight": self.fills_sync_busy(), "trigger": self.fills_sync_trigger},
                 # last pass's write-path summary (additive): cancel/place failures, paused, capped series

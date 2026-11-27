@@ -325,6 +325,10 @@ def _read_summary(client: Any) -> dict:
     except Exception:  # noqa: BLE001   (positions unreadable: cost and everything derived from it is null)
         positions, truncated = None, True
     cost: float | None = None
+    if positions is not None and not truncated and value is not None and abs(value) > 0.005 and not any(
+            (_f(p.get("position_fp")) if _f(p.get("position_fp")) is not None else _f(p.get("position")))
+            for p in positions):
+        value = None        # security L-2: no open position but a portfolio value: not positions-only, never shown
     if positions is not None and not truncated:
         total = 0.0
         for p in positions:

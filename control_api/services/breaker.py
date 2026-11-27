@@ -116,6 +116,201 @@ def snapshot_equity(snap: Any) -> float | None:
     return cash + exp
 
 
+# ------------------------------------------------------------------ B5: the owner's own trades
+# breaker equity = account equity - M. M = the net effect on cash + open cost of markets proven to be traded only by
+# the owner, since the ledger's anchor. Per market Kalshi itself reports that effect: realized_pnl_dollars (before
+# fees: sales and settlement) minus fees_paid_dollars; an open position sits in market_exposure at cost (neutral).
+# A market's contribution is (value now - value at the anchor), so an event is never counted twice and a market
+# opened before the anchor only counts what happened after it. Markets Kalshi archives drop out of the positions
+# list: their last contribution is folded into `archived`.
+MANUAL_MAX_TICKERS = 500          # ledger tickers per env (bounded persisted state); more = the evidence is unusable
+CLOCK_SLACK = timedelta(seconds=5)
+B5_ENV_KEYS = ("last_m", "last_account", "manual_known", "hwm_m", "day_m", "manual_unproven", "manual")
+PROVEN_BY = "order"             # strategies.EVIDENCE_RANK: the Kalshi order's client id says "not the bot"
+
+
+def _dollars(d: Mapping, key: str) -> float | None:
+    """Kalshi money field: `<key>_dollars` (fixed-point dollar string) else `<key>` (integer cents)."""
+    def num(v: Any) -> float | None:
+        if isinstance(v, bool):
+            return None
+        try:
+            x = float(v)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return x if math.isfinite(x) else None
+    v = num(d.get(f"{key}_dollars"))
+    if v is None:
+        c = num(d.get(key))
+        v = c / 100.0 if c is not None else None
+    return v
+
+
+def _fill_env(f: Mapping) -> str:
+    return f.get("env") if f.get("env") in ENVS else "demo"          # a fill without env counts as demo (B4)
+
+
+def manual_evidence(positions: Any, fills: Any, *, env: str, reading_utc: Any, synced_utc: Any,
+                    complete: bool) -> dict | None:
+    """Kalshi positions (settlement_status=all, count_filter=total_traded: open, exited and settled, not archived) +
+    the stored fills of `env` -> the evidence for one reading, or None when unusable. Pure; never raises.
+
+    * proven: no bot fill, at least one fill, EVERY fill `source == "you"` with `source_by == "order"`, Kalshi's
+      `last_updated_ts` no later than the last fills sync of this env (so no unsynced fill can be the bot's), and a
+      usable realized_pnl / fees_paid.
+    * pending: like proven except the market changed after the last sync (its fills may be incomplete).
+    * late: a proven or pending market Kalshi updated after the equity reading (that reading may not include it).
+    * unproven: every other market without a bot fill (unsynced, default/no_order_id labels, unusable numbers). They
+      count in full, as before B5. Markets with a bot fill (bot-only or both) count in full and are not counted here.
+    """
+    try:
+        if not isinstance(positions, list) or not isinstance(fills, list):
+            return None
+        when, synced = _parse_ts(reading_utc), _parse_ts(synced_utc)
+        by_t: dict[str, list] = {}
+        for f in fills:
+            if isinstance(f, Mapping) and _fill_env(f) == env:
+                t = str(f.get("ticker") or f.get("market_ticker") or "")
+                if t:
+                    by_t.setdefault(t, []).append(f)
+        values: dict[str, float] = {}
+        proven, pending, late, bot, unusable = set(), set(), set(), set(), set()
+        unproven = 0
+        for p in positions:
+            if not isinstance(p, Mapping):
+                return None
+            t = str(p.get("ticker") or "")
+            if not t:
+                return None
+            rp, fee = _dollars(p, "realized_pnl"), _dollars(p, "fees_paid")
+            v = rp - fee if rp is not None and fee is not None else None
+            fs = by_t.get(t, [])
+            if any(f.get("source") != "you" for f in fs):
+                bot.add(t)                                   # bot (or legacy-unlabelled) fills: counts in full
+                continue
+            if v is None:
+                unproven += 1
+                unusable.add(t)
+                continue
+            values[t] = v
+            upd = _parse_ts(p.get("last_updated_ts"))
+            all_proven = bool(fs) and all(f.get("source_by") == PROVEN_BY for f in fs)
+            synced_ok = upd is not None and synced is not None and upd <= synced - CLOCK_SLACK
+            if all_proven and synced_ok:
+                proven.add(t)
+            else:
+                unproven += 1
+                if all_proven and not synced_ok:
+                    pending.add(t)                           # may become proven once the fills are synced
+            if (t in proven or t in pending) and (upd is None or when is None or upd > when - CLOCK_SLACK):
+                late.add(t)
+        present = {str(p.get("ticker")) for p in positions}
+        return {"values": values, "proven": proven, "pending": pending, "late": late, "bot": bot,
+                "present": present, "unusable": unusable, "unproven": unproven, "complete": bool(complete)}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _norm_ledger(raw: Any) -> dict | None:
+    if not isinstance(raw, Mapping):
+        return None
+    base, seen, arch = raw.get("base"), raw.get("seen"), _num(raw.get("archived"))
+    if not isinstance(base, Mapping) or not isinstance(seen, Mapping) or arch is None:
+        return None
+    if len(base) > MANUAL_MAX_TICKERS or len(seen) > MANUAL_MAX_TICKERS:
+        return None
+    out_b, out_s = {}, {}
+    for src, dst in ((base, out_b), (seen, out_s)):
+        for k, v in src.items():
+            x = _num(v)
+            if not isinstance(k, str) or not k or len(k) > 100 or x is None:
+                return None
+            dst[k] = x
+    t0 = _iso(_parse_ts(raw.get("t0")))
+    return {"t0": t0, "base": out_b, "seen": out_s, "archived": arch} if t0 else None
+
+
+def manual_update(ledger: Any, evidence: dict | None, when: Any, *, carry: float | None) -> dict:
+    """(ledger, evidence) -> {ledger, m_new, m_stale, separable, unproven}. Pure; never raises.
+
+    m_new: M from this evidence (None when unusable); m_stale: M from the stored ledger (None without one);
+    separable: m_new describes the same moment as the equity reading. Without a usable ledger one is anchored here:
+    base = every non-bot market's value now, archived = `carry` (the last M used), so M continues without a jump
+    and only events after this moment are separated (events in between count in full, as before)."""
+    led = _norm_ledger(ledger)
+    try:
+        stale = round(led["archived"] + sum(led["seen"].values()), 6) if led else carry
+        if evidence is None:
+            return {"ledger": led, "m_new": None, "m_stale": stale, "separable": False, "unproven": None}
+        values = evidence["values"]
+        if led is None:
+            if len(values) > MANUAL_MAX_TICKERS or not evidence["complete"] or evidence["unusable"]:
+                return {"ledger": None, "m_new": None, "m_stale": stale, "separable": False,
+                        "unproven": evidence["unproven"]}
+            new = {"t0": _iso(_parse_ts(when)) or _iso(datetime.now(timezone.utc)), "base": dict(values),
+                   "seen": {}, "archived": float(carry or 0.0)}
+            return {"ledger": new, "m_new": new["archived"], "m_stale": stale, "separable": False,
+                    "unproven": evidence["unproven"]}
+        base, seen, archived = dict(led["base"]), dict(led["seen"]), led["archived"]
+        complete = evidence["complete"]
+        separable = complete and not evidence["late"] and not evidence["pending"]
+        new_seen: dict[str, float] = {}
+        m_extra = 0.0
+        for t in evidence["proven"]:
+            new_seen[t] = values[t] - base.get(t, 0.0)
+        for t in evidence["pending"]:
+            if t in seen:
+                new_seen[t] = seen[t]                       # frozen until its fills are synced
+            m_extra += values[t] - base.get(t, 0.0) - seen.get(t, 0.0)
+        present = evidence["present"]
+        for t, c in seen.items():
+            if t in new_seen or t in evidence["pending"]:
+                continue
+            if t in evidence["bot"]:
+                continue                                    # a bot fill appeared: counts in full from here
+            if t in values:
+                # proven before, unproven now (e.g. a new fill not yet confirmed): keep the old part frozen and
+                # treat the change as unconfirmed (manual_used takes the conservative side)
+                new_seen[t] = c
+                m_extra += values[t] - base.get(t, 0.0) - c
+                separable = False
+            elif t in present:
+                new_seen[t] = c                             # numbers unusable this time: keep it, unconfirmed
+                separable = False
+            elif complete:
+                archived += c                               # archived by Kalshi: its last contribution stays in M
+            else:
+                new_seen[t] = c                             # not in a partial read: unknown, keep it
+                separable = False
+        if complete:
+            base = {t: v for t, v in base.items() if t in present}
+        if len(base) > MANUAL_MAX_TICKERS or len(new_seen) > MANUAL_MAX_TICKERS:
+            return {"ledger": led, "m_new": None, "m_stale": stale, "separable": False,
+                    "unproven": evidence["unproven"]}
+        m_new = round(archived + sum(new_seen.values()) + m_extra, 6)
+        new_led = {"t0": led["t0"], "base": base, "seen": new_seen, "archived": round(archived, 6)}
+        return {"ledger": new_led, "m_new": m_new, "m_stale": stale, "separable": separable,
+                "unproven": evidence["unproven"]}
+    except Exception:  # noqa: BLE001
+        return {"ledger": led, "m_new": None, "m_stale": carry if led is None else None, "separable": False,
+                "unproven": None}
+
+
+def manual_used(upd: Mapping | None, prev_m: float | None) -> tuple[float, bool]:
+    """(M used for the limits, known). Separable: this reading's M. Otherwise the larger of the M from this evidence
+    and the stored one: an unconfirmed manual win is left out (it never raises a mark) and an unconfirmed manual
+    loss is counted in full (it can trip). Nothing known: the last M used (0 before any)."""
+    if upd is None:
+        return (prev_m if prev_m is not None else 0.0), prev_m is not None
+    new, stale = upd.get("m_new"), upd.get("m_stale")
+    if upd.get("separable") and new is not None:
+        return float(new), True
+    vals = [x for x in (new, stale) if x is not None]
+    if vals:
+        return float(max(vals)), True
+    return (prev_m if prev_m is not None else 0.0), prev_m is not None
+
+
 # ------------------------------------------------------------------ settings
 def settings_of(raw: Any) -> dict:
     """The stored ``breaker`` block -> effective settings. The store is not trusted: a field with the wrong type or
@@ -186,7 +381,8 @@ def _norm_trip(raw: Any) -> dict | None:
     lim = raw.get("limits")
     if isinstance(lim, list):
         out["limits"] = [x for x in lim if x in REASONS]
-    for k in ("equity", "hwm", "drawdown", "drawdown_frac", "day_start_equity", "day_loss", "day_loss_frac"):
+    for k in ("equity", "hwm", "drawdown", "drawdown_frac", "day_start_equity", "day_loss", "day_loss_frac",
+              "account_equity", "manual_excluded", "drawdown_limit", "day_loss_limit"):
         out[k] = _num(raw.get(k))
     out["day"] = _s(raw.get("day"), 10) or None
     out["source"] = _s(raw.get("source"), 20) or None
@@ -208,6 +404,18 @@ def _norm_env(raw: Any) -> tuple[dict | None, bool]:
            "last_equity": last, "last_utc": _iso(_parse_ts(raw.get("last_utc")))}
     if out["day"] is None or start is None:
         out["day"], out["day_start_equity"] = None, None     # the day start is re-seeded at the next observation
+    if "last_m" in raw:                                     # B5 fields (absent in state from before B5)
+        last_m = _num(raw.get("last_m"))
+        if last_m is None:
+            return None, False         # marks without the M they were measured with: re-based (no jump either way)
+        out.update({"last_m": last_m, "last_account": _pos(raw.get("last_account")),
+                    "manual_known": raw.get("manual_known") is True,
+                    "hwm_m": _num(raw.get("hwm_m")), "day_m": _num(raw.get("day_m")),
+                    "manual_unproven": raw.get("manual_unproven") if isinstance(raw.get("manual_unproven"), int)
+                    and not isinstance(raw.get("manual_unproven"), bool) else None,
+                    "manual": _norm_ledger(raw.get("manual"))})
+        if out["day_m"] is None:
+            out["day"], out["day_start_equity"] = None, None
     return out, True
 
 
@@ -235,13 +443,18 @@ def encode_state(state: Mapping) -> dict:
     for e, d in (state.get("envs") or {}).items():
         if e in ENVS and isinstance(d, Mapping):
             envs[e] = {k: d.get(k) for k in ("hwm", "hwm_utc", "day", "day_start_equity", "last_equity", "last_utc")}
+            if "last_m" in d:
+                envs[e].update({k: d.get(k) for k in B5_ENV_KEYS})
     trip = state.get("tripped")
     return {"tripped": dict(trip) if isinstance(trip, Mapping) else None, "envs": envs}
 
 
 # ------------------------------------------------------------------ the check
+_NO_B5 = object()
+
+
 def evaluate(settings: Mapping, state: Mapping, env: str, equity: Any, ts: Any, *,
-             saved_utc: datetime | None = None, source: str = "maker") -> dict:
+             saved_utc: datetime | None = None, source: str = "maker", manual: Any = _NO_B5) -> dict:
     """One equity observation -> {state, trip, warning, persist}. Pure; never raises on bad input.
 
     * Unusable equity (not a finite number > 0) or time: nothing changes, warning set, never a trip.
@@ -250,38 +463,68 @@ def evaluate(settings: Mapping, state: Mapping, env: str, equity: Any, ts: Any, 
       `<env>_enabled`. A new New York day starts from the previous reading when it is recent (DAY_SEED_MAX_AGE), so an
       overnight loss counts toward the new day; otherwise from this reading.
     * `persist` is True when the stored copy should be written: a trip, a new high-water mark, a new day, or the last
-      reading not saved for PERSIST_EVERY."""
+      reading not saved for PERSIST_EVERY.
+
+    B5 (`manual` = a manual_update() result, or None when the evidence read failed): the breaker equity is the
+    account equity minus M (manual_used), the marks live in that adjusted space, and each limit is the fraction of
+    the smaller of the reference and the reference reduced by manual losses since it was set (manual wins never
+    loosen it). Without `manual` (older callers) M is 0: exactly the old behaviour."""
     out = {"state": state, "trip": None, "warning": None, "persist": False}
     try:
         if env not in ENVS:
             out["warning"] = "unknown environment: check skipped"
             return out
-        eq = _pos(equity)
+        account = _pos(equity)
         when = _parse_ts(ts)
-        if eq is None or when is None:
+        if account is None or when is None:
             out["warning"] = f"{env}: equity reading unusable; check skipped"
             return out
         if state.get("tripped"):
             return out
         envs = dict(state.get("envs") or {})
         prev = dict(envs.get(env) or {})
+        b5 = manual is not _NO_B5
+        prev_m = _num(prev.get("last_m"))
+        if b5:
+            upd = manual if isinstance(manual, Mapping) else None
+            m, known = manual_used(upd, prev_m)
+        else:
+            upd, m, known = None, 0.0, False
+        eq = _pos(account - m)
+        if eq is None:
+            out["warning"] = f"{env}: equity without your own trades is not positive; check skipped"
+            return out
         persist = False
         hwm = _pos(prev.get("hwm"))
-        if hwm is None:
-            hwm, hwm_utc, persist = eq, _iso(when), True              # first reading: the mark starts here
-        elif eq > hwm:
-            hwm, hwm_utc, persist = eq, _iso(when), True
+        hwm_m = _num(prev.get("hwm_m"))
+        if hwm is None or eq > hwm:
+            hwm, hwm_utc, hwm_m, persist = eq, _iso(when), m, True    # first reading / new high: the mark is here
         else:
             hwm_utc = prev.get("hwm_utc")
+            hwm_m = m if hwm_m is None else hwm_m                    # state from before B5: no old losses counted
         day = market_day(when)
         start = _pos(prev.get("day_start_equity"))
+        day_m = _num(prev.get("day_m"))
         if prev.get("day") != day or start is None:
             last, last_ts = _pos(prev.get("last_equity")), _parse_ts(prev.get("last_utc"))
             recent = last is not None and last_ts is not None and timedelta(0) <= when - last_ts <= DAY_SEED_MAX_AGE
-            start = last if recent and prev.get("day") not in (None, day) else eq
+            if recent and prev.get("day") not in (None, day):
+                start, day_m = last, (prev_m if prev_m is not None else m)
+            else:
+                start, day_m = eq, m
             persist = True
+        elif day_m is None:
+            day_m = m
         new_env = {"hwm": hwm, "hwm_utc": hwm_utc, "day": day, "day_start_equity": start, "last_equity": eq,
                    "last_utc": _iso(when)}
+        if b5:
+            led = (upd or {}).get("ledger") if upd is not None else None
+            new_env.update({"last_account": account, "last_m": m, "manual_known": known, "hwm_m": hwm_m,
+                            "day_m": day_m,
+                            "manual_unproven": (upd or {}).get("unproven") if upd is not None else None,
+                            "manual": led if led is not None else _norm_ledger(prev.get("manual"))})
+            if new_env["manual"] != _norm_ledger(prev.get("manual")):
+                persist = True
         envs[env] = new_env
         if saved_utc is None or when - saved_utc >= PERSIST_EVERY:
             persist = True
@@ -290,16 +533,22 @@ def evaluate(settings: Mapping, state: Mapping, env: str, equity: Any, ts: Any, 
         drawdown = max(0.0, hwm - eq)
         day_loss = max(0.0, start - eq)
         dd_frac, dl_frac = float(settings.get("drawdown_frac")), float(settings.get("day_loss_frac"))
+        dd_ref = min(hwm, hwm + min(0.0, m - hwm_m)) if b5 else hwm          # rule 4: losses tighten, wins never
+        dl_ref = min(start, start + min(0.0, m - day_m)) if b5 else start
         limits = []
-        if drawdown > 0 and drawdown >= dd_frac * hwm - EPS:
+        if drawdown > 0 and drawdown >= dd_frac * dd_ref - EPS:
             limits.append("drawdown")
-        if day_loss > 0 and day_loss >= dl_frac * start - EPS:
+        if day_loss > 0 and day_loss >= dl_frac * dl_ref - EPS:
             limits.append("day_loss")
         if limits and settings.get(f"{env}_enabled") is True:
             trip = {"reason": limits[0], "limits": limits, "env": env, "utc": _iso(when), "day": day,
                     "equity": round(eq, 6), "hwm": round(hwm, 6), "drawdown": round(drawdown, 6),
                     "drawdown_frac": dd_frac, "day_start_equity": round(start, 6), "day_loss": round(day_loss, 6),
                     "day_loss_frac": dl_frac, "source": _s(source, 20)}
+            if b5:
+                trip.update({"account_equity": round(account, 6),
+                             "manual_excluded": round(m, 2) if known else None,
+                             "drawdown_limit": round(dd_frac * dd_ref, 6), "day_loss_limit": round(dl_frac * dl_ref, 6)})
             new_state["tripped"] = trip
             out["trip"] = trip
             persist = True
@@ -321,6 +570,9 @@ def acknowledge(state: Mapping) -> dict:
             continue
         envs[e] = {"hwm": last, "hwm_utc": d.get("last_utc"), "day": d.get("day"), "day_start_equity": last,
                    "last_equity": last, "last_utc": d.get("last_utc")}
+        if "last_m" in d:                    # B5: re-based on the adjusted equity; manual losses count from here
+            envs[e].update({k: d.get(k) for k in B5_ENV_KEYS})
+            envs[e]["hwm_m"] = envs[e]["day_m"] = d.get("last_m")
     return {"tripped": None, "envs": envs}
 
 
@@ -336,7 +588,13 @@ def env_view(settings: Mapping, d: Mapping | None, env: str) -> dict:
             "day": d.get("day"), "day_start_equity": round(start, 2) if start is not None else None,
             "day_loss": day_loss,
             "day_loss_share": round(day_loss / start, 4) if day_loss is not None and start else None,
-            "last_equity": round(last, 2) if last is not None else None, "last_utc": d.get("last_utc")}
+            "last_equity": round(last, 2) if last is not None else None, "last_utc": d.get("last_utc"),
+            # B5.7: the unadjusted account reading, M (negative = a manual loss left out) and markets still counted
+            "account_equity": round(_pos(d.get("last_account")), 2) if _pos(d.get("last_account")) else None,
+            "manual_excluded": round(_num(d.get("last_m")), 2)
+            if d.get("manual_known") is True and _num(d.get("last_m")) is not None else None,
+            "manual_unproven": d.get("manual_unproven") if isinstance(d.get("manual_unproven"), int)
+            and not isinstance(d.get("manual_unproven"), bool) else None}
 
 
 def status_view(settings: Mapping, state: Mapping, *, readable: bool, warning: str | None, mode: Any) -> dict:
@@ -384,6 +642,10 @@ def alert(trip: Mapping) -> dict:
                          f"{_money(start)}; limit {_pct(trip.get('day_loss_frac'))}")
     which = " and ".join("drawdown" if x == "drawdown" else "day loss" for x in limits) or "loss limit"
     title = f"{ALERT_TITLE}: {which} ({env})"
+    mx = _num(trip.get("manual_excluded"))
+    if mx is not None and abs(mx) >= 0.005:
+        parts.append(f"your own trades left out: {'-' if mx < 0 else '+'}{_money(abs(mx))} (account equity "
+                     f"{_money(trip.get('account_equity'))})")
     body = (f"{'; '.join(parts) or 'a loss limit was reached'}. Maker and arbitrage are stopped and resting bot "
             "orders were cancelled. To trade again: Start with a fresh 2FA code and acknowledge the breaker.")
     return {"type": "breaker", "title": title[:200], "body": body[:2000], "priority": "urgent", "channels": []}
@@ -391,7 +653,8 @@ def alert(trip: Mapping) -> dict:
 
 def audit_details(trip: Mapping) -> dict:
     return {k: trip.get(k) for k in ("reason", "limits", "env", "utc", "equity", "hwm", "drawdown", "drawdown_frac",
-                                     "day_start_equity", "day_loss", "day_loss_frac", "source")}
+                                     "day_start_equity", "day_loss", "day_loss_frac", "source", "account_equity",
+                                     "manual_excluded", "drawdown_limit", "day_loss_limit")}
 
 
 __all__ = ["ALERT_TITLE", "CEILINGS", "CLOUD_SETTINGS", "CLOUD_STATE", "DEFAULTS", "ENVS", "FIELDS", "SCHEMA",

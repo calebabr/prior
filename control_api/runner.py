@@ -62,6 +62,9 @@ QUEUE_BUDGET_S = 20                          # same pattern for one queue-positi
 CLOSE_TIME_BUDGET_S = 20                     # same pattern for one close-time backfill
 CLOSE_TIME_INSERT_TIMEOUT_S = 5              # close-time lookups for new episodes (inside the queue budget)
 FILLS_SYNC_EVERY = timedelta(minutes=30)
+FILLS_SYNC_ON_DEMAND_MIN = timedelta(minutes=2)   # B3: reads / idle loop start a sync at most this often (also after
+                                                  # a failure); measured from the last attempt, not the last success
+FILLS_SYNC_TIMEOUT_S = 60
 FILLS_FIRST_DAYS = 35
 # fill source attribution (UX item Y1; services/strategies.py)
 MAKER_OID_MAX = 150_000             # journal maker order ids kept in memory (~35 days of quotes)
@@ -538,6 +541,14 @@ class Runner:
         # fills / P&L sync
         self.last_fills_sync_utc: datetime | None = None
         self.fills_sync_error: str | None = None
+        # B3: one sync at a time (after-pass and on-demand share this lock, so a fill is never alerted twice). The
+        # lock is never awaited by a waiter: a sync that finds it held (or the previous fetch thread still running)
+        # returns "in_flight". Stop never touches it, the telemetry pool or the store writes below.
+        self._fills_lock = asyncio.Lock()
+        self._fills_fetch: Any = None                # the fetch's concurrent future (busy while not done)
+        self._fills_attempt_utc: datetime | None = None   # last on-demand start (success or failure)
+        self.fills_on_demand = False                 # set by start() with the background loops; tests set it
+        self.fills_sync_trigger: str | None = None   # what started the last sync: "pass", "read:<route>", "idle"
         # bracket arbitrage (on/off + live live in the store's state doc; numeric settings in config["arb"])
         self.arb_desired = "stopped"
         self.arb_mode = "demo"           # demo = log-only; live = execute on prod (needs the env gates)
@@ -984,6 +995,7 @@ class Runner:
             log.warning("runner disabled by env: stop ran at startup (errors=%s)", res.get("errors"))
         if self.settings.runner_enabled:
             from .services.keepalive import keepalive_loop
+            self.fills_on_demand = True                  # B3: on-demand / idle fills sync runs with the loops
             self._tasks = [asyncio.create_task(self._timer_loop(), name="runner-timer"),
                            asyncio.create_task(self._watchdog_loop(), name="runner-watchdog"),
                            asyncio.create_task(keepalive_loop(self), name="runner-keepalive"),
@@ -1413,6 +1425,8 @@ class Runner:
                 await self.tick("timer")
             except Exception as e:  # noqa: BLE001
                 log.error("timer tick failed: %s", e)
+            if self.desired != "running":
+                self.request_fills_sync("idle")       # B3: manual trades still sync while the bot is stopped
             await asyncio.sleep(TIMER_SECONDS)
 
     async def _watchdog_loop(self) -> None:
@@ -1760,16 +1774,57 @@ class Runner:
                     break
         return fills, settlements
 
-    async def sync_fills(self, mode: str, *, force: bool = False) -> dict:
-        """Copies Kalshi fills + settlements to the store, at most every FILLS_SYNC_EVERY. Never raises."""
+    def fills_sync_busy(self) -> bool:
+        return self._fills_lock.locked() or (self._fills_fetch is not None and not self._fills_fetch.done())
+
+    def request_fills_sync(self, trigger: str = "read") -> bool:
+        """B3: start a background fills sync for the current mode if none is running and none started in the last
+        FILLS_SYNC_ON_DEMAND_MIN. Synchronous and non-blocking: the caller (a read route or the idle loop) never
+        waits for it. Never raises. Returns True when a sync was started."""
+        try:
+            if not self.fills_on_demand or self._shutting_down or self.fills_sync_busy():
+                return False
+            if self.role() != "leader":
+                return False                          # one syncing instance during a handover (alerts sent once)
+            now = utcnow()
+            last = self._fills_attempt_utc
+            if last is not None and timedelta(0) <= now - last < FILLS_SYNC_ON_DEMAND_MIN:
+                return False
+            self._fills_attempt_utc = now             # claimed before any await: concurrent reads see it
+            self._spawn(self._on_demand_fills_sync(self.mode, trigger))
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.error("fills sync request failed: %s", type(e).__name__)
+            return False
+
+    async def _on_demand_fills_sync(self, mode: str, trigger: str) -> None:
+        try:
+            await self.sync_fills(mode, force=True, trigger=trigger)
+        except Exception as e:  # noqa: BLE001   (sync_fills never raises; belt and braces for a background task)
+            log.error("on-demand fills sync failed: %s", type(e).__name__)
+
+    async def sync_fills(self, mode: str, *, force: bool = False, trigger: str = "pass") -> dict:
+        """Copies Kalshi fills + settlements to the store, at most every FILLS_SYNC_EVERY. Never raises.
+
+        B3: single-flight. If another sync holds the lock, or an earlier fetch thread is still running after its
+        timeout, this returns {"synced": False, "reason": "in_flight"} at once (the running one covers the same
+        window, and its alerts are the only ones sent)."""
         now = utcnow()
         if not force and self.last_fills_sync_utc and now - self.last_fills_sync_utc < FILLS_SYNC_EVERY:
             return {"synced": False, "reason": "not_due"}
+        if self.fills_sync_busy():
+            return {"synced": False, "reason": "in_flight"}
+        async with self._fills_lock:
+            self.fills_sync_trigger = trigger
+            return await self._sync_fills_locked(mode, now)
+
+    async def _sync_fills_locked(self, mode: str, now: datetime) -> dict:
         since = (self.last_fills_sync_utc - timedelta(days=2)) if self.last_fills_sync_utc \
             else now - timedelta(days=FILLS_FIRST_DAYS)
         try:
-            fills, settlements = await asyncio.wait_for(
-                self._run_tel(self._fetch_fills_sync, mode, since), timeout=60)
+            cf = self._tel_executor.submit(self._fetch_fills_sync, mode, since)   # telemetry pool, never Stop's
+            self._fills_fetch = cf
+            fills, settlements = await asyncio.wait_for(asyncio.wrap_future(cf), timeout=FILLS_SYNC_TIMEOUT_S)
             for f in fills:
                 f.setdefault("env", mode)                 # demo and live P&L never mix
             fills = [f for f in fills if isinstance(f, dict) and (f.get("fill_id") or f.get("trade_id"))]
@@ -4080,7 +4135,9 @@ class Runner:
                 "kill_switch": self.kill_switch(), "desired": self.desired, "mode": self.mode,
                 "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
                 "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
-                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error},
+                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error,
+                               # B3 (additive): a sync running now, and what started the last one
+                               "in_flight": self.fills_sync_busy(), "trigger": self.fills_sync_trigger},
                 # last pass's write-path summary (additive): cancel/place failures, paused, capped series
                 "write_report": self.last_write_report,
                 # item 10 (additive): per-strategy LIVE arming

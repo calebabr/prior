@@ -3,11 +3,12 @@ import Card from '../components/Card.jsx';
 import KalshiLink from '../components/KalshiLink.jsx';
 import SourceBadge from '../components/SourceBadge.jsx';
 import Chip from '../components/Chip.jsx';
+import HelpIcon from '../components/HelpIcon.jsx';
 import { Link } from 'react-router-dom';
 import { ErrorNotice, Loading, StaleNotice } from '../components/Notices.jsx';
 import { useResource } from '../hooks/useResource.js';
 import { api } from '../services/api.js';
-import { formatMoney } from '../utils/format.js';
+import { NA_TITLE, formatMoney } from '../utils/format.js';
 import { matchesSource, sourceChips } from '../utils/activity.js';
 import '../styles/settings.css';
 import CollapsibleList from '../components/CollapsibleList.jsx';
@@ -25,19 +26,37 @@ function friendly(error) {
   return error;
 }
 
+const money = (v) => (
+  <span title={isNum(v) ? undefined : NA_TITLE}>{formatMoney(v)}</span>
+);
+
 function PositionRow({ p, strategies }) {
   const cents = isNum(p.price) ? `${Math.round(p.price * 1000) / 10}¢` : '—';
+  const isOrder = p.kind === 'order';
+  // Combo (multi-leg) markets: the server sends a short name such as "10-leg combo" and the number of legs.
+  const legs = Number.isInteger(p.legs) && p.legs > 0 ? p.legs : null;
+  const title = p.title || (legs ? `${legs}-leg combo` : p.ticker);
+  const showLegs = legs && !String(title).includes(`${legs}-leg`);
   return (
     <li className="pos-row" data-source={p.source === 'you' ? 'you' : 'bot'}>
       <div className="pos-top">
-        <span className="pos-title">{p.title || p.ticker}</span>
+        <span className="pos-title">{title}</span>
         <SourceBadge row={p} strategies={strategies} />
       </div>
       <div className="mono muted small" style={{ overflowWrap: 'anywhere' }}>{p.ticker}</div>
       <div className="pos-meta num">
+        {showLegs && <span>{legs} legs</span>}
         <span>{String(p.side || '').toUpperCase()}</span>
         <span>{isNum(p.count) ? p.count : '—'} × {cents}</span>
-        <span>Value {formatMoney(p.value)}</span>
+        {/* A resting order has not been paid for: it keeps the plain "Value". */}
+        {isOrder ? (
+          <span>Value {money(p.value)}</span>
+        ) : (
+          <>
+            <span>Paid {money(p.cost)}</span>
+            <span>Value now {money(p.value)}</span>
+          </>
+        )}
         <span>Pays {formatMoney(p.payout_if_wins)} if it wins</span>
       </div>
       <div className="row-links">
@@ -56,7 +75,8 @@ export default function Account() {
   const shown = rows.filter((r) => matchesSource(r, source));
   const positions = shown.filter((r) => r.kind !== 'order');
   const orders = shown.filter((r) => r.kind === 'order');
-  const total = (list) => list.reduce((a, r) => a + (isNum(r.value) ? r.value : 0), 0);
+  // A total with a row missing its figure is not shown at all, rather than shown too small.
+  const total = (list, key) => (list.every((r) => isNum(r[key])) ? list.reduce((a, r) => a + r[key], 0) : null);
 
   return (
     <div className="page">
@@ -85,7 +105,17 @@ export default function Account() {
       {rows.length > 0 && !shown.length && <p className="muted">Nothing matches this filter.</p>}
 
       {positions.length > 0 && (
-        <Card title="Open Positions" subtitle={<>{positions.length} <Chip tone="muted">{formatMoney(total(positions))} Value</Chip></>}>
+        <Card
+          title="Open Positions"
+          subtitle={
+            <span className="pos-totals" data-testid="pos-totals">
+              {positions.length}
+              <Chip tone="muted">{money(total(positions, 'cost'))} Paid</Chip>
+              <Chip tone="muted">{money(total(positions, 'value'))} Value now</Chip>
+              <HelpIcon term="market-value" />
+            </span>
+          }
+        >
           <CollapsibleList items={positions} pageKey="account-positions" label="positions">
             {(vis) => (
               <ul className="rows">

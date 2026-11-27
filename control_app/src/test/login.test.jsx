@@ -74,7 +74,9 @@ describe('login: Prior branding (item 29)', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Prior' })).toBeInTheDocument();
     expect(screen.getByTestId('prior-logo')).toBeInTheDocument();
     expect(screen.getByTestId('login-tagline')).toHaveTextContent('Your strategies. One tap away.');
-    expect(screen.getByText(/Protected by 2FA · Demo Mode/)).toBeInTheDocument();
+    expect(screen.getByText('Protected by 2FA')).toBeInTheDocument();
+    // The footer never claims a mode: the build cannot know whether the server is in demo or live.
+    expect(document.body.textContent).not.toMatch(/(demo|live) mode/i);
     expect(document.body.textContent).not.toMatch(new RegExp(OLD_NAME));
   });
 

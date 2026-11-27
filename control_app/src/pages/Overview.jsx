@@ -9,6 +9,7 @@ import Skeleton from '../components/Skeleton.jsx';
 import Sparkline from '../components/Sparkline.jsx';
 import FillQuality from '../components/FillQuality.jsx';
 import DayCard from '../components/day/DayCard.jsx';
+import AccountCard, { ACCOUNT_POLL_MS } from '../components/AccountCard.jsx';
 import HelpIcon from '../components/HelpIcon.jsx';
 import { IconChevron } from '../components/Icons.jsx';
 import { ErrorNotice, Loading } from '../components/Notices.jsx';
@@ -103,7 +104,7 @@ function StrategyRow({ s }) {
         <span className="home-row-fig">
           <Fig value={s.pnl} signed />
           <span className="home-row-sub">
-            Open <Fig value={s.openCost} />
+            Open, paid <Fig value={s.openCost} />
           </span>
         </span>
         <span className="home-row-chev" aria-hidden="true">
@@ -114,11 +115,54 @@ function StrategyRow({ s }) {
   );
 }
 
+// The owner's own trades: open positions as they are now (from the live account), and settled P&L for the range.
+function ManualRow({ manual }) {
+  const open = manual.open;
+  return (
+    <div className="home-manual" data-testid="manual-row">
+      <Link to="/account" className="home-row home-row-you">
+        <span className="home-dot" aria-hidden="true" style={{ background: 'transparent', border: '1px solid currentColor' }} />
+        <span className="home-row-name">
+          You <span className="home-row-sub">manual, not in the total</span>
+          <span className="home-row-sub" data-testid="manual-open">
+            {!open ? (
+              <>
+                Open positions <Fig value={null} />
+              </>
+            ) : open.count === 0 ? (
+              'No open positions'
+            ) : (
+              <>
+                {open.count} open {open.count === 1 ? 'position' : 'positions'}
+                <span className="home-open-figs">
+                  <span>
+                    Paid <Fig value={open.cost} />
+                  </span>
+                  <span>
+                    Value now <Fig value={open.value} />
+                  </span>
+                </span>
+              </>
+            )}
+          </span>
+        </span>
+        <span className="home-row-fig">
+          <Fig value={manual.pnl} signed />
+          <span className="home-row-sub">Settled</span>
+        </span>
+        <span className="home-row-chev" aria-hidden="true">
+          <IconChevron />
+        </span>
+      </Link>
+    </div>
+  );
+}
+
 export default function Overview() {
   const { status, error, loading, updatedAt, stale, refresh } = useStatus();
   const { confirm, twoFactor, notify } = useDialogs();
   const [range, setRange] = useRange();
-  const summary = useStrategySummary({ range, status });
+  const summary = useStrategySummary({ range, status, positionsPollMs: ACCOUNT_POLL_MS });
   const history = useResource(() => api.getHistory(30), '/api/history?days=30');
   const edge = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
   const [busy, setBusy] = useState(null);
@@ -251,6 +295,8 @@ export default function Overview() {
               {ledgerError && head.source !== 'status' && ledgerRetry}
             </section>
 
+            <AccountCard account={a} />
+
             <DayCard />
 
             <section className="home-section" aria-labelledby="home-by-h" data-testid="by-strategy">
@@ -265,50 +311,31 @@ export default function Overview() {
                 </ul>
               )}
               {ledgerError && head.source === 'status' && ledgerRetry}
-              {manual && (
-                <div className="home-manual" data-testid="manual-row">
-                  <div className="home-row">
-                    <span className="home-dot" aria-hidden="true" style={{ background: 'transparent', border: '1px solid currentColor' }} />
-                    <span className="home-row-name">
-                      You <span className="home-row-sub">manual, not in the total</span>
-                    </span>
-                    <span className="home-row-fig">
-                      <Fig value={manual.pnl} signed />
-                    </span>
-                  </div>
-                </div>
-              )}
+              {manual && <ManualRow manual={manual} />}
             </section>
           </div>
 
           <div className="home-side">
             <section className="home-section" aria-labelledby="home-risk-h">
               <h2 className="home-label" id="home-risk-h">Risk</h2>
-              {a ? (
-                <>
-                  <RiskBar exposure={a.exposure} limit={limit} />
-                  <p className="home-cash" data-testid="home-cash">
-                    Cash<HelpIcon term="balance" /> {formatMoney(a.cash)}
-                  </p>
-                </>
-              ) : (
-                <p className="muted">No account snapshot yet.</p>
-              )}
+              {a ? <RiskBar exposure={a.exposure} limit={limit} /> : <p className="muted">No account snapshot yet.</p>}
               {status.fills_sync && status.fills_sync.error && <p className="hint error-text">Fill sync failed: {String(status.fills_sync.error)}</p>}
             </section>
 
             {equity.length > 1 && (
-              <FoldCard title="Balance, 30 Days" id="balance-fold" summary={<span className="num">{money(equity[equity.length - 1])}</span>}>
+              <FoldCard title="Balance, 30 Days" id="balance-fold" summary={<span className="num">{money(equity[equity.length - 1])} at cost</span>}>
                 <Sparkline
                   values={equity}
                   labels={equityDates}
                   yFormat={(v) => money(v, { digits: moneyDigits(Math.min(...equity), Math.max(...equity)) })}
-                  yTitle="Balance + positions ($)"
+                  yTitle="Balance, positions at cost ($)"
                   xTitle="Date"
                   testId="equity-chart"
-                  label={`Balance + positions in dollars, last 30 days, ${equityDates[0]} to ${equityDates[equityDates.length - 1]}: ${money(equity[0])} to ${money(equity[equity.length - 1])}; low ${money(Math.min(...equity))}, high ${money(Math.max(...equity))}`}
+                  label={`Balance with positions at cost, in dollars, last 30 days, ${equityDates[0]} to ${equityDates[equityDates.length - 1]}: ${money(equity[0])} to ${money(equity[equity.length - 1])}; low ${money(Math.min(...equity))}, high ${money(Math.max(...equity))}`}
                 />
-                <p className="hint">Balance + positions, 30 days: {money(equity[0])} → {money(equity[equity.length - 1])}</p>
+                <p className="hint">
+                  Balance with positions at cost (what was paid, not market value), 30 days: {money(equity[0])} → {money(equity[equity.length - 1])}
+                </p>
               </FoldCard>
             )}
             {'fill_quality' in status && (

@@ -199,8 +199,48 @@ const RAW_GLOSSARY = [
     aliases: ['cash'],
     short: 'Uninvested cash in the Kalshi account.',
     body:
-      'Balance is the cash in the account that is not tied up in open positions. Cash reserved by resting bids may still show here until they fill. Total account value is roughly balance + exposure.',
-    related: ['exposure', 'headroom'],
+      'Balance is the cash in the account that is not tied up in open positions, as Kalshi reports it, so it may include promotional credit. Cash reserved by resting bids may still show here until they fill. The total account value on Home is cash plus the market value of open positions.',
+    related: ['market-value', 'paid', 'exposure', 'headroom'],
+  },
+  {
+    id: 'market-value',
+    group: 'money',
+    term: 'Market value',
+    aliases: ['value now', 'current value', 'total value', 'portfolio value', 'mark to market'],
+    short: 'What open positions are worth now, by current prices, not what was paid for them.',
+    body:
+      'Market value is what open positions are worth right now. On the Home account card it is the figure Kalshi itself reports, and the total value is cash plus that figure. On a single position, "Value now" is the number of contracts times the current bid, so the rows need not add up exactly to the card. It moves with prices and is not money received until a market settles or the position is sold in Kalshi.',
+    related: ['paid', 'unrealised-pnl', 'balance', 'settlement'],
+  },
+  {
+    id: 'paid',
+    group: 'money',
+    term: 'Paid for positions',
+    aliases: ['cost', 'cost basis', 'amount paid'],
+    short: 'The money spent to buy the positions that are still open.',
+    body:
+      'Paid is what the open positions cost to buy, whatever they are worth now. It covers the bot\'s positions and your own. A balance "with positions at cost", as on the 30-day chart, is cash plus this amount, so it differs from the total Kalshi shows by the unrealised P&L.',
+    related: ['market-value', 'unrealised-pnl', 'exposure', 'position'],
+  },
+  {
+    id: 'breaker-own-trades',
+    group: 'safety',
+    term: 'Your own trades and the breaker',
+    aliases: ['manual trades', 'own trades', 'trades left out'],
+    short: 'The loss breaker leaves out trades you place yourself, once Kalshi confirms the bot did not place them.',
+    body:
+      'The circuit breaker ignores trades you place yourself once Kalshi confirms the bot did not place them, so your own wins and losses do not move its high-water mark or its day start. Your own losses can make a dollar limit tighter; your own wins never loosen it. A market that is not yet confirmed counts in full, and so does a market both you and the bot traded. Your open positions still reduce the bot\'s budget. The Circuit Breaker card in Settings shows the amount left out, and the account total beside the figure the limits use.',
+    related: ['drawdown', 'paid', 'kill-switch'],
+  },
+  {
+    id: 'unrealised-pnl',
+    group: 'money',
+    term: 'Unrealised P&L',
+    aliases: ['unrealized pnl', 'unrealized p&l', 'unrealised pnl', 'paper profit', 'paper loss'],
+    short: 'Market value minus the amount paid. Not realised until settlement.',
+    body:
+      'Unrealised P&L is the market value of open positions minus what was paid for them. It is not realised until settlement: it changes with prices and can reverse completely, since each contract ends at $1 or $0. It is never added to the realised P&L figures.',
+    related: ['market-value', 'paid', 'realised-pnl', 'settlement'],
   },
   {
     id: 'position',
@@ -287,7 +327,7 @@ const RAW_GLOSSARY = [
     aliases: ['realized pnl', 'realized p&l', 'realised pnl'],
     short: 'P&L from trades that have already settled. Open positions are not counted.',
     body:
-      'Realised P&L only includes fills whose market has settled, so it is money actually won or lost. Open positions have no realised P&L yet. The app does not show "unrealised" mark-to-market numbers.',
+      'Realised P&L only includes fills whose market has settled, so it is money actually won or lost. Open positions have no realised P&L yet. The Home account card shows their unrealised P&L separately, and it is never part of a realised figure.',
     related: ['pnl', 'settlement'],
   },
   {

@@ -51,7 +51,7 @@ const routes = [
 ];
 
 /** Runs in the page. Returns raw findings for the current scroll position. */
-function auditInPage({ smallOk }) {
+function auditInPage({ smallOk, labelTargets = false }) {
   const vw = document.documentElement.clientWidth;
   const vh = window.innerHeight;
   const out = [];
@@ -172,7 +172,9 @@ function auditInPage({ smallOk }) {
     if (!el.matches(INTERACTIVE)) continue;
     if (smallOk.some((c) => el.classList.contains(c))) continue;
     if (getComputedStyle(el).display === 'inline') continue; // inline link inside a sentence
-    const r = boxOf(el);
+    // labelTargets: a checkbox inside a <label> is tapped through the label, so the label is what is measured.
+    const label = labelTargets && el.matches('input[type=checkbox]') && el.closest('label');
+    const r = label ? label.getBoundingClientRect() : boxOf(el);
     if (r.height < 39.5 || r.width < 38) out.push({ kind: 'small', selector: it.name, detail: `"${it.text}" ${R(r.width)}x${R(r.height)}` });
   }
 
@@ -461,4 +463,147 @@ for (const scenario of BREAKER_SCENARIOS) {
       ).toEqual([]);
     });
   }
+}
+
+// Numbers and trades: the Home account card (live, unavailable, older API, very large figures), the "You" row, the
+// balance chart opened, the Account page with a combo row, the arbitrage "set to LIVE while off" warning and dialog,
+// and the breaker card's "your own trades left out" rows. The audits above only see the first screen, so these pages are audited at every scroll position.
+const NUMBER_SCENARIOS = [
+  { id: 'numbers', mock: '', pages: ['/', '/account'] },
+  { id: 'account-na', mock: 'account-na', pages: ['/'] },
+  { id: 'account-old', mock: 'account-old', pages: ['/'] },
+  { id: 'account-big', mock: 'account-big', pages: ['/', '/account'] },
+  { id: 'arb-live-off', mock: 'arb-live-off', pages: ['/strategies/arb', '/strategies/arb/controls'] },
+  { id: 'breaker-own', mock: '', pages: ['/settings'] },
+];
+
+/** What must be on screen, so a scan of a page that failed to render the element cannot pass. */
+async function expectNumbers(page, scenario, route) {
+  if (route === '/') {
+    await expect(page.getByTestId('home-account')).toBeVisible();
+    if (scenario === 'account-old') await expect(page.getByTestId('home-account')).toContainText('From the last account snapshot.');
+    else await expect(page.getByTestId('acct-total')).toBeVisible();
+    await expect(page.getByTestId('manual-open')).toContainText('2 open positions');
+    const fold = page.getByRole('button', { name: /Balance, 30 Days/ });
+    if ((await fold.getAttribute('aria-expanded')) !== 'true') await fold.click();
+    await expect(page.getByTestId('equity-chart')).toBeVisible();
+  } else if (route === '/account') {
+    await expect(page.getByTestId('pos-totals')).toBeVisible();
+    await expect(page.getByText('10-leg combo')).toBeVisible();
+  } else if (route === '/settings') {
+    await expect(page.getByTestId('breaker-excluded')).toBeVisible();
+    await expect(page.getByTestId('breaker-unproven')).toBeVisible();
+  } else {
+    await expect(page.getByTestId('arb-set-live')).toBeVisible();
+  }
+}
+
+for (const scenario of NUMBER_SCENARIOS) {
+  for (const width of WIDTHS) {
+    test(`layout collisions: ${scenario.id} (numbers and trades) at ${width}px`, async ({ page }) => {
+      test.setTimeout(180_000);
+      await page.setViewportSize({ width, height: 740 });
+      await page.addInitScript((s) => {
+        try { window.sessionStorage.setItem('keel.mock', s); } catch { /* storage may be blocked */ }
+      }, scenario.mock);
+      await login(page);
+      const findings = [];
+      const seen = new Set();
+      const record = async (raw, label) => {
+        let shot = null;
+        for (const f of raw) {
+          const key = `${f.kind}|${label}|${f.selector}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (!shot) {
+            shot = path.join(SHOTS, `${scenario.id}-${width}-${findings.length}-${label.replace(/[^a-z0-9]+/gi, '_')}.png`);
+            await page.screenshot({ path: shot });
+          }
+          findings.push({ ...f, route: label, width, theme: scenario.id, screenshot: shot });
+        }
+      };
+      const go = async (p) => {
+        await page.evaluate((x) => {
+          window.history.pushState({}, '', x);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, p);
+        await page.waitForTimeout(450);
+      };
+      const setSafe = (top, bottom) =>
+        page.evaluate(([t, b]) => {
+          const s = document.documentElement.style;
+          if (t) {
+            s.setProperty('--safe-top', `${t}px`);
+            s.setProperty('--safe-bottom', `${b}px`);
+          } else {
+            s.removeProperty('--safe-top');
+            s.removeProperty('--safe-bottom');
+          }
+        }, [top, bottom]);
+      const overlay = async (name, safeTop, safeBottom) => {
+        await page.waitForTimeout(400);
+        const res = await page.evaluate(auditOverlay, { safeTop, safeBottom });
+        if (!res.found) {
+          findings.push({ kind: 'modal', route: `${name}@safe${safeTop}`, width, theme: scenario.id, selector: name, detail: 'overlay did not open', screenshot: '' });
+        } else {
+          await record(res.out, `${name}@safe${safeTop}`);
+        }
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(150);
+      };
+
+      for (const [safeTop, safeBottom] of [[0, 0], [47, 34]]) {
+        await setSafe(safeTop, safeBottom);
+        for (const route of scenario.pages) {
+          await go(route);
+          await expectNumbers(page, scenario.id, route);
+          const height = await page.evaluate(() => document.documentElement.scrollHeight);
+          for (let y = 0; y < height; y += 420) {
+            await page.evaluate((to) => window.scrollTo(0, to), y);
+            await page.waitForTimeout(120);
+            await record(await page.evaluate(auditInPage, { smallOk: SMALL_OK, labelTargets: true }), `${scenario.id}:${route}@safe${safeTop}`);
+          }
+        }
+        if (scenario.id === 'numbers') {
+          for (const name of ['Market Value', 'Paid for Positions', 'Unrealised P&L']) {
+            await go('/');
+            await page.getByTestId('home-account').getByRole('button', { name: `What is ${name}?` }).click();
+            await overlay(`help-${name}`, safeTop, safeBottom);
+          }
+        }
+        if (scenario.id === 'breaker-own') {
+          await go('/settings');
+          await page.getByRole('button', { name: /What is Your Own Trades/i }).click();
+          await overlay('help-breaker-own-trades', safeTop, safeBottom);
+        }
+        if (scenario.id === 'arb-live-off') {
+          await go('/strategies/arb/controls');
+          await page.getByRole('button', { name: /turn on/i }).click();
+          await expect(page.getByRole('dialog')).toContainText('trades real money');
+          await overlay('arb-turn-on-live', safeTop, safeBottom);
+        }
+      }
+      await setSafe(0, 0);
+      fs.writeFileSync(path.join(SHOTS, `findings-${scenario.id}-${width}.json`), JSON.stringify(findings, null, 2));
+      const unknown = findings.filter((f) => !KNOWN.some((k) => `${f.kind}|${f.route}|${f.selector}`.startsWith(k)));
+      expect(
+        unknown.map((f) => `${f.kind} ${f.route} @${f.width} ${f.selector} (${f.detail}) -> ${f.screenshot}`),
+        `layout findings (screenshots in ${SHOTS})`,
+      ).toEqual([]);
+    });
+  }
+}
+
+// The signed-out page (its footer lost the demo / live wording). It has no header, so there is no Stop to check.
+for (const width of WIDTHS) {
+  test(`layout collisions: login at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 740 });
+    await page.goto('/');
+    await expect(page.getByText('Protected by 2FA')).toBeVisible();
+    const found = (await page.evaluate(auditInPage, { smallOk: SMALL_OK, labelTargets: true })).filter(
+      // The reveal-password eye sits inside the password field on purpose.
+      (f) => f.kind !== 'stop' && !(f.kind === 'overlap' && f.selector.includes('button.pw-eye')),
+    );
+    expect(found.map((f) => `${f.kind} ${f.selector} (${f.detail})`)).toEqual([]);
+  });
 }

@@ -276,7 +276,8 @@ function seedBreaker(scn) {
 }
 
 function breakerEnv(on) {
-  return { enabled: on, hwm: 250, hwm_utc: iso(now() - 5 * 24 * 60 * MIN), drawdown: 12.5, drawdown_share: 0.05, day: iso(now()).slice(0, 10), day_start_equity: 245, day_loss: 7.5, day_loss_share: 0.0306, last_equity: 237.5, last_utc: iso(now() - 4 * MIN) };
+  // account_equity - manual_excluded = last_equity: a made-up manual loss of $3 is left out of the limits.
+  return { enabled: on, account_equity: 234.5, manual_excluded: -3, manual_unproven: 2, hwm: 250, hwm_utc: iso(now() - 5 * 24 * 60 * MIN), drawdown: 12.5, drawdown_share: 0.05, day: iso(now()).slice(0, 10), day_start_equity: 245, day_loss: 7.5, day_loss_share: 0.0306, last_equity: 237.5, last_utc: iso(now() - 4 * MIN) };
 }
 
 function breakerState() {
@@ -310,6 +311,8 @@ function breakerStatus() {
 
 function initialState() {
   const summary = buildSummary();
+  // Scenario arb-live-off: arbitrage is off but its saved mode is LIVE (the "Turn on" dialog must warn).
+  const arbLiveOff = readScenario().has('arb-live-off');
   return {
     desired: 'running',
     mode: 'demo',
@@ -339,7 +342,7 @@ function initialState() {
     resting: 9,
     arming: { maker: { armed: true, mode: 'demo' }, arbitrage: { armed: false, mode: 'demo' } },
     arb: {
-      settings: { enabled: true, live: false, arb_max_contracts: 100, arb_min_profit: 0.05, arb_series: [...ARB_SERIES], arb_poll_seconds: 15, arb_scan_cap: 15, arb_day_cap: 45, arb_series_cap_frac: 0.35, arb_demo_execute: false },
+      settings: { enabled: !arbLiveOff, live: arbLiveOff, arb_max_contracts: 100, arb_min_profit: 0.05, arb_series: [...ARB_SERIES], arb_poll_seconds: 15, arb_scan_cap: 15, arb_day_cap: 45, arb_series_cap_frac: 0.35, arb_demo_execute: false },
       kill_switch: false,
       kill_reason: null,
       last_error: null,
@@ -673,6 +676,39 @@ function cloudResponse() {
   };
 }
 
+// Open positions and resting orders (made up). value = count x current bid; cost = count x price paid; a resting
+// order has no cost yet. The position costs add up to the exposure in /api/status. The combo row has a long ticker.
+function accountPositions() {
+  const rows = [
+    { kind: 'position', ticker: 'KXDEMOA-26OCT13-T83', title: 'Demo A above 83', side: 'yes', count: 20, price: 0.41, cost: 8.2, legs: null, value: 9, payout_if_wins: 20, source: 'bot', strategy: 'maker' },
+    { kind: 'position', ticker: 'KXDEMOB-26OCT13-T61', title: 'Demo B above 61', side: 'yes', count: 12, price: 0.4, cost: 4.8, legs: null, value: 4.32, payout_if_wins: 12, source: 'bot', strategy: 'maker' },
+    { kind: 'position', ticker: 'KXFED-26OCT-T4', title: 'Fed holds rates', side: 'yes', count: 10, price: 0.66, cost: 6.6, legs: null, value: 7.1, payout_if_wins: 10, source: 'you', strategy: null },
+    { kind: 'position', ticker: 'KXMVEDEMOMULTIGAMEEXTENDED-S2026DEMO000000000-DEMO00000000000', title: '10-leg combo', side: 'yes', count: 200, price: 0.09, cost: 18, legs: 10, value: 14.4, payout_if_wins: 200, source: 'you', strategy: null },
+    { kind: 'order', ticker: 'KXDEMOD-26OCT13-B88.5', title: 'Demo D 88 to 89', side: 'yes', action: 'buy', count: 9, price: 0.4, cost: null, legs: null, value: 3.6, payout_if_wins: 9, source: 'bot', strategy: 'maker' },
+  ];
+  if (!S.scenario.has('account-big')) return rows;
+  return rows.map((r) => ({ ...r, count: r.count * 10000, cost: r.cost == null ? null : r.cost * 10000, value: r.value * 10000, payout_if_wins: r.payout_if_wins * 10000 }));
+}
+
+function accountSummary() {
+  const open = accountPositions().filter((r) => r.kind === 'position');
+  const sum = (key) => +open.reduce((a, r) => a + r[key], 0).toFixed(2);
+  const cash = S.scenario.has('account-big') ? 1234567.89 : 212.4;
+  const cost = sum('cost');
+  const value = S.scenario.has('account-na') ? null : sum('value');
+  const plus = (a, b) => (a == null || b == null ? null : +(a + b).toFixed(2));
+  return {
+    env: S.mode,
+    as_of: iso(now() - 20 * 1000),
+    cash,
+    positions_cost: cost,
+    positions_value: value,
+    total_value: plus(cash, value),
+    total_at_cost: plus(cash, cost),
+    unrealized: value == null ? null : +(value - cost).toFixed(2),
+  };
+}
+
 // ------------------------------------------------------------------ router
 
 async function route(method, url, headers, body) {
@@ -721,14 +757,13 @@ async function route(method, url, headers, body) {
   if (method === 'GET' && p === '/api/since') {
     return reply(200, { fills: 3, settled: 2, pnl_change: 1.4, since: q.get('ts') });
   }
-  if (method === 'GET' && p === '/api/account/positions') {
-    return reply(200, [
-      { kind: 'position', ticker: 'KXDEMOA-26OCT13-T83', title: 'Demo A above 83', side: 'yes', count: 20, price: 0.41, value: 8.2, payout_if_wins: 20, source: 'bot', strategy: 'maker' },
-      { kind: 'position', ticker: 'KXDEMOB-26OCT13-T61', title: 'Demo B above 61', side: 'yes', count: 12, price: 0.4, value: 4.8, payout_if_wins: 12, source: 'bot', strategy: 'maker' },
-      { kind: 'position', ticker: 'KXFED-26OCT-T4', title: 'Fed holds rates', side: 'yes', count: 10, price: 0.66, value: 6.6, payout_if_wins: 10, source: 'you', strategy: null },
-      { kind: 'order', ticker: 'KXDEMOD-26OCT13-B88.5', title: 'Demo D 88 to 89', side: 'yes', action: 'buy', count: 9, price: 0.4, value: 3.6, payout_if_wins: 9, source: 'bot', strategy: 'maker' },
-    ]);
+  // Scenarios: account-na (Kalshi sent no portfolio value), account-old (server without the summary route),
+  // account-big (large figures, for the phone-width layout checks).
+  if (method === 'GET' && p === '/api/account/summary') {
+    if (S.scenario.has('account-old')) return reply(404, { detail: 'Not Found' });
+    return reply(200, accountSummary());
   }
+  if (method === 'GET' && p === '/api/account/positions') return reply(200, accountPositions());
   if (method === 'GET' && p === '/api/changelog') return reply(200, CHANGELOG);
 
   if (method === 'POST' && p === '/api/bot/stop') {
@@ -1125,6 +1160,8 @@ async function route(method, url, headers, body) {
     }
     const a = S.arb;
     a.settings = { ...a.settings, ...patch };
+    // Turning arbitrage off also drops live (the real API does the same).
+    if (patch.enabled === false && !('live' in patch)) a.settings.live = false;
     if (patch.enabled === true) {
       a.kill_switch = false;
       a.kill_reason = null;

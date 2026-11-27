@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import usePollWhileVisible from './usePollWhileVisible.js';
 import { api, query, request, viewerTimeZone, withRetry } from '../services/api.js';
 import { registerRefresh } from '../services/refreshBus.js';
 import { DEFAULT_RANGE, rangeParams } from '../utils/range.js';
@@ -29,7 +30,11 @@ import { strategyShortName } from '../utils/format.js';
  *   enabled, lastRunAt, nextRunAt, lastAction: {ts, text}|null, pnl, roi, openCost, fills, settledFills,
  *   exposure, resting, drawdown (always null), series: {enabled, total, paused}|null (Maker only) }
  * total: Maker + Arbitrage only: { pnl, roi, openCost, fills, exposure } (null fields when no source has them)
- * manual: the owner's own trades, shown on a separate "not in the total" line: { pnl, fills, openCost, exposure }|null
+ * manual: the owner's own trades, shown on a separate "not in the total" line:
+ *   { pnl, fills, openCost, exposure, open: {count, cost, value}|null }|null
+ *   `open` comes from the LIVE positions rows (source "you", not orders), so the chosen range does not filter it.
+ *   open is null when positions could not be read; open.cost / open.value are null when any row lacks that figure.
+ * `positionsPollMs` re-reads only the positions while the page is visible (Home).
  */
 
 export const SUMMARY_CAPABILITIES = {
@@ -47,6 +52,8 @@ const sum = (vals) => {
   const n = vals.filter(isNum);
   return n.length ? Math.round(n.reduce((a, b) => a + b, 0) * 100) / 100 : null;
 };
+// A total that never under-reports: 0 for no rows, null when any row lacks the figure.
+const strictSum = (vals) => (vals.every(isNum) ? sum(vals) ?? 0 : null);
 
 // The ledger is the slow call (a cold server build). 429 analytics_busy and 503 store_unavailable are retried twice
 // by themselves (Retry-After honored, jitter); the section stays in its loading state meanwhile (see withRetry).
@@ -87,7 +94,7 @@ function stateText(state, mode) {
   return 'Unknown';
 }
 
-export default function useStrategySummary({ range = DEFAULT_RANGE, env, status: statusProp } = {}) {
+export default function useStrategySummary({ range = DEFAULT_RANGE, env, status: statusProp, positionsPollMs } = {}) {
   const ownStatus = statusProp === undefined;
   const [raw, setRaw] = useState({ registry: null, status: null, ledger: null, ledgerFor: null, positions: null, markets: null });
   const [errors, setErrors] = useState({ strategies: null, status: null, ledger: null, positions: null, markets: null });
@@ -144,6 +151,23 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     reload();
   }, [reload]);
   useEffect(() => registerRefresh(reload), [reload]);
+
+  // Positions alone, so a new trade shows without reloading (and re-showing the skeleton of) the slow ledger.
+  const reloadPositions = useCallback(
+    () =>
+      api.getAccountPositions().then(
+        (value) => {
+          if (!alive.current) return;
+          setRaw((prev) => ({ ...prev, positions: value }));
+          setErrors((e) => ({ ...e, positions: null }));
+        },
+        (reason) => {
+          if (alive.current) setErrors((e) => ({ ...e, positions: reason || new Error('Request failed') }));
+        },
+      ),
+    [],
+  );
+  usePollWhileVisible(reloadPositions, positionsPollMs);
 
   const status = ownStatus ? raw.status : statusProp;
 
@@ -214,6 +238,7 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
       exposure: sum(inTotal.map((s) => s.exposure)),
     };
     const you = rows.you;
+    const yourOpen = positions ? positions.filter((p) => p.source === 'you' && (p.kind || 'position') === 'position') : null;
     const manual =
       ledger || positions
         ? {
@@ -221,6 +246,9 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
             fills: you ? you.fills : ledger ? 0 : null,
             openCost: you ? you.open_cost : ledger ? 0 : null,
             exposure: posSum((p) => p.source === 'you', 'position'),
+            open: yourOpen
+              ? { count: yourOpen.length, cost: strictSum(yourOpen.map((p) => p.cost)), value: strictSum(yourOpen.map((p) => p.value)) }
+              : null,
           }
         : null;
 

@@ -686,7 +686,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 }
 .pw-eye:hover { color: var(--text); }
 .login-mock { margin: 0 0 18px; }
-.login-show { min-height: 32px; margin-top: 2px; }
+.login-show { min-height: 40px; margin-top: 2px; }
 .login-show span { font-size: 0.875rem; color: var(--muted); }
 
 /* Six-digit code boxes drawn over one real input (components/CodeInput.jsx). */

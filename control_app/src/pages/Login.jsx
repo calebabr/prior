@@ -8,9 +8,6 @@ import { IconEye, IconEyeOff } from '../components/Icons.jsx';
 import { isMockMode } from '../services/api.js';
 import { APP_NAME, TAGLINE_LEAD, TAGLINE_ACCENT } from '../utils/routes.js';
 
-// "Protected by 2FA · Demo Mode": which deployment this is (VITE_APP_MODE=live for the live build).
-const MODE_LABEL = String(import.meta.env.VITE_APP_MODE || 'demo').toLowerCase() === 'live' ? 'Live Mode' : 'Demo Mode';
-
 function loginMessage(err) {
   if (!err) return null;
   if (err.status === 401) return 'Wrong username or password.';
@@ -185,7 +182,8 @@ export default function Login() {
             </button>
           </form>
         )}
-        <p className="login-trust">Protected by 2FA · {MODE_LABEL}</p>
+        {/* No demo / live wording: the build cannot know the server's mode. The signed-in header shows it. */}
+        <p className="login-trust">Protected by 2FA</p>
       </div>
     </div>
   );

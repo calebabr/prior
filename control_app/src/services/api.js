@@ -412,6 +412,8 @@ export const api = {
   pushClearAll: () => request('DELETE', '/api/push/subscriptions', { cache: false }),
   pushTest: () => request('POST', '/api/push/test', { cache: false }),
   getAccountPositions: () => request('GET', '/api/account/positions').then((d) => (Array.isArray(d) ? d : (d && d.positions) || [])),
+  // Live account totals from Kalshi (read only). Never cached: an old money figure would look current.
+  getAccountSummary: () => request('GET', '/api/account/summary', { cache: false }),
 
   // Live-arming checklist (Sprint 2B part 3). Reads need a login; changing arming needs fresh 2FA.
   getPreflight: (target = 'live') => request('GET', `/api/preflight${query({ target })}`, { cache: false }),

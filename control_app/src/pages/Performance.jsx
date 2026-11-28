@@ -39,8 +39,8 @@ const LINKS = [
 const SHOW_ANALYSIS = false;
 
 /**
- * Performance hub: "All Strategies" compares P&L, return, open cost, exposure and drawdown per strategy for the
- * shared range (Maker + Arbitrage total, manual trades on a separate line), then links to the deeper views.
+ * Performance hub: "All Strategies" compares P&L and return per strategy for the shared range, and what the positions
+ * open now cost and are worth (Maker + Arbitrage total, manual trades on a separate line), then links to the views.
  */
 export default function Performance() {
   const { status } = useStatus();
@@ -79,9 +79,8 @@ export default function Performance() {
                   <th scope="col">Strategy</th>
                   <th scope="col">P&amp;L</th>
                   <th scope="col">Return</th>
-                  <th scope="col">Open cost</th>
-                  <th scope="col">Exposure</th>
-                  <th scope="col">Drawdown</th>
+                  <th scope="col">Open, paid</th>
+                  <th scope="col">Value now</th>
                 </tr>
               </thead>
               <tbody>
@@ -93,18 +92,18 @@ export default function Performance() {
                     <td><Cell v={s.pnl} fmt={pnl} signed /></td>
                     <td><Cell v={s.roi} fmt={formatReturn} signed /></td>
                     <td><Cell v={s.openCost} fmt={plain} /></td>
-                    <td><Cell v={s.exposure} fmt={plain} /></td>
-                    <td><Cell v={s.drawdown} fmt={plain} /></td>
+                    <td><Cell v={s.value} fmt={plain} /></td>
                   </tr>
                 ))}
                 {manual && (
                   <tr className="perf-manual" data-testid="perf-row-you">
-                    <th scope="row">You (manual, not in the total)</th>
+                    <th scope="row">
+                      You <span className="perf-you-sub">manual, not in the total</span>
+                    </th>
                     <td><Cell v={manual.pnl} fmt={pnl} signed /></td>
                     <td><Cell v={null} fmt={formatReturn} /></td>
                     <td><Cell v={manual.openCost} fmt={plain} /></td>
-                    <td><Cell v={manual.exposure} fmt={plain} /></td>
-                    <td><Cell v={null} fmt={plain} /></td>
+                    <td><Cell v={manual.value} fmt={plain} /></td>
                   </tr>
                 )}
               </tbody>
@@ -114,8 +113,7 @@ export default function Performance() {
                   <td><Cell v={total.pnl} fmt={pnl} signed /></td>
                   <td><Cell v={total.roi} fmt={formatReturn} signed /></td>
                   <td><Cell v={total.openCost} fmt={plain} /></td>
-                  <td><Cell v={total.exposure} fmt={plain} /></td>
-                  <td><Cell v={null} fmt={plain} /></td>
+                  <td><Cell v={total.value} fmt={plain} /></td>
                 </tr>
               </tfoot>
             </table>
@@ -123,6 +121,10 @@ export default function Performance() {
         )}
         <p className="home-scope">
           Settled P&amp;L, by settlement date, your time zone.<HelpIcon term="realised-pnl" />
+        </p>
+        <p className="home-scope" data-testid="perf-open-scope">
+          Open, paid and Value now are the positions open now, whatever the range.<HelpIcon term="paid" />
+          <HelpIcon term="market-value" />
         </p>
       </section>
       <section className="home-section" aria-labelledby="perf-more-h">

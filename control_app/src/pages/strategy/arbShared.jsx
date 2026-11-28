@@ -7,6 +7,7 @@ import { usePageVisible } from '../../hooks/usePageVisible.js';
 import { api } from '../../services/api.js';
 import { humanize } from '../../utils/format.js';
 import { BREAKER_ACK_LABEL, breaker409, isTripped } from '../../utils/breaker.js';
+import { STOP_WON } from '../../utils/stopCopy.js';
 
 // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app").
 //   GET  /api/arb               -> {settings, schema?, ceilings?, status, pnl, expectation?}
@@ -42,11 +43,11 @@ const DEFAULT_SCHEMA = {
   },
   arb_scan_cap: {
     type: 'number', unit: 'USD per scan', min: 1, max: 100,
-    help: 'Most money one scan may spend on sets in demo-execute. Sets over this are skipped.',
+    help: 'Most money one scan may put into arbitrage sets. Sets over this are skipped.',
   },
   arb_day_cap: {
     type: 'number', unit: 'USD per day', min: 1, max: 500,
-    help: 'Most money arbitrage may spend per UTC day in demo-execute.',
+    help: 'Most money arbitrage may spend in one UTC day.',
   },
   arb_series_cap_frac: {
     type: 'number', unit: 'fraction of the open-exposure ceiling', min: 0.05, max: 0.9, step: 0.01,
@@ -73,6 +74,9 @@ const DEFAULT_SCHEMA = {
     help: 'Place the sets it finds as real orders on the Kalshi demo account (play money). Never on live.',
   },
 };
+
+// Settings that only change what happens on the demo exchange: shown in their own group.
+export const DEMO_ONLY_FIELDS = ['arb_demo_execute'];
 
 const STATES = [
   { key: 'stopped', label: 'Off' },
@@ -198,7 +202,9 @@ export function useArbController() {
   const restartUtc = sinceRestart.since_utc || st.since_restart_utc || null;
   const state = arbState(settings, data && data.status);
   const enabled = (settings && 'enabled' in settings ? !!settings.enabled : state !== 'stopped') && !st.kill_switch;
-  const live = state === 'live';
+  // SAFETY: the CONFIGURED mode (settings.live), not the running state. While arbitrage is off the state is "stopped"
+  // even when it is set to live, and "Turn on" then trades real money. Either source saying live counts as live.
+  const live = !!(settings && settings.live) || state === 'live';
   const liveAllowed = !!st.live_allowed;
   const legging = st.kill_reason === 'legging';
 
@@ -252,7 +258,9 @@ export function useArbController() {
   }
 
   function errorToast(err, fallbackTitle) {
-    if (err.status === 409 && String(err.detail).startsWith('live_not_allowed')) {
+    if (err.status === 409 && STOP_WON[err.detail]) {
+      notify({ kind: 'error', title: fallbackTitle, text: STOP_WON[err.detail] });
+    } else if (err.status === 409 && String(err.detail).startsWith('live_not_allowed')) {
       notify({
         kind: 'error',
         title: 'Live arbitrage is not allowed by the server',
@@ -311,11 +319,12 @@ export function useArbController() {
         title: on ? 'Turn arbitrage on?' : 'Turn arbitrage off?',
         message: on
           ? live
-            ? 'The scanner starts and trades LIVE when it finds a set.'
+            ? 'Arbitrage is set to LIVE. The scanner starts and trades real money when it finds a set.'
             : 'The scanner starts in log-only mode: it records opportunities and places no orders.'
           : 'The scanner stops. Stop (no code needed) also turns it off.',
         confirmLabel: on ? 'Turn on' : 'Turn off',
         danger: on && live,
+        resumesTrading: on, // sent before a Stop, it could turn arbitrage back on: see DialogContext
         action: (code) => api.putArb(body, code),
       });
       if (r) {
@@ -358,7 +367,13 @@ export function useArbController() {
       });
       if (r) {
         applyResult(r);
-        notify({ kind: 'ok', title: on ? 'Arbitrage is LIVE' : 'Arbitrage is log-only' });
+        // Saving LIVE while arbitrage is off must not read as "off therefore safe", nor as already trading.
+        const stillOff = !!(r.status && r.status.state === 'stopped');
+        notify(
+          on && stillOff
+            ? { kind: 'ok', title: 'Arbitrage is set to LIVE', text: 'It is off now. Turning it on will trade real money.' }
+            : { kind: 'ok', title: on ? 'Arbitrage is LIVE' : 'Arbitrage is log-only' },
+        );
       }
     } catch (err) {
       errorToast(err, 'Arbitrage mode not changed');
@@ -419,7 +434,7 @@ export function useArbController() {
           <legend>{label}</legend>
           <div className="checks">
             {options.map((o) => (
-              <label key={o} className="check">
+              <label key={o} className="ux-check">
                 <input
                   type="checkbox"
                   checked={cur.includes(o)}
@@ -439,7 +454,7 @@ export function useArbController() {
     if (kind === 'bool') {
       return (
         <div className="field" key={k}>
-          <label className="check">
+          <label className="ux-check">
             <input type="checkbox" checked={!!draft[k]} onChange={(ev) => setField(k, ev.target.checked)} />
             {label}
           </label>

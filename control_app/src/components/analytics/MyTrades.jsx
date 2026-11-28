@@ -43,7 +43,7 @@ function Column({ label, t, testId }) {
           <dd className={signCls(t && t.pnl)}>{formatMoney(t && t.pnl, { sign: true })}</dd>
         </div>
         <div>
-          <dt>Profit per $1 Spent<HelpIcon term="roi" /></dt>
+          <dt>Return<HelpIcon term="roi" /></dt>
           <dd className={signCls(t && t.roi)}>{formatPct(t && t.roi, { digits: 1 })}</dd>
         </div>
         <div>

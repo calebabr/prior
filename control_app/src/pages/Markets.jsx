@@ -17,7 +17,8 @@ import { useStatus } from '../context/StatusContext.jsx';
 import { useResource } from '../hooks/useResource.js';
 import useStrategySummary from '../hooks/useStrategySummary.js';
 import { api } from '../services/api.js';
-import { ago, formatMoney, formatPct, formatReturn, num, titleCase } from '../utils/format.js';
+import { ago, countWord, formatMoney, formatPct, formatReturn, num, titleCase } from '../utils/format.js';
+import { TOO_FEW_TEXT, tooFewForRange, winRecords } from '../utils/ci.js';
 import { DEFAULT_RANGE, rangeLabel } from '../utils/range.js';
 import { badgeKind, riskLimit } from '../utils/status.js';
 import { isMakerKey } from '../utils/strategyConfig.js';
@@ -57,9 +58,10 @@ export function verdictInfo(m) {
   const more = typeof m.need_more === 'number' && m.need_more > 0 ? m.need_more : 0;
   const v = String(m.verdict || m.action || '').toLowerCase();
   if (v.includes('pause') || v.includes('losing')) return { label: 'Pause Suggested', tone: 'danger', title: VERDICT_TEXT.pause };
-  if (v === 'keep' && more) return { label: `Keep (${more} More Fills to Judge)`, tone: 'muted', title: VERDICT_TEXT.collecting };
+  const moreFills = `${more} More ${countWord(more, 'Fill')}`;
+  if (v === 'keep' && more) return { label: `Keep (${moreFills} to Judge)`, tone: 'muted', title: VERDICT_TEXT.collecting };
   if (v === 'keep' || v === 'ok') return { label: 'Keep', tone: 'ok', title: VERDICT_TEXT.keep };
-  if (v || more) return { label: more ? `Collecting Data (${more} More Fills)` : titleCase(v), tone: 'muted', title: VERDICT_TEXT.collecting };
+  if (v || more) return { label: more ? `Collecting Data (${moreFills})` : titleCase(v), tone: 'muted', title: VERDICT_TEXT.collecting };
   return null;
 }
 
@@ -77,10 +79,11 @@ function Toolbar({ onRefresh, loading }) {
 
 /** Maker, Overview: state, Stop, last passes, exposure, fill quality. */
 export function MakerOverview() {
-  const { status } = useStatus();
+  const { status, unconfirmed } = useStatus();
   const { data, error, loading, staleAt, reload } = useResource(() => api.getMarkets(), '/api/markets');
   const badge = badgeKind(status);
   const running = badge.kind === 'live' || badge.kind === 'demo';
+  const stateWords = running ? `Running, ${badge.kind === 'live' ? 'live' : 'demo'}` : badge.kind === 'error' ? 'Needs attention' : 'Stopped';
   const a = status && status.account;
   const limit = riskLimit(status);
   const frac = isNum(a && a.exposure) && isNum(limit) && limit > 0 ? Math.min(1, a.exposure / limit) : null;
@@ -92,12 +95,12 @@ export function MakerOverview() {
       <ErrorNotice error={error} onRetry={reload} />
       <Card title="State">
         <p data-testid="maker-state">
-          {running ? `Running, ${badge.kind === 'live' ? 'live' : 'demo'}` : badge.kind === 'error' ? 'Needs attention' : 'Stopped'}
+          {unconfirmed ? `Last known: ${stateWords.toLowerCase()}` : stateWords}
           {badge.reason ? <span className="muted"> ({badge.reason})</span> : null}
         </p>
         <p className="hint">
           Last run {status && status.last_run_at ? ago(status.last_run_at) : '—'}
-          {status && status.next_run_at ? ` · next due ${ago(status.next_run_at)}` : ''}
+          {!unconfirmed && status && status.next_run_at ? ` · next due ${ago(status.next_run_at)}` : ''}
         </p>
         <StopButton />
       </Card>
@@ -136,6 +139,9 @@ export function MarketsResults() {
   const sum = useStrategySummary({ range, status });
   const maker = sum.strategies.find((s) => s.id === 'maker');
   const markets = (data && data.markets) || [];
+  // Only to learn whether a market has had a loss yet: without it the range rule still uses the market count.
+  const wins = useResource(() => api.analyticsSummary({ days: 30 }), '/api/analytics/summary?days=30');
+  const records = winRecords(wins.data);
   return (
     <div className="strat-view">
       <Toolbar
@@ -163,7 +169,7 @@ export function MarketsResults() {
       {markets.length > 0 && (
         <p className="hint mk-legend" data-testid="ci-explainer">
           Tap a market for its chart. The dot is the return so far and the bar is the likely range
-          <HelpIcon term="ci-bars" />. If the bar crosses zero, it is too soon to say.
+          <HelpIcon term="ci-bars" />. If the bar crosses zero, or there is no bar yet, it is too soon to say.
         </p>
       )}
 
@@ -184,7 +190,7 @@ export function MarketsResults() {
               summary={
                 <>
                   <span>
-                    <b className="num">{num(m.fills)}</b> Fills
+                    <b className="num">{num(m.fills)}</b> {countWord(m.fills, 'Fill')}
                   </span>
                   <span className={m.pnl < 0 ? 'neg' : m.pnl > 0 ? 'pos' : ''}>{formatMoney(m.pnl, { sign: true })}</span>
                   {!m.enabled && <Chip tone="muted">Not Trading</Chip>}
@@ -206,7 +212,7 @@ export function MarketsResults() {
                   <dd className={m.pnl < 0 ? 'neg' : ''}>{formatMoney(m.pnl, { sign: true })}</dd>
                 </div>
                 <div>
-                  <dt>Profit per $1 Spent<HelpIcon term="roi" /></dt>
+                  <dt>Return<HelpIcon term="roi" /></dt>
                   <dd className={m.roi < 0 ? 'neg' : ''}>{formatPct(m.roi, { digits: 1 })}</dd>
                 </div>
                 <div>
@@ -214,7 +220,11 @@ export function MarketsResults() {
                   <dd>{formatMoney(m.cost)}</dd>
                 </div>
               </dl>
-              {hasCi ? (
+              {hasCi && tooFewForRange(m, records[m.series]) ? (
+                <p className="hint" data-testid="range-too-few">
+                  {TOO_FEW_TEXT}
+                </p>
+              ) : hasCi ? (
                 <>
                   <CiSummary roi={m.roi} low={m.ci_low} high={m.ci_high} />
                   <CiBar roi={m.roi} low={m.ci_low} high={m.ci_high} />

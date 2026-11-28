@@ -51,6 +51,8 @@
 .pos-meta { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 0.875rem; margin-top: 4px; }
 .pos-meta span { white-space: nowrap; }
 .pos-top { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; justify-content: space-between; }
+.pos-top > * { min-width: 0; }
+.pos-totals { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-variant-numeric: tabular-nums; }
 @media (max-width: 380px) { .two-col { grid-template-columns: 1fr; } }
 
 /* Checkbox rows: the label is the 44px tap target; the box is a small fixed square centred on the text.

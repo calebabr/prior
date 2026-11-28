@@ -38,8 +38,10 @@ function Fig({ value, fmt, signed = false }) {
  * 8 px dot only, never text.
  *   <StrategyCard strategy={s} rangeText="30 days" />
  */
-export default function StrategyCard({ strategy: s, rangeText }) {
-  const tone = s.state === 'running' && s.mode !== 'live' ? 'warn' : TONE[s.state] || 'muted';
+export default function StrategyCard({ strategy: s, rangeText, unconfirmed = false }) {
+  const old = unconfirmed && s.state !== 'unknown'; // the run state may no longer be true
+  const running = s.mode === 'log-only' ? 'accent' : s.mode !== 'live' ? 'warn' : 'ok';
+  const tone = old ? 'muted' : s.state === 'running' ? running : TONE[s.state] || 'muted';
   return (
     <Link to={s.to} className="strategy-card" data-testid={`strategy-card-${s.id}`} style={{ '--strategy-color': s.color }}>
       <div className="strategy-card-head">
@@ -47,8 +49,8 @@ export default function StrategyCard({ strategy: s, rangeText }) {
         <span className="strategy-name">{s.shortName}</span>
         <Chip tone={tone} title={s.mode ? `Mode: ${s.mode}` : undefined}>
           <span className="strategy-state">
-            <StateIcon state={s.state} />
-            {s.stateText}
+            <StateIcon state={old ? 'unknown' : s.state} />
+            {old ? `Last known: ${s.stateText.toLowerCase()}` : s.stateText}
           </span>
         </Chip>
         <span className="strategy-chevron" aria-hidden="true">
@@ -69,7 +71,7 @@ export default function StrategyCard({ strategy: s, rangeText }) {
           </dd>
         </div>
         <div className="strategy-figure">
-          <dt>Open cost</dt>
+          <dt>Open, paid</dt>
           <dd>
             <Fig value={s.openCost} fmt={(v) => formatMoney(v)} />
           </dd>

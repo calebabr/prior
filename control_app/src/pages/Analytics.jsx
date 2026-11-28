@@ -27,7 +27,7 @@ import RangeSelect from '../components/RangeSelect.jsx';
 import TabScroller from '../components/analytics/TabScroller.jsx';
 import PnlScope from '../components/PnlScope.jsx';
 import { api, query } from '../services/api.js';
-import { ago, formatMoney, formatPct, num } from '../utils/format.js';
+import { ago, countWord, formatMoney, formatPct, num } from '../utils/format.js';
 import { DAY_OPTIONS, rate, signCls } from '../utils/analytics.js';
 import '../styles/analytics.css';
 
@@ -73,7 +73,7 @@ function Totals({ t, pooled = true }) {
       </div>
       <div>
         <dt>
-          Profit per $1 Spent
+          Return
           <HelpIcon term="roi" />
         </dt>
         <dd className={signCls(t.roi)}>{formatPct(t.roi, { digits: 1 })}</dd>
@@ -109,7 +109,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days, env, on
         <WinRateByStrategy wr={s.win_rate_by_strategy} />
         <PnlScope id="analytics" ctx={{ tz: s.tz_used }} />
         <p className="hint">
-          {num(totals.settled_fills)} settled fills
+          {num(totals.settled_fills)} settled {countWord(totals.settled_fills, 'fill')}
           <HelpIcon term="settlement" /> · {num(totals.open_fills)} still open
           <HelpIcon term="position" />
         </p>
@@ -117,7 +117,7 @@ function SummaryTab({ s, totals, empty, curve, hasSplit, my, view, days, env, on
           <Empty
             compact
             what="No settled trades yet."
-            why={totals.open_fills ? `${num(totals.open_fills)} fills are still waiting to settle.` : 'Fills settle after their market closes.'}
+            why={totals.open_fills ? `${num(totals.open_fills)} ${totals.open_fills === 1 ? 'fill is' : 'fills are'} still waiting to settle.` : 'Fills settle after their market closes.'}
           />
         )}
         {my.data && <BotVsYou bot={my.data.bot || totals} you={my.data.totals} days={days} />}
@@ -200,7 +200,7 @@ function EdgeTab({ s }) {
 }
 
 // The queue-position table moved here from Markets (item 8).
-function ExecutionTab({ s }) {
+function ExecutionTab({ s, live }) {
   const { data, error, reload } = useResource(() => api.getMarkets(), '/api/markets');
   return (
     <>
@@ -214,7 +214,7 @@ function ExecutionTab({ s }) {
         subtitle="Where our bids sat in line when they joined the book."
       >
         <ErrorNotice error={error} onRetry={reload} />
-        {data ? <QueuePosition qs={data.queue_stats} /> : !error && <Loading />}
+        {data ? <QueuePosition qs={data.queue_stats} live={live} /> : !error && <Loading />}
       </Card>
       <Card
         title={
@@ -347,7 +347,7 @@ export default function Analytics() {
         <SummaryTab s={s} totals={totals} empty={empty} curve={curve} hasSplit={hasSplit} my={my} view={view} days={days} env={env} onUseDays={setDays} />
       )}
       {s && tab === 'edge' && (empty ? <Empty what="No settled trades yet." why="Edge needs settled fills." /> : <EdgeTab s={s} />)}
-      {s && tab === 'execution' && <ExecutionTab s={s} />}
+      {s && tab === 'execution' && <ExecutionTab s={s} live={mode === 'live'} />}
       {tab === 'ledger' && <LedgerView days={days} env={env} />}
       {tab === 'scorecard' && <ScorecardView days={days} env={env} />}
       {tab === 'trades' && (

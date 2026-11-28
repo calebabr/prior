@@ -4,12 +4,10 @@ import { useAuth } from '../context/AuthContext.jsx';
 import WakingBanner from '../components/WakingBanner.jsx';
 import PriorLogo from '../components/PriorLogo.jsx';
 import CodeInput from '../components/CodeInput.jsx';
+import StopAlert from '../components/StopAlert.jsx';
 import { IconEye, IconEyeOff } from '../components/Icons.jsx';
 import { isMockMode } from '../services/api.js';
 import { APP_NAME, TAGLINE_LEAD, TAGLINE_ACCENT } from '../utils/routes.js';
-
-// "Protected by 2FA · Demo Mode": which deployment this is (VITE_APP_MODE=live for the live build).
-const MODE_LABEL = String(import.meta.env.VITE_APP_MODE || 'demo').toLowerCase() === 'live' ? 'Live Mode' : 'Demo Mode';
 
 function loginMessage(err) {
   if (!err) return null;
@@ -74,6 +72,8 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-line" aria-hidden="true" />
+      {/* A Stop that failed (an expired session, say) is still reported here. */}
+      <StopAlert />
       <WakingBanner />
       <div className="login-card card">
         <div className="login-brand">
@@ -185,7 +185,8 @@ export default function Login() {
             </button>
           </form>
         )}
-        <p className="login-trust">Protected by 2FA · {MODE_LABEL}</p>
+        {/* No demo / live wording: the build cannot know the server's mode. The signed-in header shows it. */}
+        <p className="login-trust">Protected by 2FA</p>
       </div>
     </div>
   );

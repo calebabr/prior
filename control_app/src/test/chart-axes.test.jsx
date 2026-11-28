@@ -122,7 +122,7 @@ describe('Overview balance chart', () => {
     renderApp('/');
     await userEvent.setup().click(await screen.findByRole('button', { name: /Balance, 30 Days/ }));
     const root = await screen.findByTestId('equity-chart');
-    expect(title(root, 'y')).toBe('Balance + positions ($)');
+    expect(title(root, 'y')).toBe('Balance, positions at cost ($)');
     expect(title(root, 'x')).toBe('Date');
     const lo = 236.99;
     const hi = 272.73;
@@ -130,7 +130,7 @@ describe('Overview balance chart', () => {
     expect(ticksOf(root, 'x')).toEqual(['Sep 13', 'Sep 28', 'Oct 13']);
     expect(within(root).getByRole('img')).toHaveAccessibleName(/in dollars.*Sep 13 to Oct 13/);
     // The owner's summary line stays.
-    expect(screen.getByText(/Balance \+ positions, 30 days: \$236\.99 → \$272\.73/)).toBeInTheDocument();
+    expect(screen.getByText(/Balance with positions at cost \(what was paid, not market value\), 30 days: \$236\.99 → \$272\.73/)).toBeInTheDocument();
   });
 });
 

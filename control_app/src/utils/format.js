@@ -2,6 +2,9 @@
 
 export const DASH = '—';
 
+/** "1 fill", "2 fills", "— fills": the word agrees with the count. */
+export const countWord = (n, one, many = `${one}s`) => (n === 1 ? one : many);
+
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
 const MINUS = '−'; // typographic minus, used by the contract formatters

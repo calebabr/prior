@@ -62,6 +62,11 @@ QUEUE_BUDGET_S = 20                          # same pattern for one queue-positi
 CLOSE_TIME_BUDGET_S = 20                     # same pattern for one close-time backfill
 CLOSE_TIME_INSERT_TIMEOUT_S = 5              # close-time lookups for new episodes (inside the queue budget)
 FILLS_SYNC_EVERY = timedelta(minutes=30)
+FILLS_SYNC_ON_DEMAND_MIN = timedelta(minutes=2)   # B3: reads / idle loop start a sync at most this often (also after
+                                                  # a failure); measured from the last attempt, not the last success
+FILLS_SYNC_TIMEOUT_S = 60
+FILLS_STUCK_AFTER_S = 600                       # security L-1: a fetch busy this long is reported (error + one alert)
+FILLS_MAX_PAGES = 60                            # security L-1: pages per fills endpoint (1000 each) before giving up
 FILLS_FIRST_DAYS = 35
 # fill source attribution (UX item Y1; services/strategies.py)
 MAKER_OID_MAX = 150_000             # journal maker order ids kept in memory (~35 days of quotes)
@@ -97,6 +102,7 @@ SHUTDOWN_MARGIN_S = 3.0             # event loop, store.close() and process exit
 SHUTDOWN_STORE_TIMEOUT_S = 2.0      # each shutdown store call (journal flush, state read, handover read, release)
 SHUTDOWN_RESERVE_S = 4 * SHUTDOWN_STORE_TIMEOUT_S   # kept free after the order step for those four calls
 CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
+STOP_OTHER_ENV_WAIT_S = 8.0         # P2-H1: Stop's reply waits at most this for the other env (it keeps going after)
 # Stop's store write: bounded at STOP_STORE_WRITE_S, run as a task; the response waits for it at most
 # STOP_STORE_WAIT_S (a healthy store lands well inside that, so the response reflects it as before). A slower write
 # carries on in the background; until it lands, a Start or arbitrage enable is refused (Stop wins), and if it fails
@@ -200,6 +206,17 @@ def mode_keys(mode: str) -> tuple[str | None, str | None]:
     return _env(p + "API_KEY_ID"), normalize_pem(_env(p + "PRIVATE_KEY"))
 
 
+def env_has_keys(mode: str) -> bool:
+    """P2-H1: whether the owner set API keys for this env (Stop cancels bot orders there even when it is not the
+    current mode). Only presence is checked; values are never read out or logged here."""
+    p = "KALSHI_PROD_" if mode == "live" else "KALSHI_DEMO_"
+    return bool(_env(p + "API_KEY_ID")) and bool(_env(p + "PRIVATE_KEY"))
+
+
+BOT_ORDER_PREFIXES = ("mm-", "arb-")   # Stop cancels only the bot's own orders (the owner's never)
+_CANCEL_GONE_STATUSES = (404,)         # the order is already gone (filled or cancelled): not a failed cancel
+
+
 _SAVED_ENV: dict | None = None    # the owner's real env while a pass temporarily overrides it
 
 
@@ -297,6 +314,49 @@ def telemetry_kalshi_factory(mode: str):
     key = serialization.load_pem_private_key(pk.replace("\\n", "\n").encode(), password=None)
     return KalshiClient(BASE_URLS["prod" if mode == "live" else "demo"], key_id=kid, private_key=key,
                         max_retries=TELEMETRY_CLIENT_MAX_RETRIES, timeout=TELEMETRY_CLIENT_TIMEOUT_S)
+
+
+def _bounded_fills(client: Any, min_ts: int) -> list[dict]:
+    """Security L-1: the same reads as KalshiClient.get_fills (GET /portfolio/fills, then /historical/fills, newest
+    first, deduplicated), but at most FILLS_MAX_PAGES pages per endpoint and stopping on a repeated cursor, so a bad
+    cursor can never keep the fetch thread (and with it every later sync) busy for ever. Raises when the limit is hit
+    (the sync is recorded as failed; nothing partial is stored). A test double without `request` keeps its own
+    get_fills."""
+    botfiles.ensure_bot_path()
+    try:
+        from kalshi_client import KalshiClient, KalshiError
+    except Exception:  # noqa: BLE001
+        KalshiClient = KalshiError = None   # noqa: N806
+    if KalshiClient is None or not isinstance(client, KalshiClient):
+        return list(client.get_fills(min_ts=min_ts) or [])
+    out: list[dict] = []
+    for path in ("/portfolio/fills", "/historical/fills"):
+        cursor, seen = None, set()
+        for _ in range(FILLS_MAX_PAGES):
+            try:
+                body = client.request("GET", path, params={"min_ts": min_ts, "limit": 1000, "cursor": cursor},
+                                      auth=True)
+            except KalshiError as e:
+                if path == "/historical/fills" and e.status in (400, 404):
+                    break                                   # no archive access/needed (as get_fills)
+                raise
+            body = body if isinstance(body, dict) else {}
+            out.extend(f for f in (body.get("fills") or []) if isinstance(f, dict))
+            cursor = body.get("cursor")
+            if not cursor or not body.get("fills"):
+                break
+            if cursor in seen:
+                raise RuntimeError("fills_cursor_repeated")
+            seen.add(cursor)
+        else:
+            raise RuntimeError("fills_page_limit")
+    uniq, ids = [], set()
+    for f in out:
+        fid = f.get("fill_id") or f.get("trade_id")
+        if fid not in ids:
+            ids.add(fid)
+            uniq.append(f)
+    return uniq
 
 
 def telemetry_public_factory(env: str):
@@ -538,6 +598,21 @@ class Runner:
         # fills / P&L sync
         self.last_fills_sync_utc: datetime | None = None
         self.fills_sync_error: str | None = None
+        # B3: one sync at a time (after-pass and on-demand share this lock, so a fill is never alerted twice). The
+        # lock is never awaited by a waiter: a sync that finds it held (or the previous fetch thread still running)
+        # returns "in_flight". Stop never touches it, the telemetry pool or the store writes below.
+        self._fills_lock = asyncio.Lock()
+        self._fills_fetch: Any = None                # the fetch's concurrent future (busy while not done)
+        self._fills_attempt_utc: datetime | None = None   # last on-demand start (success or failure)
+        self.fills_on_demand = False                 # set by start() with the background loops; tests set it
+        self.fills_sync_trigger: str | None = None   # what started the last sync: "pass", "read:<route>", "idle"
+        # security M-1: per-env watermark and error (a mode switch never shortens the other env's window)
+        self._fills_synced: dict[str, datetime] = {}
+        self._fills_err: dict[str, str | None] = {}
+        # security L-1: when the running fetch started (monotonic), its env, and the fetch already alerted as stuck
+        self._fills_fetch_started: float | None = None
+        self._fills_fetch_env: str | None = None
+        self._fills_stuck_alerted: Any = None
         # bracket arbitrage (on/off + live live in the store's state doc; numeric settings in config["arb"])
         self.arb_desired = "stopped"
         self.arb_mode = "demo"           # demo = log-only; live = execute on prod (needs the env gates)
@@ -584,6 +659,13 @@ class Runner:
         # CA-2: dedicated pools (threads start on first use). Stop's cancel only on _stop_executor; the monitor and
         # the arb scan each get one worker, so neither can pile threads onto the default executor.
         self._stop_executor = ThreadPoolExecutor(max_workers=STOP_WORKERS, thread_name_prefix="stop")
+        # P2-H1: Stop's cancel in the OTHER env (keys set, not the current mode) runs on its own small pool, single-
+        # flight per env, so a hung other env never takes a worker the current-mode cancel needs.
+        self._stop_other_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stop-other")
+        self._other_cancel: dict[str, Any] = {}
+        # P3-B: failed cancels per env (thread-safe counter); Stop reports the ones during its own cancel
+        self._cancel_failures: dict[str, int] = {}
+        self._cancel_fail_lock = threading.Lock()
         self._monitor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor")
         self._arb_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arb")
         self._shadow_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow")
@@ -901,7 +983,21 @@ class Runner:
             # Only on a takeover from another process: a first-ever lease has no predecessor to clean up after.
             stored_mode = st.get("mode") if st.get("mode") in ("demo", "live") else self.mode
             self._spawn(self._best_effort_cancel(stored_mode, "leader started stopped"))
+            # P2-H1 / P4-L1: and every other env with keys (orders left after a switch), on Stop's other-env pool,
+            # one per env at a time, so a hanging exchange never holds a worker the current-mode Stop needs
+            others = self._start_other_cancels(stored_mode)
+            if others:
+                self._spawn(self._log_other_cancels(others, "leader started stopped"))
         await self._alert_resumed_state(st, kept_live=kept_live)
+
+    async def _log_other_cancels(self, others: dict, why: str) -> None:
+        """Background wait for other-env cancels started outside Stop (takeover). Logs only; never raises."""
+        try:
+            n, errs = await self._finish_other_cancels(others, asyncio.get_running_loop().time() + CANCEL_TIMEOUT_S)
+            if n or errs:
+                log.warning("%s: other env cancelled=%s errors=%s", why, n, errs)
+        except Exception as e:  # noqa: BLE001
+            log.error("%s: other env cancel failed: %s", why, type(e).__name__)
 
     async def _best_effort_cancel(self, mode: str, why: str, timeout: float | None = None) -> int:
         """Cancel resting mm- orders (the same call Stop makes; no fence: it only removes risk). Never raises."""
@@ -984,6 +1080,7 @@ class Runner:
             log.warning("runner disabled by env: stop ran at startup (errors=%s)", res.get("errors"))
         if self.settings.runner_enabled:
             from .services.keepalive import keepalive_loop
+            self.fills_on_demand = True                  # B3: on-demand / idle fills sync runs with the loops
             self._tasks = [asyncio.create_task(self._timer_loop(), name="runner-timer"),
                            asyncio.create_task(self._watchdog_loop(), name="runner-watchdog"),
                            asyncio.create_task(keepalive_loop(self), name="runner-keepalive"),
@@ -1049,6 +1146,8 @@ class Runner:
                 ex.shutdown(wait=False, cancel_futures=True)
         with contextlib.suppress(Exception):       # last, and without cancelling a queued Stop cancel
             self._stop_executor.shutdown(wait=False)
+        with contextlib.suppress(Exception):
+            self._stop_other_executor.shutdown(wait=False)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
         if self._pnl_pair_task is not None:
@@ -1413,6 +1512,8 @@ class Runner:
                 await self.tick("timer")
             except Exception as e:  # noqa: BLE001
                 log.error("timer tick failed: %s", e)
+            if self.desired != "running":
+                self.request_fills_sync("idle")       # B3: manual trades still sync while the bot is stopped
             await asyncio.sleep(TIMER_SECONDS)
 
     async def _watchdog_loop(self) -> None:
@@ -1744,7 +1845,7 @@ class Runner:
         if client is None:
             return [], []
         min_ts = int(since.timestamp())
-        fills = list(client.get_fills(min_ts=min_ts) or [])
+        fills = _bounded_fills(client, min_ts)
         settlements: list[dict] = []
         getter = getattr(client, "get_settlements", None)
         if callable(getter):
@@ -1760,16 +1861,87 @@ class Runner:
                     break
         return fills, settlements
 
-    async def sync_fills(self, mode: str, *, force: bool = False) -> dict:
-        """Copies Kalshi fills + settlements to the store, at most every FILLS_SYNC_EVERY. Never raises."""
-        now = utcnow()
-        if not force and self.last_fills_sync_utc and now - self.last_fills_sync_utc < FILLS_SYNC_EVERY:
-            return {"synced": False, "reason": "not_due"}
-        since = (self.last_fills_sync_utc - timedelta(days=2)) if self.last_fills_sync_utc \
-            else now - timedelta(days=FILLS_FIRST_DAYS)
+    def fills_sync_busy(self) -> bool:
+        return self._fills_lock.locked() or (self._fills_fetch is not None and not self._fills_fetch.done())
+
+    def request_fills_sync(self, trigger: str = "read") -> bool:
+        """B3: start a background fills sync for the current mode if none is running and none started in the last
+        FILLS_SYNC_ON_DEMAND_MIN. Synchronous and non-blocking: the caller (a read route or the idle loop) never
+        waits for it. Never raises. Returns True when a sync was started."""
         try:
-            fills, settlements = await asyncio.wait_for(
-                self._run_tel(self._fetch_fills_sync, mode, since), timeout=60)
+            if self.fills_sync_busy():
+                self._check_fills_stuck()
+                return False
+            if not self.fills_on_demand or self._shutting_down:
+                return False
+            if self.role() != "leader":
+                return False                          # one syncing instance during a handover (alerts sent once)
+            now = utcnow()
+            last = self._fills_attempt_utc
+            if last is not None and timedelta(0) <= now - last < FILLS_SYNC_ON_DEMAND_MIN:
+                return False
+            self._fills_attempt_utc = now             # claimed before any await: concurrent reads see it
+            self._spawn(self._on_demand_fills_sync(self.mode, trigger))
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.error("fills sync request failed: %s", type(e).__name__)
+            return False
+
+    async def _on_demand_fills_sync(self, mode: str, trigger: str) -> None:
+        try:
+            await self.sync_fills(mode, force=True, trigger=trigger)
+        except Exception as e:  # noqa: BLE001   (sync_fills never raises; belt and braces for a background task)
+            log.error("on-demand fills sync failed: %s", type(e).__name__)
+
+    async def sync_fills(self, mode: str, *, force: bool = False, trigger: str = "pass") -> dict:
+        """Copies Kalshi fills + settlements to the store, at most every FILLS_SYNC_EVERY. Never raises.
+
+        B3: single-flight. If another sync holds the lock, or an earlier fetch thread is still running after its
+        timeout, this returns {"synced": False, "reason": "in_flight"} at once (the running one covers the same
+        window, and its alerts are the only ones sent)."""
+        now = utcnow()
+        last = self.fills_synced_utc(mode)
+        if not force and last and now - last < FILLS_SYNC_EVERY:
+            return {"synced": False, "reason": "not_due"}
+        if self.fills_sync_busy():
+            self._check_fills_stuck()
+            return {"synced": False, "reason": "in_flight"}
+        async with self._fills_lock:
+            self.fills_sync_trigger = trigger
+            return await self._sync_fills_locked(mode, now)
+
+    def fills_synced_utc(self, mode: str) -> datetime | None:
+        """Security M-1: the start of the last successful sync OF THIS ENV (demo and live are watermarked apart)."""
+        return self._fills_synced.get("live" if mode == "live" else "demo")
+
+    def _check_fills_stuck(self) -> None:
+        """Security L-1: a fetch thread busy for FILLS_STUCK_AFTER is reported (visible error + one alert per stuck
+        fetch). Never raises."""
+        try:
+            cf, started = self._fills_fetch, self._fills_fetch_started
+            if cf is None or cf.done() or started is None or self._fills_stuck_alerted is cf:
+                return
+            if time.monotonic() - started < FILLS_STUCK_AFTER_S:
+                return
+            self._fills_stuck_alerted = cf
+            self.fills_sync_error = "stuck"
+            self._fills_err[self._fills_fetch_env or "demo"] = "stuck"
+            log.error("fills sync stuck: fetch running for over %d s", FILLS_STUCK_AFTER_S)
+            self._spawn(self.alerter.send("Fills sync stuck",
+                                          "Reading fills from Kalshi has not finished for over 10 minutes; new fills "
+                                          "and settlements are not being copied. Trading is not affected.",
+                                          priority="high"))
+        except Exception as e:  # noqa: BLE001
+            log.error("fills stuck check failed: %s", type(e).__name__)
+
+    async def _sync_fills_locked(self, mode: str, now: datetime) -> dict:
+        env = "live" if mode == "live" else "demo"
+        last = self._fills_synced.get(env)
+        since = (last - timedelta(days=2)) if last else now - timedelta(days=FILLS_FIRST_DAYS)
+        try:
+            cf = self._tel_executor.submit(self._fetch_fills_sync, mode, since)   # telemetry pool, never Stop's
+            self._fills_fetch, self._fills_fetch_started, self._fills_fetch_env = cf, time.monotonic(), env
+            fills, settlements = await asyncio.wait_for(asyncio.wrap_future(cf), timeout=FILLS_SYNC_TIMEOUT_S)
             for f in fills:
                 f.setdefault("env", mode)                 # demo and live P&L never mix
             fills = [f for f in fills if isinstance(f, dict) and (f.get("fill_id") or f.get("trade_id"))]
@@ -1784,6 +1956,7 @@ class Runner:
             finally:
                 self._pnl_gen += 1                     # /status P&L: the cached value is stale now
             self.last_fills_sync_utc, self.fills_sync_error = now, None
+            self._fills_synced[env], self._fills_err[env] = now, None
             if known is not None:
                 self._alert_new_fills([f for f in fills if str(f.get("fill_id") or f.get("trade_id")) not in known])
             if known_settled is not None:
@@ -1791,6 +1964,7 @@ class Runner:
             return {"synced": True, "fills": nf, "settlements": ns}
         except Exception as e:  # noqa: BLE001
             self.fills_sync_error = type(e).__name__
+            self._fills_err[env] = type(e).__name__
             log.error("fills sync failed: %s", _where(e))
             return {"synced": False, "reason": type(e).__name__}
 
@@ -1832,9 +2006,15 @@ class Runner:
             except Exception as e:  # noqa: BLE001
                 log.warning("order lookup failed: %s", type(e).__name__)
                 continue
-            o = body.get("order") if isinstance(body, dict) and isinstance(body.get("order"), dict) else body
-            if isinstance(o, dict) and str(o.get("order_id") or oid) == oid:
-                out.append({"order_id": oid, "client_order_id": o.get("client_order_id")})
+            # Security P2-L1: a lookup counts only with Kalshi's documented shape (an `order` object with this
+            # order_id and a string client_order_id). Anything else stays unresolved, so the fill is never "proven
+            # manual" by a malformed reply (it keeps its weaker label and counts in full for the breaker).
+            o = body.get("order") if isinstance(body, dict) else None
+            if not (isinstance(o, dict) and str(o.get("order_id") or "") == oid
+                    and isinstance(o.get("client_order_id"), str)):
+                log.warning("order lookup: unexpected reply shape; left unresolved")
+                continue
+            out.append({"order_id": oid, "client_order_id": o["client_order_id"]})
         return out
 
     async def _label_fills(self, fills: list[dict], mode: str, since: datetime) -> set[str] | None:
@@ -3444,10 +3624,12 @@ class Runner:
             await self.alerter.send("Arbitrage stopped: kill switch", f"reason: {reason}", priority="urgent")
 
     async def set_arb(self, *, enabled: bool | None, live: bool | None, by: str, ack_legging: bool = False,
-                      ack_breaker: bool = False) -> dict:
+                      ack_breaker: bool = False, stop_gen: int | None = None,
+                      requested_utc: datetime | None = None) -> dict:
         """Arb on/off and the arb-live switch (the route enforces fresh 2FA and typed LIVE). Store first (fail-safe).
-        Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error."""
-        gen = self._stop_gen
+        Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error.
+        P3-A: `stop_gen` / `requested_utc` are the route's values from before its preflight."""
+        gen = self._stop_gen if stop_gen is None else int(stop_gen)
         desired = None if enabled is None else ("running" if enabled else "stopped")
         mode = None if live is None else ("live" if live else "demo")
         if desired == "stopped" and mode is None:
@@ -3457,6 +3639,8 @@ class Runner:
             raise RunnerDisabled("runner_disabled")
         if turning_on and (self._stopping or self._stop_writes):
             raise StopInProgress("stop_in_progress")
+        if turning_on and gen != self._stop_gen:
+            raise StopInProgress("stopped_during_start")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
         if mode == "live" and not self.armed("arbitrage"):
@@ -3471,6 +3655,9 @@ class Runner:
         if turning_on:
             # L1: refused while the circuit breaker is tripped unless acknowledged (the ack clears it, store first)
             cleared = await self._breaker_gate(ack=ack_breaker, by=by)
+            if gen != self._stop_gen or self._stopping or self._stop_writes:
+                raise StopInProgress("stopped_during_start")
+            await self._no_remote_stop_since(requested_utc, "arb_desired")
             if gen != self._stop_gen or self._stopping or self._stop_writes:
                 raise StopInProgress("stopped_during_start")
         if desired == "running" and stored_kill:
@@ -3625,9 +3812,25 @@ class Runner:
                 self._breaker_apply_cloud(dict(cloud or {}))
                 if self.breaker_tripped():
                     return None
-            res = breakersvc.evaluate(self.breaker_settings(), self.breaker_state, env, equity, ts,
-                                      saved_utc=self._breaker_saved_utc, source=source)
-            # no await since the tripped check above: a concurrent reading (pass vs arbitrage) sees this trip
+            # B5: the owner's own trades (bounded read-only evidence, telemetry pool; never Stop's pool or lock)
+            read = await self._breaker_evidence(env, ts)
+            if self.breaker_tripped():
+                return None
+            res = self._breaker_eval(env, equity, ts, (read or {}).get("evidence"), source)
+            if res["trip"]:
+                # B5 rule 3: one fresh, bounded read of balance + positions at one moment, then recompute. A failed
+                # read keeps the trip; a fresh reading under the line (separable, or with the conservative M) does not.
+                # The arbitrage reading carries a contained partial's loss the balance may not show yet: there only
+                # the evidence is refreshed and the reading itself is kept.
+                maker = source == "maker"
+                fresh = await self._breaker_evidence(env, None if maker else ts, with_balance=maker)
+                if self.breaker_tripped():
+                    return None
+                if fresh is not None and maker and fresh.get("account") is not None:
+                    res = self._breaker_eval(env, fresh["account"], fresh["t"], fresh.get("evidence"), source)
+                elif fresh is not None and not maker:
+                    res = self._breaker_eval(env, equity, ts, fresh.get("evidence"), source)
+            # no await since the last tripped check: a concurrent reading (pass vs arbitrage) sees this trip
             self.breaker_state = res["state"]
             self.breaker_warning = res["warning"]
             if res["warning"]:
@@ -3641,6 +3844,86 @@ class Runner:
         except Exception as e:  # noqa: BLE001
             log.error("breaker check failed: %s", type(e).__name__)
             return None
+
+    # ---- B5: the breaker ignores the owner's own trades (pure rules in services/breaker.py)
+    BREAKER_EVIDENCE_TIMEOUT_S = 8.0
+    BREAKER_POSITION_PAGES = 5            # x 1000 positions (settlement_status=all, count_filter=total_traded)
+    BREAKER_FILLS_MAX = 100_000
+    BREAKER_FILL_FIELDS = ("ticker", "market_ticker", "env", "source", "source_by")
+
+    def _breaker_eval(self, env: str, equity: Any, ts: Any, evidence: dict | None, source: str) -> dict:
+        """Pure: ledger update + evaluate on the CURRENT state (no await, so nothing changes in between)."""
+        prev = ((self.breaker_state or {}).get("envs") or {}).get(env) or {}
+        upd = breakersvc.manual_update(prev.get("manual"), evidence, ts, carry=breakersvc._num(prev.get("last_m")))
+        return breakersvc.evaluate(self.breaker_settings(), self.breaker_state, env, equity, ts,
+                                   saved_utc=self._breaker_saved_utc, source=source, manual=upd)
+
+    def _read_breaker_kalshi(self, env: str, with_balance: bool) -> dict:
+        """Blocking, GET only: (balance and then) every positions page. Raises on a failed read."""
+        client = self._tel_kalshi(env)
+        if client is None or not callable(getattr(client, "get_positions", None)):
+            raise LookupError("not_configured")
+        t = utcnow()                                   # before the balance request: later updates count as late
+        cash = None
+        if with_balance:
+            cash = breakersvc._dollars(client.get_balance() or {}, "balance")
+        positions: list = []
+        cursor, complete = None, False
+        for _ in range(self.BREAKER_POSITION_PAGES):
+            body = client.get_positions(settlement_status="all", count_filter="total_traded", limit=1000,
+                                        cursor=cursor)
+            body = body if isinstance(body, dict) else {}
+            page = body.get("market_positions") or []
+            positions.extend(page)
+            if body.get("truncated") is True:
+                break
+            cursor = body.get("cursor")
+            if not cursor or not page:
+                complete = True
+                break
+        account = None
+        if with_balance and cash is not None:
+            # Security P2-M1: the open cost comes from its OWN open-positions read (count_filter=position, every page),
+            # the account snapshot's rule; never from the ledger read above, which also lists exited and settled
+            # markets. Truncated or unusable -> no fresh account (the trip is evaluated as before and kept).
+            from .services import kalshi_recon as recon
+            open_pos, truncated = recon._read_positions(client)
+            if not truncated:
+                exps = [breakersvc._dollars(p, "market_exposure") if isinstance(p, dict) else None for p in open_pos]
+                if all(x is not None for x in exps):
+                    account = cash + sum(abs(x) for x in exps)
+        return {"t": t, "positions": positions, "complete": complete, "account": account}
+
+    async def _breaker_fills(self, env: str) -> tuple[list | None, bool]:
+        """Stored fills (labels only), cached until the next fills write. (fills, complete)."""
+        key = (env, self._pnl_gen)
+        hit = getattr(self, "_b5_fills", None)
+        if hit and hit[0] == key:
+            return hit[1], hit[2]
+        rows = await asyncio.wait_for(self.store.list_fills(limit=self.BREAKER_FILLS_MAX,
+                                                            fields=self.BREAKER_FILL_FIELDS), 5)
+        complete = len(rows) < self.BREAKER_FILLS_MAX
+        self._b5_fills = (key, rows, complete)
+        return rows, complete
+
+    async def _breaker_evidence(self, env: str, ts: Any, *, with_balance: bool = False) -> dict | None:
+        """{evidence, account, t} for one reading, or None when Kalshi could not be read. Bounded, read-only, on the
+        telemetry pool (never Stop's), outside the pass lock. Never raises."""
+        try:
+            cf = self._tel_executor.submit(self._read_breaker_kalshi, env, with_balance)
+            k = await asyncio.wait_for(asyncio.wrap_future(cf), self.BREAKER_EVIDENCE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            log.warning("breaker: own-trade evidence unreadable (%s)", type(e).__name__)
+            return None
+        try:
+            fills, fills_ok = await self._breaker_fills(env)
+        except Exception as e:  # noqa: BLE001
+            log.warning("breaker: stored fills unreadable (%s)", type(e).__name__)
+            return {"evidence": None, "account": k["account"], "t": k["t"]}
+        ev = breakersvc.manual_evidence(k["positions"], fills, env=env,
+                                        reading_utc=k["t"] if with_balance else ts,
+                                        synced_utc=self.fills_synced_utc(env), complete=k["complete"] and fills_ok)
+        return {"evidence": ev, "account": k["account"], "t": k["t"]}
 
     async def _breaker_trip(self, trip: dict) -> None:
         """A limit was reached: the full Stop (maker + arbitrage: flags, kill switches, cancel resting bot orders,
@@ -3712,10 +3995,18 @@ class Runner:
                     self.arb_kill_path.write_text(stamp, encoding="utf-8")
             except Exception as e:  # noqa: BLE001
                 errors.append(f"arb_kill_switch: {type(e).__name__}")
+            # P2-H1: the other env (keys set) is cancelled at the same time on its own pool; never awaited here
+            cancel_deadline = asyncio.get_running_loop().time() + CANCEL_TIMEOUT_S
+            stop_mode = self.mode                 # P4-I2: one mode for this Stop (a switch mid-Stop hides nothing)
+            fails_before = self.cancel_failures(stop_mode)
+            others = self._start_other_cancels(stop_mode)
             try:
-                cancelled = await asyncio.wait_for(self._cancel_in_stop_pool(self.mode), timeout=CANCEL_TIMEOUT_S)
+                cancelled = await asyncio.wait_for(self._cancel_in_stop_pool(stop_mode), timeout=CANCEL_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"cancel: {type(e).__name__}")
+            failed = self.cancel_failures(stop_mode) - fails_before
+            if failed > 0:
+                errors.append(f"cancel: {failed} order(s) not cancelled")          # P3-B
             self._stop_pending = True
             # the store write runs as its own task: the response waits for it only briefly (a healthy store lands
             # inside STOP_STORE_WAIT_S, so nothing changes then); a slow one finishes, or hands over to the retry,
@@ -3727,6 +4018,11 @@ class Runner:
                 errors.append("store: slow (still writing in background)")
             elif not write.cancelled() and write.result():
                 errors.append(f"store: {write.result()} (retrying in background)")
+            if others:                       # P2-H1: within the same cancel bound, after the store write started
+                n_other, other_errors = await self._finish_other_cancels(
+                    others, min(cancel_deadline, asyncio.get_running_loop().time() + STOP_OTHER_ENV_WAIT_S))
+                cancelled += n_other
+                errors.extend(other_errors)
             try:
                 log.warning("STOP by %s: cancelled=%s errors=%s", by, cancelled, errors)
                 self._spawn(self.alerter.send("Bot stopped", f"by {by}; cancelled {cancelled}; errors {errors}"))
@@ -3764,9 +4060,11 @@ class Runner:
     async def _write_stopped(self, by: str) -> None:
         """One store write that stops both strategies (maker-only on a store without the arb fields)."""
         try:
-            await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
+            doc = await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
         except TypeError:
-            await self.store.set_state(by=by, desired="stopped")
+            doc = await self.store.set_state(by=by, desired="stopped")
+        with contextlib.suppress(Exception):     # P3-A: our own stopped write (a retry of it never blocks a Start)
+            self._own_stop_ts = schemas._safe_to_utc((doc or {}).get("updated_utc"))
 
     def _cancel_in_stop_pool(self, mode: str) -> asyncio.Future:
         """CA-2: _cancel_resting on Stop's dedicated pool (never the default executor). If that pool was already shut
@@ -3787,12 +4085,15 @@ class Runner:
             return fut
 
     def _cancel_resting(self, mode: str) -> int:
+        """Cancel every resting BOT order (client id `mm-` or `arb-`) in `mode`; the owner's orders are never touched.
+        GET + DELETE only. Returns the number cancelled; a listing failure raises. P3-B: a cancel that fails is
+        counted per env (`cancel_failures`); an order Kalshi says is already gone (404) is not a failure."""
         client = self.kalshi_factory(mode)
         if client is None:
             return 0
-        n = 0
+        n = failed = 0
         for o in client.get_orders(status="resting"):
-            if str(o.get("client_order_id", "")).startswith("mm-"):
+            if str(o.get("client_order_id", "")).startswith(BOT_ORDER_PREFIXES):
                 try:
                     client.cancel_order(o["order_id"], market_ticker=o.get("ticker"))
                     n += 1
@@ -3800,8 +4101,87 @@ class Runner:
                     if q is not None:
                         q.append(str(o["order_id"]))      # queue telemetry: outcome "stopped" (in-memory only)
                 except Exception as e:  # noqa: BLE001
+                    if getattr(e, "status", None) in _CANCEL_GONE_STATUSES:
+                        continue                          # filled or cancelled meanwhile: nothing left resting
+                    failed += 1
                     log.warning("cancel failed for an order: %s", type(e).__name__)
+        if failed:
+            with self._cancel_fail_lock:
+                self._cancel_failures[mode] = self._cancel_failures.get(mode, 0) + failed
         return n
+
+    def cancel_failures(self, mode: str) -> int:
+        with self._cancel_fail_lock:
+            return self._cancel_failures.get(mode, 0)
+
+    def _start_other_cancels(self, mode: str) -> dict:
+        """P2-H1: start Stop's cancel in every OTHER env that has keys, on its own pool, without waiting. Returns
+        {env: (future, failures before) | "error text"}. Never raises; nothing here awaits."""
+        out: dict = {}
+        try:
+            for env in ("demo", "live"):
+                if env == mode or not env_has_keys(env):
+                    continue                              # no keys: skipped silently
+                prev = self._other_cancel.get(env)
+                if prev is not None and not prev.done():
+                    out[env] = "previous cancel still running"
+                    continue
+                before = self.cancel_failures(env)
+                try:
+                    fut = asyncio.get_running_loop().run_in_executor(self._stop_other_executor,
+                                                                     self._cancel_resting, env)
+                except RuntimeError:                      # pool shut down (end of shutdown): skip, say so
+                    out[env] = "not started (shutting down)"
+                    continue
+                self._other_cancel[env] = fut
+                out[env] = (fut, before)
+        except Exception as e:  # noqa: BLE001
+            out["?"] = type(e).__name__
+        return out
+
+    def _late_other_cancel(self, env: str, fut: Any, before: int) -> None:
+        """An other-env cancel that outlived Stop's reply: log the outcome, alert if it did not fully succeed."""
+        try:
+            exc = None if fut.cancelled() else fut.exception()
+            nf = self.cancel_failures(env) - before
+            if exc is None and nf <= 0 and not fut.cancelled():
+                log.warning("Stop: %s cancel finished late: cancelled=%s", env, fut.result())
+                return
+            why = type(exc).__name__ if exc is not None else (f"{nf} order(s) not cancelled" if nf > 0 else "cancelled")
+            log.error("Stop: %s cancel did not complete: %s", env, why)
+            self._spawn(self.alerter.send(f"Stop: {env} orders may still rest",
+                                          f"Cancelling bot orders in {env} did not complete ({why}). Check Kalshi "
+                                          "for resting orders.", priority="urgent"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _finish_other_cancels(self, started: dict, deadline: float) -> tuple[int, list[str]]:
+        """Wait for the other-env cancels until `deadline` (loop time). (cancelled, errors naming the env). A cancel
+        still running at the deadline keeps running in the background and is reported. Never raises."""
+        n, errors = 0, []
+        try:
+            futs = {env: v for env, v in started.items() if isinstance(v, tuple)}
+            for env, v in started.items():
+                if not isinstance(v, tuple):
+                    errors.append(f"cancel ({env}): {v}")
+            if futs:
+                loop = asyncio.get_running_loop()
+                await asyncio.wait([f for f, _ in futs.values()], timeout=max(0.05, deadline - loop.time()))
+            for env, (fut, before) in futs.items():
+                if not fut.done():
+                    errors.append(f"cancel ({env}): timed out (still trying)")
+                    fut.add_done_callback(lambda f, e=env, b=before: self._late_other_cancel(e, f, b))
+                    continue
+                if fut.exception() is not None:
+                    errors.append(f"cancel ({env}): {type(fut.exception()).__name__}")
+                    continue
+                n += int(fut.result() or 0)
+                nf = self.cancel_failures(env) - before
+                if nf > 0:
+                    errors.append(f"cancel ({env}): {nf} order(s) not cancelled")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"cancel (other env): {type(e).__name__}")
+        return n, errors
 
     def _ensure_stop_retry(self, by: str) -> None:
         try:
@@ -3828,7 +4208,26 @@ class Runner:
             except Exception:  # noqa: BLE001
                 delay = min(delay * 2, 300)
 
-    async def start_trading(self, by: str, *, ack_breaker: bool = False) -> dict:
+    def stop_generation(self) -> int:
+        """P3-A: read by a route BEFORE any await (preflight) and passed back in, so a Stop at any point after that,
+        even one that has already finished, refuses the Start / arbitrage enable / switch to live."""
+        return int(self._stop_gen)
+
+    async def _no_remote_stop_since(self, since: datetime | None, field: str = "desired") -> None:
+        """P3-A (another instance): refuse when the store says stopped by a write newer than `since` (a Stop the
+        other instance took while this request was in flight). A store error raises (the caller refuses)."""
+        if since is None:
+            return
+        st = await asyncio.wait_for(self.store.get_state(), 5)
+        ts = schemas._safe_to_utc((st or {}).get("updated_utc"))
+        since_ms = since.replace(microsecond=since.microsecond // 1000 * 1000)     # the store keeps milliseconds
+        if ts is not None and ts == getattr(self, "_own_stop_ts", None):
+            return                       # this process's own Stop (e.g. its delayed retry): this instance saw it
+        if (st or {}).get(field) == "stopped" and ts is not None and ts >= since_ms:
+            raise StopInProgress("stopped_during_start")
+
+    async def start_trading(self, by: str, *, ack_breaker: bool = False, stop_gen: int | None = None,
+                            requested_utc: datetime | None = None) -> dict:
         """Removes the kill switch and sets desired=running (store first: fail-safe).
         Stop always wins a race: if a Stop is running, or one ran while the store write was in flight, the start is
         refused (StopInProgress) and stopped is re-asserted in the store. Arbitrage is not started by this.
@@ -3842,7 +4241,9 @@ class Runner:
             raise PermissionError("strategy_not_installed")
         if self.mode == "live" and not self.armed("maker"):
             raise PermissionError("maker_not_armed")       # item 10: arm the maker first (Arming page, fresh 2FA)
-        gen = self._stop_gen
+        gen = self._stop_gen if stop_gen is None else int(stop_gen)   # P3-A: the route's value from before preflight
+        if gen != self._stop_gen:
+            raise StopInProgress("stopped_during_start")
         if self._stopping or self._stop_writes:      # a Stop, or its store write, is still in flight: Stop wins
             raise StopInProgress("stop_in_progress")
         # reload the config from the store (the owner may have fixed it since the last load). A config that still
@@ -3855,6 +4256,9 @@ class Runner:
         if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         cleared = await self._breaker_gate(ack=ack_breaker, by=by)     # L1; refuses while tripped without the ack
+        if gen != self._stop_gen or self._stopping or self._stop_writes:
+            raise StopInProgress("stopped_during_start")
+        await self._no_remote_stop_since(requested_utc)                 # P3-A: a Stop taken by another instance
         if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
@@ -3878,11 +4282,13 @@ class Runner:
         self.store_ok = True
         return {"desired": "running", **({"breaker_cleared": True} if cleared else {})}
 
-    async def set_mode(self, mode: str, by: str) -> dict:
+    async def set_mode(self, mode: str, by: str, *, stop_gen: int | None = None) -> dict:
         if mode not in ("demo", "live"):
             raise ValueError("mode must be demo or live")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
+        if mode == "live" and stop_gen is not None and int(stop_gen) != self._stop_gen:
+            raise StopInProgress("stopped_during_start")   # P3-A: a Stop during the live recheck
         await self.store.set_state(by=by, mode=mode)
         self.mode = mode
         if mode == "live":
@@ -4040,7 +4446,8 @@ class Runner:
         self.arming = {**self.arming, s: False, "updated": now, "by": who}
         errors: list[str] = []
         cancel = None
-        if s == "maker" and self.mode == "live":
+        if s == "maker" and (self.mode == "live" or env_has_keys("live")):
+            # P2-H1: also after a switch to demo, live maker orders may still rest; disarm removes them
             # the same cancel Stop makes (Stop's own pool, bounded); arbitrage sets are immediate-or-cancel.
             # Single-flight: repeated disarms never hold more than one of Stop's workers, so Stop is never slowed.
             if self._disarm_cancel is None or self._disarm_cancel.done():
@@ -4075,12 +4482,17 @@ class Runner:
         return {"strategy": s, "armed": False, "persisted": persisted, "cancelled": cancelled, "errors": errors}
 
     def status(self) -> dict:
+        if self.fills_sync_busy():
+            self._check_fills_stuck()                # L-1: a stuck fetch shows as fills_sync.error = "stuck"
         return {"running_pass": self.running_pass, "last_run_utc": iso(self.last_run_utc),
                 "last_error": self.last_error, "next_due_utc": iso(self.next_due_utc()),
                 "kill_switch": self.kill_switch(), "desired": self.desired, "mode": self.mode,
                 "live_allowed": self.live_allowed(), "live_block_reason": self.live_block_reason(),
                 "arb": {"state": self.arb_state(), "last_scan_utc": iso(self.arb_last_scan_utc)},
-                "fills_sync": {"last_utc": iso(self.last_fills_sync_utc), "error": self.fills_sync_error},
+                "fills_sync": {"last_utc": iso(self.fills_synced_utc(self.mode)),
+                               "error": self._fills_err.get("live" if self.mode == "live" else "demo"),
+                               # B3 (additive): a sync running now, and what started the last one
+                               "in_flight": self.fills_sync_busy(), "trigger": self.fills_sync_trigger},
                 # last pass's write-path summary (additive): cancel/place failures, paused, capped series
                 "write_report": self.last_write_report,
                 # item 10 (additive): per-strategy LIVE arming

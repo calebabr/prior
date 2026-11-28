@@ -57,8 +57,9 @@ describe('Strategies hub', () => {
     expect(await screen.findByTestId('hub-degraded')).toHaveTextContent("Couldn't load P&L");
     const maker = screen.getByTestId('strategy-card-maker');
     expect(maker).toHaveTextContent('Demo running');
-    expect(maker).toHaveTextContent('—');
-    expect(maker).not.toHaveTextContent('$0.00');
+    // P&L is the missing figure: a dash. (Open, paid comes from the live positions, so $0.00 there is real.)
+    expect(maker.querySelector('.strategy-figure dd')).toHaveTextContent('—');
+    expect(maker.querySelector('.strategy-figure dd')).not.toHaveTextContent('$0.00');
     expect(screen.getByTestId('strategy-card-arb')).toBeInTheDocument();
   });
 });

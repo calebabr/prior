@@ -64,6 +64,7 @@
 .hb-warn { background: var(--warn); }
 .hb-empty { margin-top: 12px; }
 
+.ov-stopped { margin: 10px 0 0; font-size: 0.9375rem; font-weight: 500; overflow-wrap: anywhere; }
 .ov-timing { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ov-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .ov-actions .btn { width: 100%; }
@@ -98,7 +99,20 @@ a.home-row:hover { text-decoration: none; background: color-mix(in srgb, var(--a
 .home-manual { border-top: 1px dashed var(--border-strong, var(--border)); margin-top: var(--sp-2); }
 .home-manual .home-row { min-height: 48px; color: var(--muted); }
 .home-manual .home-row-name { font-weight: 400; }
-.home-cash { margin: var(--sp-1) 0 0; font-size: var(--fs-md, 1rem); font-variant-numeric: tabular-nums; }
+.home-row.home-row-you { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
+.home-open-figs { display: flex; flex-wrap: wrap; column-gap: var(--sp-3); }
+.home-open-figs > span { white-space: nowrap; }
+
+/* Account card: label left, figure right, hairline between rows. */
+.acct-rows { margin: 0; }
+.acct-row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); padding: var(--sp-2) 0; border-top: 1px solid var(--border); }
+.acct-row:first-child { border-top: 0; padding-top: var(--sp-1); }
+.acct-row dt { min-width: 0; color: var(--muted); font-size: var(--fs-sm, 0.875rem); }
+.acct-row dd { margin: 0; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.acct-total dt { color: var(--text); font-weight: 600; }
+.acct-total dd { font-size: 1.5rem; letter-spacing: -0.01em; }
+.acct-note { display: block; font-size: 0.8125rem; }
+.acct-source { margin: var(--sp-1) 0 0; }
 .home-grid { display: block; }
 @media (min-width: 1024px) {
   .home-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 var(--sp-5, 24px); align-items: start; }
@@ -115,6 +129,13 @@ a.home-row:hover { text-decoration: none; background: color-mix(in srgb, var(--a
 .perf-table tr.perf-manual td { border-top: 1px dashed var(--border-strong, var(--border)); color: var(--muted); }
 .perf-table tfoot td { font-weight: 600; }
 .perf-scroll { overflow-x: auto; }
+.perf-table .perf-you-sub { display: block; font-size: var(--fs-xs, 0.75rem); font-weight: 400; color: var(--muted); }
+/* Narrow phones: tighter cells and two-line headers, so all five columns fit without sideways scrolling. */
+@media (max-width: 400px) {
+  .perf-table { font-size: var(--fs-sm, 0.8125rem); }
+  .perf-table th, .perf-table td { padding-left: 2px; padding-right: 2px; }
+  .perf-table thead th { white-space: normal; font-size: var(--fs-xs, 0.75rem); vertical-align: bottom; }
+}
 .perf-links { list-style: none; margin: 0; padding: 0; }
 .perf-links a { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 56px; color: var(--text); text-decoration: none; border-top: 1px solid var(--border); }
 .perf-links li:first-child a { border-top: 0; }

@@ -11,7 +11,7 @@ import { useResource } from '../../hooks/useResource.js';
 import { api } from '../../services/api.js';
 import { ago, dateTime, money, num } from '../../utils/format.js';
 import { strategyPath } from '../../utils/routes.js';
-import { StateTrack, executedPill, gateReason, isNum, useArbController, useArbOpportunities } from './arbShared.jsx';
+import { DEMO_ONLY_FIELDS, StateTrack, executedPill, gateReason, isNum, useArbController, useArbOpportunities } from './arbShared.jsx';
 
 // The three Arbitrage views (Overview | Results | Controls). Extracted from the old single page: same cards,
 // same text, same handlers (all in useArbController). Every write keeps its confirm and fresh-2FA path.
@@ -38,11 +38,19 @@ function ArbLoadState({ arb, reload }) {
 
 // Turn on / off and Go live / Log only: each one confirms and asks for a fresh 2FA code (live also asks for LIVE).
 function ArbModeButtons({ c }) {
-  const { enabled, live, liveAllowed, busy, setEnabled, setLive } = c;
+  const { enabled, live, state, liveAllowed, busy, setEnabled, setLive } = c;
   return (
     <>
+      {/* `live` is the configured mode; say so whenever it is not what the scanner is doing right now. */}
+      {live && state !== 'live' && (
+        <p className="hint error-text" data-testid="arb-set-live">
+          {state === 'stopped'
+            ? 'Set to LIVE. Turning arbitrage on will trade real money.'
+            : 'Set to LIVE, but it is not placing live orders right now. Check Live Arming.'}
+        </p>
+      )}
       <div className="btn-row">
-        <button type="button" className={`btn ${enabled ? '' : 'primary'}`} onClick={() => setEnabled(!enabled)} disabled={!!busy}>
+        <button type="button" className={`btn ${enabled ? '' : live ? 'danger-outline' : 'primary'}`} onClick={() => setEnabled(!enabled)} disabled={!!busy}>
           {busy === 'enabled' ? 'Working…' : <><IconLock /> {enabled ? 'Turn off' : 'Turn on'}</>}
         </button>
         {live ? (
@@ -261,7 +269,8 @@ export function ArbResults() {
 
 export function ArbControls() {
   const c = useArbController();
-  const { arb, data, settings, fields, renderField, save, saveError, dirty, hasErrors, busy, resetDraft, reload } = c;
+  const { arb, data, appStatus, settings, fields, renderField, save, saveError, dirty, hasErrors, busy, resetDraft, reload } = c;
+  const demoOnly = fields.filter((k) => DEMO_ONLY_FIELDS.includes(k));
   return (
     <div className="strat-view">
       <Refresh onClick={reload} disabled={arb.loading} />
@@ -277,7 +286,14 @@ export function ArbControls() {
       {settings && fields.length > 0 && (
         <form onSubmit={save}>
           <Card title="Arbitrage settings" subtitle="Applies from the next scan.">
-            <div className="stack">{fields.map(renderField)}</div>
+            <div className="stack">{fields.filter((k) => !DEMO_ONLY_FIELDS.includes(k)).map(renderField)}</div>
+            {demoOnly.length > 0 && (
+              <div className="demo-only" data-testid="demo-only-settings">
+                <h3 className="subhead">Demo only</h3>
+                {appStatus && appStatus.mode === 'live' && <p className="hint">No effect while the app is in live mode.</p>}
+                <div className="stack">{demoOnly.map(renderField)}</div>
+              </div>
+            )}
           </Card>
           {saveError && (
             <div className="notice notice-error" role="alert">

@@ -61,9 +61,10 @@ function BucketTable({ rows }) {
  * Queue position at quote time (GET /api/markets and /api/status `queue_stats`):
  *   {episodes, fills, median_queue_ahead_at_join, requote_reset_share, front_fill_share,
  *    by_queue: [{bucket, episodes, fills, fill_rate, trade_through_share}], updated_utc} | null
- * Display only. variant: 'full' (default), 'compact' (market rows), 'summary' (one line, Overview).
+ * Display only. variant: 'full' (default), 'compact' (market rows), 'summary' (one line, Overview). `live`: the
+ * numbers are from live mode, so the note about demo queues is left out.
  */
-export default function QueuePosition({ qs, variant = 'full', demo = false }) {
+export default function QueuePosition({ qs, variant = 'full', demo = false, live = false }) {
   if (!qs) {
     return variant === 'compact' ? null : <p className="hint">Queue data unavailable.</p>;
   }
@@ -109,7 +110,7 @@ export default function QueuePosition({ qs, variant = 'full', demo = false }) {
       {variant === 'full' && <BucketTable rows={qs.by_queue} />}
       {variant === 'full' && <p className="hint">{QUEUE_EXPLAINER}</p>}
       {!enough && <p className="hint">Too few fills to judge ({fills}/{MIN_QUEUE_FILLS}).</p>}
-      {variant === 'full' && <p className="hint">{DEMO_NOTE}</p>}
+      {variant === 'full' && !live && <p className="hint">{DEMO_NOTE}</p>}
     </div>
   );
 }

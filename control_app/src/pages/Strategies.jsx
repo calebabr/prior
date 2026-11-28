@@ -23,7 +23,7 @@ const SOURCE_LABEL = {
  * in its figures and one "Couldn't load" line with Retry; the other figures still render. No switches here.
  */
 export default function Strategies() {
-  const { status } = useStatus();
+  const { status, unconfirmed } = useStatus();
   const [range, setRange] = useRange();
   const summary = useStrategySummary({ range, status });
   const { strategies, total, manual, errors } = summary;
@@ -50,7 +50,7 @@ export default function Strategies() {
       ) : (
         <div className="hub-cards" data-testid="strategy-cards">
           {strategies.map((s) => (
-            <StrategyCard key={s.id} strategy={s} rangeText={rangeLabel(range).toLowerCase()} />
+            <StrategyCard key={s.id} strategy={s} rangeText={rangeLabel(range).toLowerCase()} unconfirmed={unconfirmed} />
           ))}
         </div>
       )}

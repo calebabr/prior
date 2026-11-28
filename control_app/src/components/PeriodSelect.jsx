@@ -1,8 +1,8 @@
 import { titleCase } from '../utils/format.js';
 
-/** Period choices for a period-aware view: one entry per period (the current one is marked). */
+/** Period choices for a period-aware view, newest first (the API lists oldest first); the current one is marked. */
 export function periodOptions(periods) {
-  const list = Array.isArray(periods) ? periods : [];
+  const list = Array.isArray(periods) ? [...periods].reverse() : [];
   return list.map((p) => ({ id: p.id, label: p.current ? `${p.name} (current)` : p.name }));
 }
 

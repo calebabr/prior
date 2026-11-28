@@ -241,7 +241,8 @@ export default function PeriodsCard() {
         {list.length > 0 && (
           <>
             <PeriodSelect periods={list} value={selected} onChange={setSelected} includeAll={false} id="periods-card-select" />
-            <CollapsibleList items={list} pageKey="periods-timeline" label="periods">
+            {/* Newest first, so the current period is never behind "Show all". */}
+            <CollapsibleList items={[...list].reverse()} pageKey="periods-timeline" label="periods">
               {(vis) => (
                 <ul className="period-timeline" aria-label="Period timeline">
                   {vis.map((p) => (
@@ -257,7 +258,7 @@ export default function PeriodsCard() {
         )}
         <form className="period-form" onSubmit={markPeriod}>
           <label htmlFor="period-name">New Period Name</label>
-          <input id="period-name" type="text" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder="Demo Period 2" />
+          <input id="period-name" type="text" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} placeholder="Period name" />
           <label htmlFor="period-note">Note (Optional)</label>
           <input id="period-note" type="text" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} />
           <button type="submit" className="btn block" disabled={!name.trim() || !!busy}>

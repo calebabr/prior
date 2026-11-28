@@ -99,8 +99,8 @@
 .term h3 a:hover { text-decoration: none; color: var(--accent); }
 .term-short { color: var(--text); margin: 4px 0 6px; font-weight: 500; }
 .term-body { color: var(--muted); font-size: 0.875rem; margin: 0; }
-.term-related { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; }
-.term-related a { padding: 4px 0; }
+.term-related { margin: 4px 0 0; font-size: 0.8125rem; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; }
+.term-related a { display: inline-flex; align-items: center; justify-content: center; min-height: var(--tap); min-width: var(--tap); }
 .term.highlight { background: var(--surface2); box-shadow: inset 2px 0 0 var(--accent); }
 
 .term-back { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; margin: 0 0 2px; font-size: 0.875rem; font-weight: 500; }

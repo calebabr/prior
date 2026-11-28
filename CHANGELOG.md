@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased - Matching totals, your own trades, and clearer live screens
+- Home shows an account card whose total matches Kalshi's: cash, positions at market value, the amount paid, and the unrealized figure until settlement. Your own open trades now appear on the "You" row and the Account page.
+- Fills sync no longer waits for a bot pass, and history and activity are separated into demo and live (new `GET /api/account/summary`; `env=` on history and activity).
+- Loss breaker: markets that only you traded no longer move it. Anything that cannot be proven yours still counts, and the check before a trip uses fresh evidence.
+- Safety: a failed or partial Stop stays on screen, Stop stays reachable above every dialog, an out-of-date status is marked as such, and the live mode is always shown.
+- Stop now cancels the bot's resting orders in every mode that has keys, never your own, and names the mode if a cancel failed. A Stop that arrives while a Start, a switch to live or an arbitrage change is being checked wins (409 `stopped_during_start`).
+- An order Stop could not cancel is now reported. Disarming the maker also cancels the bot's resting live orders when live keys are set, even in demo, and a restarted server that comes up stopped cancels in each mode with keys.
+- Fix: the arbitrage turn-on dialog follows the configured live setting; switching to demo now warns that live orders stay open (tap Stop first).
+- Live wording, arming help, money labels, period order and small-sample ranges corrected; the login screen no longer shows the mode.
+
 ## Unreleased - Ledger pair timing
 - Fix: the Analytics reconciliation now books YES / NO pair P&L when the pair forms (as Kalshi credits it) instead of at settlement, so open pair markets no longer show a false residual; new `pair_timing` fields, `model: pair_time_v2`, and pair netting uses average cost. Tolerance unchanged; read-only.
 

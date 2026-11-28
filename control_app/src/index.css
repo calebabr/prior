@@ -101,7 +101,7 @@ a:hover { text-decoration: underline; }
 
 .appbar {
   position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
   /* iOS standalone with status-bar-style "black" (index.html): the page starts BELOW the solid status bar and
      env(safe-area-inset-top) is 0, so this is one even 10px gap; if a device ever reports an inset (> 0) it is
      added once here. Nothing else adds the inset on top: the pull-to-refresh offset reads this bar's measured height. */
@@ -110,14 +110,32 @@ a:hover { text-decoration: underline; }
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
-.appbar-title { display: inline-flex; align-items: center; gap: 8px; min-height: var(--tap); color: var(--text); font-weight: 600; font-size: 1rem; letter-spacing: -0.01em; white-space: nowrap; }
+.appbar-title { display: inline-flex; align-items: center; gap: 8px; min-width: var(--tap); min-height: var(--tap); color: var(--text); font-weight: 600; font-size: 1rem; letter-spacing: -0.01em; white-space: nowrap; }
 .appbar-name { line-height: 1; }
 .appbar-title:hover { text-decoration: none; }
 .mock-tag {
   margin-left: 6px; padding: 1px 5px; border-radius: var(--r-sm);
   font-size: 0.6875rem; font-weight: 500; color: var(--warn); border: 1px solid var(--warn);
 }
-.appbar-right { display: flex; align-items: center; gap: 10px; }
+.appbar-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.live-tag {
+  flex-shrink: 0; padding: 1px 6px; border-radius: var(--r-sm);
+  font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.06em; color: var(--danger); border: 1px solid var(--danger);
+}
+/* A Stop that failed or only partly worked (components/StopAlert.jsx): part of the sticky header, never a toast. */
+.stop-alert {
+  flex-basis: 100%; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  max-height: 40vh; overflow-y: auto; padding: 10px 12px; font-size: 0.875rem;
+  border: 1px solid var(--danger); border-left-width: 4px; border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+}
+.stop-alert-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.stop-alert-title { color: var(--danger); }
+.stop-alert .detail-list { margin: 0; }
+.stop-alert-dismiss { flex-shrink: 0; align-self: flex-end; }
+.login-page > .stop-alert {
+  position: relative; z-index: 1; flex-basis: auto; margin: calc(var(--safe-top) + 12px) var(--gutter) 0;
+}
 
 .content {
   flex: 1; width: 100%; max-width: var(--content-max); margin: 0 auto; min-width: 0;
@@ -246,6 +264,13 @@ a:hover { text-decoration: underline; }
 .badge-compact { font-size: 0.8125rem; color: var(--muted); }
 .badge-compact.badge-error { color: var(--danger); }
 @media (max-width: 360px) { .badge-compact .badge-label { display: none; } }
+/* "Not confirmed" is words at every width; on narrow phones it wraps and the app name makes room (logo stays). */
+.badge-stale .badge-dot { background: var(--off); }
+.badge-compact.badge-stale { color: var(--warn); }
+@media (max-width: 400px) {
+  .badge-compact.badge-stale .badge-label { display: block; max-width: 9ch; white-space: normal; font-size: 0.75rem; line-height: 1.15; }
+  .appbar.is-unconfirmed .appbar-name, .appbar.is-unconfirmed .mock-tag { display: none; }
+}
 
 /* ---------- buttons ---------- */
 
@@ -445,6 +470,8 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 .mode-big { font-size: 1.75rem; font-weight: 600; letter-spacing: 0.02em; margin-bottom: 4px; }
 .mode-live { color: var(--danger); }
 .mode-demo { color: var(--warn); }
+.mode-warning { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); font-size: 0.875rem; }
+.mode-warning p:last-child { margin-bottom: 0; }
 
 /* ---------- tab bar (phones) ---------- */
 
@@ -481,6 +508,14 @@ input[aria-invalid='true'] { border-color: var(--danger); }
   padding: calc(var(--safe-top) + 12px) var(--gutter) calc(var(--safe-bottom) + 12px);
   background: var(--overlay); animation: fade var(--ease);
 }
+/* Stop above every dialog, where the header Stop sits (components/Modal.jsx). */
+.modal-backdrop.has-stop { padding-top: calc(var(--safe-top) + 10px); }
+.modal-layer-stop { z-index: 55; }
+.modal-wrap { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 480px; height: 100%; min-height: 0; }
+.modal-area { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
+.modal-area > .modal { flex: 0 1 auto; min-height: 0; }
+.modal-stop { order: -1; flex: none; align-self: flex-end; }
+.modal-stop .btn { min-height: var(--tap-lg); }
 /* Card = fixed header (title + close) + a body that scrolls inside the card. Nothing fades over the header. */
 .modal {
   display: flex; flex-direction: column; overflow: hidden;
@@ -686,7 +721,7 @@ input[aria-invalid='true'] { border-color: var(--danger); }
 }
 .pw-eye:hover { color: var(--text); }
 .login-mock { margin: 0 0 18px; }
-.login-show { min-height: 32px; margin-top: 2px; }
+.login-show { min-height: 40px; margin-top: 2px; }
 .login-show span { font-size: 0.875rem; color: var(--muted); }
 
 /* Six-digit code boxes drawn over one real input (components/CodeInput.jsx). */

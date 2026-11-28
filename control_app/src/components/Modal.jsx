@@ -1,4 +1,15 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef } from 'react';
+
+/** The Stop control shown above every dialog (DialogProvider supplies it when signed in; null = none). */
+export const ModalStopContext = createContext(null);
+
+// Open dialogs, oldest first. The top one (a Stop confirm beats everything) handles Escape and the Tab trap.
+const stack = [];
+function topEntry() {
+  for (let i = stack.length - 1; i >= 0; i--) if (stack[i].priority) return stack[i];
+  return stack[stack.length - 1];
+}
+const FOCUSABLE = 'input:not(:disabled), button:not(:disabled), [href], select, textarea';
 
 // Body scroll lock shared by all open modals (iOS needs position:fixed; restore the scroll offset on the last close).
 let lockCount = 0;
@@ -31,11 +42,19 @@ function unlockBody() {
 // Centered dialog (mobile-first): a fixed header (title + dismiss) and a body that scrolls inside the card, kept inside the
 // safe-area insets by index.css (--safe-top / --safe-bottom); tracks the visual viewport so the iOS keyboard never covers it. Escape / backdrop tap call onClose
 // (pass onClose={undefined} to make it non-dismissable, e.g. while busy).
-export default function Modal({ title, onClose, children, labelledBy = 'modal-title' }) {
+// Every dialog has the Stop button above its card, where the header Stop sits, so Stop is reachable even while a
+// request is in flight. layer="stop" is the Stop confirm itself: it stacks on top of any open dialog and gives focus
+// back when it closes.
+export default function Modal({ title, onClose, children, labelledBy = 'modal-title', layer }) {
   const ref = useRef(null);
+  const wrapRef = useRef(null);
+  const areaRef = useRef(null);
   const backdropRef = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+  const priority = layer === 'stop';
+  const stopControl = useContext(ModalStopContext);
+  const showStop = !priority && !!stopControl;
 
   useLayoutEffect(() => {
     lockBody();
@@ -62,16 +81,29 @@ export default function Modal({ title, onClose, children, labelledBy = 'modal-ti
   }, []);
 
   useEffect(() => {
+    const me = { priority };
+    const previous = document.activeElement;
+    stack.push(me);
+    const isTop = () => topEntry() === me;
+    const focusFirst = () => {
+      const el = ref.current && ref.current.querySelector('input:not(:disabled), .btn.primary, .btn.danger');
+      if (el) el.focus({ preventScroll: true });
+    };
     const onKey = (e) => {
-      if (e.key === 'Escape' && closeRef.current) closeRef.current();
+      if (e.key !== 'Escape' || e.modalHandled || !isTop()) return;
+      e.modalHandled = true;
+      if (closeRef.current) closeRef.current();
     };
     const trap = (e) => {
-      if (e.key !== 'Tab' || !ref.current) return;
-      const items = ref.current.querySelectorAll('input:not(:disabled), button:not(:disabled), [href], select, textarea');
+      if (e.key !== 'Tab' || !wrapRef.current || !isTop()) return;
+      const items = wrapRef.current.querySelectorAll(FOCUSABLE);
       if (!items.length) return;
       const firstEl = items[0];
       const lastEl = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === firstEl) {
+      if (!wrapRef.current.contains(document.activeElement)) {
+        e.preventDefault();
+        firstEl.focus();
+      } else if (e.shiftKey && document.activeElement === firstEl) {
         e.preventDefault();
         lastEl.focus();
       } else if (!e.shiftKey && document.activeElement === lastEl) {
@@ -79,42 +111,62 @@ export default function Modal({ title, onClose, children, labelledBy = 'modal-ti
         firstEl.focus();
       }
     };
+    // A dialog underneath must not pull focus away from the Stop confirm (for example when its request fails).
+    const guard = (e) => {
+      if (isTop() && wrapRef.current && !wrapRef.current.contains(e.target)) focusFirst();
+    };
     document.addEventListener('keydown', onKey);
     document.addEventListener('keydown', trap);
-    const first = ref.current && ref.current.querySelector('input, .btn.primary, .btn.danger');
-    if (first) first.focus({ preventScroll: true });
+    if (priority) document.addEventListener('focusin', guard);
+    if (isTop()) focusFirst();
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('keydown', trap);
+      document.removeEventListener('focusin', guard);
+      stack.splice(stack.indexOf(me), 1);
+      if (priority && previous && previous !== document.body && previous.isConnected && !previous.disabled) {
+        previous.focus({ preventScroll: true });
+      }
     };
-  }, []);
+  }, [priority]);
 
   return (
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop${priority ? ' modal-layer-stop' : ''}${showStop ? ' has-stop' : ''}`}
       ref={backdropRef}
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && closeRef.current) closeRef.current();
+        const t = e.target;
+        if ((t === backdropRef.current || t === wrapRef.current || t === areaRef.current) && closeRef.current) closeRef.current();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={ref}>
-        {(title || onClose) && (
-          <div className="modal-head">
-            {title ? (
-              <h2 id={labelledBy} className="modal-title">
-                {title}
-              </h2>
-            ) : (
-              <span />
+      <div className="modal-wrap" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={wrapRef}>
+        <div className="modal-area" ref={areaRef}>
+          <div className="modal" ref={ref}>
+            {(title || onClose) && (
+              <div className="modal-head">
+                {title ? (
+                  <h2 id={labelledBy} className="modal-title">
+                    {title}
+                  </h2>
+                ) : (
+                  <span />
+                )}
+                {onClose && (
+                  <button type="button" className="modal-x" aria-label="Dismiss dialog" data-testid="modal-x" onClick={() => closeRef.current && closeRef.current()}>
+                    <span aria-hidden="true">×</span>
+                  </button>
+                )}
+              </div>
             )}
-            {onClose && (
-              <button type="button" className="modal-x" aria-label="Dismiss dialog" data-testid="modal-x" onClick={() => closeRef.current && closeRef.current()}>
-                <span aria-hidden="true">×</span>
-              </button>
-            )}
+            <div className="modal-scroll">{children}</div>
+          </div>
+        </div>
+        {/* After the card in the document (Tab reaches the dialog first), drawn above it by CSS order. */}
+        {showStop && (
+          <div className="modal-stop" data-testid="modal-stop">
+            {stopControl}
           </div>
         )}
-        <div className="modal-scroll">{children}</div>
       </div>
     </div>
   );

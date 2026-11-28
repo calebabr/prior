@@ -15,12 +15,13 @@ export default function ConfirmDialog({
   requireText,
   requireCheck,
   resolve,
+  layer,
 }) {
   const [typed, setTyped] = useState('');
   const [checked, setChecked] = useState(false);
   const ok = (!requireText || typed === requireText) && (!requireCheck || checked);
   return (
-    <Modal title={title} onClose={() => resolve(false)} labelledBy="confirm-title">
+    <Modal title={title} onClose={() => resolve(false)} labelledBy={layer ? `${layer}-confirm-title` : 'confirm-title'} layer={layer}>
       {message && <div className="modal-body">{message}</div>}
       {requireText && (
         <label className="field">

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import usePollWhileVisible from './usePollWhileVisible.js';
 import { api, query, request, viewerTimeZone, withRetry } from '../services/api.js';
 import { registerRefresh } from '../services/refreshBus.js';
 import { DEFAULT_RANGE, rangeParams } from '../utils/range.js';
@@ -9,11 +10,11 @@ import { strategyShortName } from '../utils/format.js';
  * Client-side composition of the Strategies hub and the Home totals from existing endpoints (no backend change):
  *   GET /api/strategies            names, colours      (fallback: Maker and Arbitrage, built in)
  *   GET /api/status                on/off, mode, last run (skipped when the caller passes `status`)
- *   GET /api/analytics/ledger      P&L, return, open cost, fills per strategy (range: days= or period=). P&L comes from
- *                                  `settled_by_strategy` (SETTLEMENT date, the same rule as the Home headline); open
- *                                  cost, fills and return stay on the fill-date `strategies` rows. A ledger without
+ *   GET /api/analytics/ledger      P&L, return, fills per strategy (range: days= or period=). P&L comes from
+ *                                  `settled_by_strategy` (SETTLEMENT date, the same rule as the Home headline);
+ *                                  fills and return stay on the fill-date `strategies` rows. A ledger without
  *                                  `settled_by_strategy` (old API) gives pnl null: a dash, never the fill-date figure.
- *   GET /api/account/positions     exposure per strategy (live)
+ *   GET /api/account/positions     per strategy, positions open NOW: amount paid (openCost) and value now
  *   GET /api/markets               Maker series enabled / paused
  * Each source degrades on its own: a failed source leaves its fields null (render "—" with title "Not available
  * yet") and is named in `errors`; the rest still render. `GET /api/analytics/summary` is not called: it has no
@@ -27,9 +28,15 @@ import { strategyShortName } from '../utils/format.js';
  *
  * strategies[]: { id, name, shortName, color, to, state: 'running'|'stopped'|'error'|'unknown', mode, stateText,
  *   enabled, lastRunAt, nextRunAt, lastAction: {ts, text}|null, pnl, roi, openCost, fills, settledFills,
- *   exposure, resting, drawdown (always null), series: {enabled, total, paused}|null (Maker only) }
- * total: Maker + Arbitrage only: { pnl, roi, openCost, fills, exposure } (null fields when no source has them)
- * manual: the owner's own trades, shown on a separate "not in the total" line: { pnl, fills, openCost, exposure }|null
+ *   value, resting, drawdown (always null), series: {enabled, total, paused}|null (Maker only) }
+ * total: Maker + Arbitrage only: { pnl, roi, openCost, fills, value } (null fields when no source has them)
+ * openCost / value never depend on the range, and are null (a dash) when positions could not be read, a row lacks
+ * the figure, or (per strategy) a bot row has no known strategy.
+ * manual: the owner's own trades, shown on a separate "not in the total" line:
+ *   { pnl, fills, openCost, value, open: {count, cost, value}|null }|null
+ *   `open` comes from the LIVE positions rows (source "you", not orders), so the chosen range does not filter it.
+ *   open is null when positions could not be read; open.cost / open.value are null when any row lacks that figure.
+ * `positionsPollMs` re-reads only the positions while the page is visible (Home).
  */
 
 export const SUMMARY_CAPABILITIES = {
@@ -47,6 +54,8 @@ const sum = (vals) => {
   const n = vals.filter(isNum);
   return n.length ? Math.round(n.reduce((a, b) => a + b, 0) * 100) / 100 : null;
 };
+// A total that never under-reports: 0 for no rows, null when any row lacks the figure.
+const strictSum = (vals) => (vals.every(isNum) ? sum(vals) ?? 0 : null);
 
 // The ledger is the slow call (a cold server build). 429 analytics_busy and 503 store_unavailable are retried twice
 // by themselves (Retry-After honored, jitter); the section stays in its loading state meanwhile (see withRetry).
@@ -64,7 +73,8 @@ export function strategyState(id, status) {
     const stopped = s === 'stopped';
     return {
       state: stopped ? 'stopped' : 'running',
-      mode: stopped ? null : s === 'live' ? 'live' : 'demo',
+      mode: stopped ? null : s === 'live' ? 'live' : 'log-only',
+      appMode: status.mode || null,
       lastRunAt: a.last_scan_utc || null,
       nextRunAt: null,
       enabled: !stopped,
@@ -80,14 +90,17 @@ export function strategyState(id, status) {
   };
 }
 
-function stateText(state, mode) {
+function stateText(state, mode, appMode) {
+  // In live mode "log only" places nothing at all; in demo it may still place play-money orders, so it only says
+  // that nothing live is sent.
+  if (state === 'running' && mode === 'log-only') return appMode === 'live' ? 'Log only, no orders' : 'Log only, no live orders';
   if (state === 'running') return mode === 'live' ? 'Live running' : 'Demo running';
   if (state === 'error') return 'Needs attention';
   if (state === 'stopped') return 'Stopped';
   return 'Unknown';
 }
 
-export default function useStrategySummary({ range = DEFAULT_RANGE, env, status: statusProp } = {}) {
+export default function useStrategySummary({ range = DEFAULT_RANGE, env, status: statusProp, positionsPollMs } = {}) {
   const ownStatus = statusProp === undefined;
   const [raw, setRaw] = useState({ registry: null, status: null, ledger: null, ledgerFor: null, positions: null, markets: null });
   const [errors, setErrors] = useState({ strategies: null, status: null, ledger: null, positions: null, markets: null });
@@ -145,6 +158,23 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
   }, [reload]);
   useEffect(() => registerRefresh(reload), [reload]);
 
+  // Positions alone, so a new trade shows without reloading (and re-showing the skeleton of) the slow ledger.
+  const reloadPositions = useCallback(
+    () =>
+      api.getAccountPositions().then(
+        (value) => {
+          if (!alive.current) return;
+          setRaw((prev) => ({ ...prev, positions: value }));
+          setErrors((e) => ({ ...e, positions: null }));
+        },
+        (reason) => {
+          if (alive.current) setErrors((e) => ({ ...e, positions: reason || new Error('Request failed') }));
+        },
+      ),
+    [],
+  );
+  usePollWhileVisible(reloadPositions, positionsPollMs);
+
   const status = ownStatus ? raw.status : statusProp;
 
   return useMemo(() => {
@@ -160,14 +190,20 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     for (const r of settledList || []) settled[r.strategy] = r;
     const settledPnl = (id) => (!ledger || !settledList ? null : isNum(settled[id]?.realized_pnl) ? settled[id].realized_pnl : 0);
     const positions = Array.isArray(raw.positions) ? raw.positions : null;
-    const posSum = (pred, kind) =>
-      positions ? sum(positions.filter((p) => (p.kind || 'position') === kind && pred(p)).map((p) => p.value)) ?? 0 : null;
+    const open = positions ? positions.filter((p) => (p.kind || 'position') === 'position') : null;
+    const botOpen = open ? open.filter((p) => p.source !== 'you') : null;
+    // A bot row with no known strategy cannot be placed: per-strategy figures are then unknown, the total is not.
+    const unplaced = !!botOpen && botOpen.some((p) => !registry.some((s) => s.id === p.strategy));
+    const figure = (rows, key) => (rows ? strictSum(rows.map((p) => p[key])) : null);
+    const resting = (pred) =>
+      positions ? sum(positions.filter((p) => p.kind === 'order' && pred(p)).map((p) => p.value)) ?? 0 : null;
     const marketRows = raw.markets && Array.isArray(raw.markets.markets) ? raw.markets.markets : null;
 
     const strategies = registry.map((s) => {
       const st = strategyState(s.id, status);
       const row = rows[s.id] || null;
       const ledgerOk = !!ledger;
+      const mine = botOpen && !unplaced ? botOpen.filter((p) => p.strategy === s.id) : null;
       const shortName = STRATEGY_PAGES[s.id] || strategyShortName(s.name);
       const lastAction = st.lastRunAt ? { ts: st.lastRunAt, text: s.id === 'arb' ? 'Last scan' : 'Last pass' } : null;
       return {
@@ -178,18 +214,18 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
         to: strategyPath(s.id),
         state: st.state,
         mode: st.mode,
-        stateText: stateText(st.state, st.mode),
+        stateText: stateText(st.state, st.mode, st.appMode),
         enabled: st.enabled,
         lastRunAt: st.lastRunAt,
         nextRunAt: st.nextRunAt,
         lastAction,
         pnl: settledPnl(s.id),
         roi: row && isNum(row.roi_on_settled) ? row.roi_on_settled : null,
-        openCost: row ? row.open_cost : ledgerOk ? 0 : null,
+        openCost: figure(mine, 'cost'),
         fills: row ? row.fills : ledgerOk ? 0 : null,
         settledFills: row ? row.settled_fills : ledgerOk ? 0 : null,
-        exposure: posSum((p) => p.source !== 'you' && p.strategy === s.id, 'position'),
-        resting: posSum((p) => p.source !== 'you' && p.strategy === s.id, 'order'),
+        value: figure(mine, 'value'),
+        resting: resting((p) => p.source !== 'you' && p.strategy === s.id),
         drawdown: null,
         series:
           s.id === 'maker' && marketRows
@@ -209,18 +245,20 @@ export default function useStrategySummary({ range = DEFAULT_RANGE, env, status:
     const total = {
       pnl: totalPnl,
       roi: isNum(totalPnl) && isNum(settledCost) && settledCost > 0 ? Math.round((totalPnl / settledCost) * 10000) / 10000 : null,
-      openCost: sum(inTotal.map((s) => s.openCost)),
+      openCost: figure(botOpen, 'cost'),
       fills: sum(inTotal.map((s) => s.fills)),
-      exposure: sum(inTotal.map((s) => s.exposure)),
+      value: figure(botOpen, 'value'),
     };
     const you = rows.you;
+    const yourOpen = open ? open.filter((p) => p.source === 'you') : null;
     const manual =
       ledger || positions
         ? {
             pnl: settledPnl('you'),
             fills: you ? you.fills : ledger ? 0 : null,
-            openCost: you ? you.open_cost : ledger ? 0 : null,
-            exposure: posSum((p) => p.source === 'you', 'position'),
+            openCost: figure(yourOpen, 'cost'),
+            value: figure(yourOpen, 'value'),
+            open: yourOpen ? { count: yourOpen.length, cost: figure(yourOpen, 'cost'), value: figure(yourOpen, 'value') } : null,
           }
         : null;
 

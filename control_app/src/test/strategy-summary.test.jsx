@@ -25,10 +25,10 @@ const LEDGER = {
   total: { ...Z, realized_pnl: -1.5 },
 };
 const POSITIONS = [
-  { kind: 'position', value: 8.2, source: 'bot', strategy: 'maker' },
-  { kind: 'position', value: 4.8, source: 'bot', strategy: 'maker' },
-  { kind: 'order', value: 3.6, source: 'bot', strategy: 'maker' },
-  { kind: 'position', value: 6.6, source: 'you', strategy: null },
+  { kind: 'position', cost: 8.2, value: 8.9, source: 'bot', strategy: 'maker' },
+  { kind: 'position', cost: 4.8, value: 4.1, source: 'bot', strategy: 'maker' },
+  { kind: 'order', cost: null, value: 3.6, source: 'bot', strategy: 'maker' },
+  { kind: 'position', cost: 6.6, value: 7.1, source: 'you', strategy: null },
 ];
 const MARKETS = {
   markets: [
@@ -66,25 +66,26 @@ describe('useStrategySummary', () => {
     expect(Object.values(errors).every((e) => e === null)).toBe(true);
     expect(strategies.map((s) => [s.id, s.shortName])).toEqual([['maker', 'Maker'], ['arb', 'Arbitrage']]);
     const maker = byId(r, 'maker');
-    expect(maker).toMatchObject({ state: 'running', mode: 'demo', pnl: 2, roi: 0.05, openCost: 8.2, fills: 12, exposure: 13, resting: 3.6, drawdown: null });
+    expect(maker).toMatchObject({ state: 'running', mode: 'demo', pnl: 2, roi: 0.05, openCost: 13, fills: 12, value: 13, resting: 3.6, drawdown: null });
     expect(maker.series).toEqual({ enabled: 2, total: 3, paused: 1 });
     expect(maker.to).toBe('/strategies/maker');
     expect(byId(r, 'arb')).toMatchObject({ state: 'running', pnl: 0.5, series: null });
     expect(total.pnl).toBe(2.5);
     expect(total.roi).toBeCloseTo(0.05, 4); // 2.5 / 50 settled cost
-    expect(total.openCost).toBe(8.2);
-    expect(manual).toMatchObject({ pnl: -4, fills: 3, openCost: 6.6, exposure: 6.6 });
+    expect(total.openCost).toBe(13); // paid for the bot's positions open now
+    expect(total.value).toBe(13);
+    expect(manual).toMatchObject({ pnl: -4, fills: 3, openCost: 6.6, value: 7.1 });
     expect(capabilities).toMatchObject({ allRange: false, strategyDrawdown: false });
   });
 
-  it('degrades per source: positions failing leaves exposure null and everything else intact', async () => {
+  it('degrades per source: positions failing leaves paid and value null and everything else intact', async () => {
     stubApi({ ...ok, 'GET /api/account/positions': [500, { detail: 'boom' }] });
     const r = renderHook(() => useStrategySummary({}));
     await settled(r);
     expect(r.result.current.partial).toBe(true);
     expect(r.result.current.errors.positions).toBeTruthy();
     expect(r.result.current.errors.ledger).toBeNull();
-    expect(byId(r, 'maker')).toMatchObject({ exposure: null, pnl: 2, state: 'running' });
+    expect(byId(r, 'maker')).toMatchObject({ openCost: null, value: null, pnl: 2, state: 'running' });
     expect(r.result.current.total.pnl).toBe(2.5);
   });
 
@@ -93,7 +94,7 @@ describe('useStrategySummary', () => {
     const r = renderHook(() => useStrategySummary({}));
     await settled(r);
     expect(r.result.current.errors.ledger).toBeTruthy();
-    expect(byId(r, 'maker')).toMatchObject({ pnl: null, roi: null, openCost: null, fills: null, state: 'running', exposure: 13 });
+    expect(byId(r, 'maker')).toMatchObject({ pnl: null, roi: null, openCost: 13, fills: null, state: 'running', value: 13 });
     expect(byId(r, 'maker').series.total).toBe(3);
     expect(r.result.current.total.pnl).toBeNull();
   });

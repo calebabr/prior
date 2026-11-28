@@ -157,7 +157,7 @@ describe('HelpIcon popover', () => {
         <Where />
       </MemoryRouter>,
     );
-    await user.click(screen.getByRole('button', { name: /What is ROI/ }));
+    await user.click(screen.getByRole('button', { name: /What is Return \(ROI\)/ }));
     const more = screen.getByRole('link', { name: /More/ });
     await user.tab();
     expect(more).toHaveFocus(); // the only tab stop in the popover: focus wraps to itself

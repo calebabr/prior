@@ -15,6 +15,8 @@ export default function TwoFactorPrompt({
   done,
   fail,
   anchorRef,
+  control,
+  superseded = false,
 }) {
   const inputRef = useRef(null);
   // Hand focus from the shell's keyboard anchor to the real input (moving focus keeps the iOS keyboard up).
@@ -36,11 +38,17 @@ export default function TwoFactorPrompt({
     if (!valid || busy) return;
     setBusy(true);
     setError(null);
+    if (control) control.busy = true;
     try {
       const result = action ? await action(code) : code;
       done(result);
     } catch (err) {
+      if (control) control.busy = false;
       if (err && err.is2fa) {
+        if (control && control.superseded) {
+          done(null); // Stop was tapped meanwhile: do not offer to send this again
+          return;
+        }
         setBusy(false);
         setCode('');
         setError(
@@ -57,6 +65,11 @@ export default function TwoFactorPrompt({
   return (
     <Modal title={title} onClose={busy ? undefined : () => done(null)} labelledBy="tfa-title">
       <form onSubmit={submit}>
+        {superseded && (
+          <p className="error-text modal-body" role="status">
+            Stop was sent. This request had already left and may still finish.
+          </p>
+        )}
         {message && <div className="modal-body">{message}</div>}
         <label className="field">
           <span className="field-label">Code from your authenticator app</span>

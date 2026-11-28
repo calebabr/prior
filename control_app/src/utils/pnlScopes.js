@@ -4,6 +4,18 @@
 
 export const TODAY_EMPTY = 'No settlements yet today';
 export const TODAY_UNAVAILABLE = 'Unavailable';
+export const TODAY_BOT_EMPTY = 'No bot settlements yet today';
+
+/**
+ * Today's figure for "Maker and arbitrage": the bot's own (pnl_today.bot). An older server without that field gives
+ * the total, flagged `withYou` so the label says it includes your trades. `onlyYours`: only your trades settled.
+ */
+export function todayFigure(status) {
+  const t = (status && status.pnl_today) || {};
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+  if ('bot' in t) return { value: t.bot, withYou: false, onlyYours: !isNum(t.bot) && isNum(t.total) };
+  return { value: t.total, withYou: true, onlyYours: false };
+}
 
 /**
  * Today's P&L display kind from /api/status: 'value' | 'none' | 'unavailable'.

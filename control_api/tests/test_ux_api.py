@@ -317,7 +317,8 @@ async def test_account_positions_rows_and_sources(env):
     ords = [r for r in rows if r["kind"] == "order"]
     ny = next(r for r in pos if r["ticker"] == "KXDEMOB-A")
     assert ny == {"kind": "position", "ticker": "KXDEMOB-A", "title": "Title KXDEMOB-A", "side": "no", "count": 10,
-                  "price": 0.4, "value": 4.2, "payout_if_wins": 10.0, "source": "bot", "strategy": "maker"}
+                  "price": 0.4, "cost": 4.0, "value": 4.2, "payout_if_wins": 10.0, "source": "bot",
+                  "strategy": "maker", "legs": None}
     fed = next(r for r in pos if r["ticker"] == "FED-1")
     assert fed["source"] == "you" and fed["side"] == "yes" and fed["price"] == 0.4 and fed["value"] == 1.52
     assert {o["ticker"]: (o["source"], o["strategy"]) for o in ords} == {"KXDEMOB-A": ("bot", "maker"),

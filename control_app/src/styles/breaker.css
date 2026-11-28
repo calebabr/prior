@@ -19,3 +19,6 @@
 .breaker-state li > span:first-child { color: var(--muted); }
 .breaker-state li > span:last-child { text-align: right; overflow-wrap: anywhere; }
 .breaker-check-row { display: block; margin: 8px 0; }
+.breaker-own { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+.breaker-own p { margin: 0; }
+.breaker-unproven { font-size: 0.875rem; }

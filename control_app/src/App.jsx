@@ -6,6 +6,7 @@ import { DisplayProvider } from './context/DisplayContext.jsx';
 import { StatusProvider, useStatus } from './context/StatusContext.jsx';
 import BreakerBanner from './components/BreakerBanner.jsx';
 import Header from './components/Header.jsx';
+import StopButton from './components/StopButton.jsx';
 import NavBar from './components/NavBar.jsx';
 import WakingBanner from './components/WakingBanner.jsx';
 import WhatsNew from './components/WhatsNew.jsx';
@@ -119,14 +120,20 @@ function Gate() {
   return <SignedIn />;
 }
 
+// Signed in, every dialog also carries the Stop button.
+function Dialogs({ children }) {
+  const { isAuthenticated } = useAuth();
+  return <DialogProvider stopControl={isAuthenticated ? <StopButton compact /> : null}>{children}</DialogProvider>;
+}
+
 // Everything except the router, so tests can wrap it in a MemoryRouter.
 export function AppShell() {
   return (
     <DisplayProvider>
       <AuthProvider>
-        <DialogProvider>
+        <Dialogs>
           <Gate />
-        </DialogProvider>
+        </Dialogs>
       </AuthProvider>
     </DisplayProvider>
   );

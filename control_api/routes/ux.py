@@ -17,6 +17,7 @@ from ..auth.deps import current_user
 from ..auth.ratelimit import check_user
 from .periods import window_for
 from ..services import periods as per
+from ..services import kalshi_recon as recon
 from ..services import pnl as pnlsvc
 from ..services import strategies as strat
 
@@ -28,7 +29,8 @@ STORE_TIMEOUT_S = 8.0
 ACCOUNT_TIMEOUT_S = 25.0
 ACCOUNT_CACHE_S = 30.0
 ACCOUNT_MAX_TICKERS = 25              # GET /markets/{t} lookups per refresh (titles + current prices)
-RATE_LIMITS = {"account_positions": (20, 60.0), "since": (60, 60.0)}
+RATE_LIMITS = {"account_positions": (20, 60.0), "account_summary": (20, 60.0), "since": (60, 60.0)}
+ACCOUNT_WORKERS = 2                   # positions + summary refresh side by side (Home asks for both at once)
 _POOL: ThreadPoolExecutor | None = None
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.\-]{0,79}$")
 
@@ -41,7 +43,7 @@ def _pool() -> ThreadPoolExecutor:
     """Account reads run on their own worker, never the default pool Stop's cancel uses (S-25 family)."""
     global _POOL
     if _POOL is None:
-        _POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="account")
+        _POOL = ThreadPoolExecutor(max_workers=ACCOUNT_WORKERS, thread_name_prefix="account")
     return _POOL
 
 
@@ -168,15 +170,26 @@ def _market_info(client: Any, tickers: list[str]) -> dict[str, dict]:
             m = client.get_market(t) or {}
         except Exception:  # noqa: BLE001
             continue
-        out[t] = {"title": str(m.get("title") or m.get("subtitle") or "")[:200] or None,
+        legs = combo_legs(m)
+        title = f"{legs}-leg combo" if legs else (str(m.get("title") or m.get("subtitle") or "")[:200] or None)
+        out[t] = {"title": title, "legs": legs,
                   "yes_bid": _dollars(m, "yes_bid"), "no_bid": _dollars(m, "no_bid"),
                   "last": _dollars(m, "last_price")}
     return out
 
 
+def combo_legs(m: dict) -> int | None:
+    """B2: number of legs of a multivariate (combo) market, from Kalshi's `mve_selected_legs` (one item per
+    selected leg); None for an ordinary market or when the legs are not listed."""
+    legs = m.get("mve_selected_legs") if isinstance(m, dict) else None
+    if not isinstance(legs, list):
+        return None
+    n = sum(1 for x in legs if isinstance(x, dict))
+    return n or None
+
+
 def _read_account(client: Any) -> tuple[list[dict], list[dict], dict[str, dict]]:
-    body = client.get_positions(count_filter="position", limit=200) or {}
-    positions = [p for p in (body.get("market_positions") or []) if isinstance(p, dict)]
+    positions, _ = recon._read_positions(client)            # follows the cursor (bounded), like the recon
     orders = [o for o in (client.get_orders(status="resting") or []) if isinstance(o, dict)]
     tickers = list(dict.fromkeys([str(p.get("ticker") or "") for p in positions]
                                  + [str(o.get("ticker") or "") for o in orders]))
@@ -196,7 +209,7 @@ def _position_rows(positions: list[dict], info: dict[str, dict], labels: dict[st
         price = round(cost / count, 4) if cost is not None and count else None
         mi = info.get(t) or {}
         bid = mi.get("yes_bid" if side == "yes" else "no_bid")
-        base = {"kind": "position", "ticker": t, "title": mi.get("title"), "side": side}
+        base = {"kind": "position", "ticker": t, "title": mi.get("title"), "side": side, "legs": mi.get("legs")}
         # split by source using the fills we hold for this ticker (net contracts on this side)
         lab = labels.get(t) or {}
         parts: list[tuple[str, str | None, float]] = []
@@ -211,6 +224,8 @@ def _position_rows(positions: list[dict], info: dict[str, dict], labels: dict[st
         for src, sid, n in parts:
             n = round(n, 2)
             rows.append({**base, "count": n, "price": price,
+                         # B2: dollars paid for this row (its share of |market_exposure|); None if Kalshi gave none
+                         "cost": round(abs(cost) * n / count, 2) if cost is not None and count else None,
                          "value": round(n * bid, 2) if bid is not None else None,
                          "payout_if_wins": round(n * 1.0, 2), "source": src, "strategy": sid})
     return rows
@@ -227,7 +242,8 @@ def _order_rows(orders: list[dict], info: dict[str, dict]) -> list[dict]:
             continue
         price = _dollars(o, f"{side}_price") if side else None
         lab = strat.order_label(o)
-        rows.append({"kind": "order", "ticker": t, "title": (info.get(t) or {}).get("title"), "side": side,
+        rows.append({"kind": "order", "ticker": t, "title": (info.get(t) or {}).get("title"),
+                     "legs": (info.get(t) or {}).get("legs"), "side": side,
                      "action": o.get("action"), "count": round(n, 2), "price": price,
                      "value": round(n * price, 2) if price is not None else None,
                      "payout_if_wins": round(n * 1.0, 2), **lab})
@@ -242,17 +258,13 @@ async def account_positions(request: Request, user: dict = Depends(current_user)
     await _rate_limit(request, user, "account_positions")
     r = request.app.state.runner
     mode = r.mode
+    _kick_sync(r, "read:positions")
     cache = getattr(request.app.state, "account_cache", None) or {}
     hit = cache.get(mode)
     if hit and 0 <= time.monotonic() - hit[0] < ACCOUNT_CACHE_S:
         return hit[1]
     loop = asyncio.get_running_loop()
-    try:
-        client = await asyncio.wait_for(loop.run_in_executor(_pool(), r.kalshi_factory, mode), ACCOUNT_TIMEOUT_S)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(503, "kalshi_unavailable") from e
-    if client is None or not callable(getattr(client, "get_positions", None)):
-        raise HTTPException(409, "kalshi_not_configured")
+    client = await _account_client(r, mode, "get_positions")
     try:
         positions, orders, info = await asyncio.wait_for(loop.run_in_executor(_pool(), _read_account, client),
                                                          ACCOUNT_TIMEOUT_S)
@@ -269,3 +281,100 @@ async def account_positions(request: Request, user: dict = Depends(current_user)
     cache[mode] = (time.monotonic(), rows)
     request.app.state.account_cache = cache
     return rows
+
+
+def _kick_sync(runner: Any, trigger: str) -> None:
+    """B3: ask the runner for a background fills sync (rate-limited and single-flight there); never waits."""
+    fn = getattr(runner, "request_fills_sync", None)
+    if callable(fn):
+        try:
+            fn(trigger)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _account_client(r: Any, mode: str, needs: str) -> Any:
+    """The read client for the mode, built on the account pool: 503 kalshi_unavailable / 409 kalshi_not_configured."""
+    loop = asyncio.get_running_loop()
+    try:
+        client = await asyncio.wait_for(loop.run_in_executor(_pool(), r.kalshi_factory, mode), ACCOUNT_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, "kalshi_unavailable") from e
+    if client is None or not callable(getattr(client, needs, None)):
+        raise HTTPException(409, "kalshi_not_configured")
+    return client
+
+
+# ---------------------------------------------------------------- account summary (B1)
+def _cents(body: dict, key: str) -> float | None:
+    """Kalshi balance money field in dollars: `<key>_dollars` (fixed-point dollar string) else `<key>` (integer
+    cents). None when absent or not a finite number (never 0 for a missing field)."""
+    if not isinstance(body, dict):
+        return None
+    return _dollars(body, key)
+
+
+def _read_summary(client: Any) -> dict:
+    """GET /portfolio/balance + GET /portfolio/positions (every page, bounded). Raises on a failed read."""
+    bal = client.get_balance() or {}
+    bal = bal if isinstance(bal, dict) else {}
+    cash = _cents(bal, "balance")
+    value = _cents(bal, "portfolio_value")
+    try:
+        positions, truncated = recon._read_positions(client)
+    except Exception:  # noqa: BLE001   (positions unreadable: cost and everything derived from it is null)
+        positions, truncated = None, True
+    cost: float | None = None
+    if positions is not None and not truncated and value is not None and abs(value) > 0.005 and not any(
+            (_f(p.get("position_fp")) if _f(p.get("position_fp")) is not None else _f(p.get("position")))
+            for p in positions):
+        value = None        # security L-2: no open position but a portfolio value: not positions-only, never shown
+    if positions is not None and not truncated:
+        total = 0.0
+        for p in positions:
+            x = _dollars(p, "market_exposure")
+            if x is None:                                     # one unusable exposure: the sum is unknown
+                total = None
+                break
+            total += abs(x)
+        cost = total
+    return {"cash": cash, "positions_cost": cost, "positions_value": value}
+
+
+def summary_numbers(raw: dict) -> dict:
+    """The derived totals; any null input makes the derived figure null (never a guess)."""
+    cash, cost, value = raw.get("cash"), raw.get("positions_cost"), raw.get("positions_value")
+
+    def add(a, b):
+        return round(a + b, 2) if a is not None and b is not None else None
+    return {"cash": round(cash, 2) if cash is not None else None,
+            "positions_cost": round(cost, 2) if cost is not None else None,
+            "positions_value": round(value, 2) if value is not None else None,
+            "total_value": add(cash, value), "total_at_cost": add(cash, cost),
+            "unrealized": round(value - cost, 2) if value is not None and cost is not None else None}
+
+
+@router.get("/account/summary")
+async def account_summary(request: Request, user: dict = Depends(current_user)) -> dict:
+    """B1: {env, as_of, cash, positions_cost, positions_value, total_value, total_at_cost, unrealized} for the
+    current mode, live from Kalshi (GET /portfolio/balance and GET /portfolio/positions only). Cached 30 s per
+    mode; 409 kalshi_not_configured without keys; 503 kalshi_unavailable when the balance cannot be read."""
+    await _rate_limit(request, user, "account_summary")
+    r = request.app.state.runner
+    mode = r.mode
+    _kick_sync(r, "read:summary")
+    cache = getattr(request.app.state, "account_summary_cache", None) or {}
+    hit = cache.get(mode)
+    if hit and 0 <= time.monotonic() - hit[0] < ACCOUNT_CACHE_S:
+        return hit[1]
+    client = await _account_client(r, mode, "get_balance")
+    loop = asyncio.get_running_loop()
+    try:
+        raw = await asyncio.wait_for(loop.run_in_executor(_pool(), _read_summary, client), ACCOUNT_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, "kalshi_unavailable") from e
+    out = {"env": "live" if mode == "live" else "demo", "as_of": datetime.now(timezone.utc).isoformat(),
+           **summary_numbers(raw)}
+    cache[mode] = (time.monotonic(), out)
+    request.app.state.account_summary_cache = cache
+    return out

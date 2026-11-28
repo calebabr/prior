@@ -323,7 +323,7 @@ describe('Analytics page edge states', () => {
     renderApp('/analytics');
     const totals = await screen.findByTestId('totals');
     expect(within(totals).getByText('Win Rate').closest('div').textContent).toMatch(/—/);
-    expect(within(totals).getByText('Profit per $1 Spent').closest('div').textContent).toMatch(/—/);
+    expect(within(totals).getByText('Return').closest('div').textContent).toMatch(/—/);
     await user.click(screen.getByRole('tab', { name: 'Edge' }));
     await user.selectOptions(await screen.findByRole('combobox', { name: 'Group edge by' }), 'series');
     const row = await screen.findByTestId('edge-row');

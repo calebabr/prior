@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import Card from './Card.jsx';
 import { IconLock } from './Icons.jsx';
+import HelpIcon from './HelpIcon.jsx';
 import { ErrorNotice, Loading } from './Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useResource } from '../hooks/useResource.js';
@@ -123,6 +124,11 @@ export default function BreakerCard() {
   const env = state && state.env;
   const reading = state && state.envs && env ? state.envs[env] : null;
   const unreadable = !!state && state.readable === false;
+  // The owner's own trades (newer API only): each piece shows only when the server sent a usable figure.
+  const excluded = reading && isNum(reading.manual_excluded) ? reading.manual_excluded : null;
+  const accountEquity = reading && isNum(reading.account_equity) ? reading.account_equity : null;
+  const unproven = reading && Number.isInteger(reading.manual_unproven) && reading.manual_unproven > 0 ? reading.manual_unproven : 0;
+  const showOwn = excluded !== null || accountEquity !== null || unproven > 0;
 
   return (
     <Card title="Circuit Breaker" subtitle="Stops trading and blocks a restart when losses reach a limit you set.">
@@ -176,7 +182,41 @@ export default function BreakerCard() {
                 <span>Last reading</span>
                 <span>{reading.last_utc ? dateTime(reading.last_utc) : DASH}</span>
               </li>
+              {excluded !== null && (
+                <li data-testid="breaker-excluded">
+                  <span>
+                    Your own trades left out
+                    <HelpIcon term="breaker-own-trades" />
+                  </span>
+                  <span className="num">{formatMoney(excluded, { sign: true })}</span>
+                </li>
+              )}
+              {accountEquity !== null && (
+                <>
+                  <li data-testid="breaker-account-total">
+                    <span>Account total, at cost</span>
+                    <span className="num">{formatMoney(accountEquity)}</span>
+                  </li>
+                  <li data-testid="breaker-limit-figure">
+                    <span>Figure the limits use</span>
+                    <span className="num">{isNum(reading.last_equity) ? formatMoney(reading.last_equity) : DASH}</span>
+                  </li>
+                </>
+              )}
             </ul>
+          )}
+          {showOwn && (
+            <div className="breaker-own" data-testid="breaker-own">
+              {unproven > 0 && (
+                <p className="breaker-unproven" data-testid="breaker-unproven">
+                  {unproven} of your markets still {unproven === 1 ? 'counts' : 'count'} (not yet confirmed as yours).
+                </p>
+              )}
+              <p className="field-help">
+                The breaker ignores trades you place yourself once Kalshi confirms the bot did not place them. Markets both
+                you and the bot traded still count. Your open positions still reduce the bot&apos;s budget.
+              </p>
+            </div>
           )}
 
           <div className="stack">

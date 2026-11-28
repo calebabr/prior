@@ -102,6 +102,7 @@ SHUTDOWN_MARGIN_S = 3.0             # event loop, store.close() and process exit
 SHUTDOWN_STORE_TIMEOUT_S = 2.0      # each shutdown store call (journal flush, state read, handover read, release)
 SHUTDOWN_RESERVE_S = 4 * SHUTDOWN_STORE_TIMEOUT_S   # kept free after the order step for those four calls
 CANCEL_TIMEOUT_S = 25.0             # same bound as Stop's own cancel
+STOP_OTHER_ENV_WAIT_S = 8.0         # P2-H1: Stop's reply waits at most this for the other env (it keeps going after)
 # Stop's store write: bounded at STOP_STORE_WRITE_S, run as a task; the response waits for it at most
 # STOP_STORE_WAIT_S (a healthy store lands well inside that, so the response reflects it as before). A slower write
 # carries on in the background; until it lands, a Start or arbitrage enable is refused (Stop wins), and if it fails
@@ -203,6 +204,17 @@ def _wrap_pem(label: str, body: str) -> str:
 def mode_keys(mode: str) -> tuple[str | None, str | None]:
     p = "KALSHI_PROD_" if mode == "live" else "KALSHI_DEMO_"
     return _env(p + "API_KEY_ID"), normalize_pem(_env(p + "PRIVATE_KEY"))
+
+
+def env_has_keys(mode: str) -> bool:
+    """P2-H1: whether the owner set API keys for this env (Stop cancels bot orders there even when it is not the
+    current mode). Only presence is checked; values are never read out or logged here."""
+    p = "KALSHI_PROD_" if mode == "live" else "KALSHI_DEMO_"
+    return bool(_env(p + "API_KEY_ID")) and bool(_env(p + "PRIVATE_KEY"))
+
+
+BOT_ORDER_PREFIXES = ("mm-", "arb-")   # Stop cancels only the bot's own orders (the owner's never)
+_CANCEL_GONE_STATUSES = (404,)         # the order is already gone (filled or cancelled): not a failed cancel
 
 
 _SAVED_ENV: dict | None = None    # the owner's real env while a pass temporarily overrides it
@@ -647,6 +659,13 @@ class Runner:
         # CA-2: dedicated pools (threads start on first use). Stop's cancel only on _stop_executor; the monitor and
         # the arb scan each get one worker, so neither can pile threads onto the default executor.
         self._stop_executor = ThreadPoolExecutor(max_workers=STOP_WORKERS, thread_name_prefix="stop")
+        # P2-H1: Stop's cancel in the OTHER env (keys set, not the current mode) runs on its own small pool, single-
+        # flight per env, so a hung other env never takes a worker the current-mode cancel needs.
+        self._stop_other_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stop-other")
+        self._other_cancel: dict[str, Any] = {}
+        # P3-B: failed cancels per env (thread-safe counter); Stop reports the ones during its own cancel
+        self._cancel_failures: dict[str, int] = {}
+        self._cancel_fail_lock = threading.Lock()
         self._monitor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="monitor")
         self._arb_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arb")
         self._shadow_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow")
@@ -964,7 +983,21 @@ class Runner:
             # Only on a takeover from another process: a first-ever lease has no predecessor to clean up after.
             stored_mode = st.get("mode") if st.get("mode") in ("demo", "live") else self.mode
             self._spawn(self._best_effort_cancel(stored_mode, "leader started stopped"))
+            # P2-H1 / P4-L1: and every other env with keys (orders left after a switch), on Stop's other-env pool,
+            # one per env at a time, so a hanging exchange never holds a worker the current-mode Stop needs
+            others = self._start_other_cancels(stored_mode)
+            if others:
+                self._spawn(self._log_other_cancels(others, "leader started stopped"))
         await self._alert_resumed_state(st, kept_live=kept_live)
+
+    async def _log_other_cancels(self, others: dict, why: str) -> None:
+        """Background wait for other-env cancels started outside Stop (takeover). Logs only; never raises."""
+        try:
+            n, errs = await self._finish_other_cancels(others, asyncio.get_running_loop().time() + CANCEL_TIMEOUT_S)
+            if n or errs:
+                log.warning("%s: other env cancelled=%s errors=%s", why, n, errs)
+        except Exception as e:  # noqa: BLE001
+            log.error("%s: other env cancel failed: %s", why, type(e).__name__)
 
     async def _best_effort_cancel(self, mode: str, why: str, timeout: float | None = None) -> int:
         """Cancel resting mm- orders (the same call Stop makes; no fence: it only removes risk). Never raises."""
@@ -1113,6 +1146,8 @@ class Runner:
                 ex.shutdown(wait=False, cancel_futures=True)
         with contextlib.suppress(Exception):       # last, and without cancelling a queued Stop cancel
             self._stop_executor.shutdown(wait=False)
+        with contextlib.suppress(Exception):
+            self._stop_other_executor.shutdown(wait=False)
         for t in self._tasks + list(self._bg) + ([self._state_retry] if self._state_retry else []):
             t.cancel()
         if self._pnl_pair_task is not None:
@@ -3589,10 +3624,12 @@ class Runner:
             await self.alerter.send("Arbitrage stopped: kill switch", f"reason: {reason}", priority="urgent")
 
     async def set_arb(self, *, enabled: bool | None, live: bool | None, by: str, ack_legging: bool = False,
-                      ack_breaker: bool = False) -> dict:
+                      ack_breaker: bool = False, stop_gen: int | None = None,
+                      requested_utc: datetime | None = None) -> dict:
         """Arb on/off and the arb-live switch (the route enforces fresh 2FA and typed LIVE). Store first (fail-safe).
-        Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error."""
-        gen = self._stop_gen
+        Raises PermissionError("live_not_allowed" | "arb_legging_kill"), StopInProgress, or the store's error.
+        P3-A: `stop_gen` / `requested_utc` are the route's values from before its preflight."""
+        gen = self._stop_gen if stop_gen is None else int(stop_gen)
         desired = None if enabled is None else ("running" if enabled else "stopped")
         mode = None if live is None else ("live" if live else "demo")
         if desired == "stopped" and mode is None:
@@ -3602,6 +3639,8 @@ class Runner:
             raise RunnerDisabled("runner_disabled")
         if turning_on and (self._stopping or self._stop_writes):
             raise StopInProgress("stop_in_progress")
+        if turning_on and gen != self._stop_gen:
+            raise StopInProgress("stopped_during_start")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
         if mode == "live" and not self.armed("arbitrage"):
@@ -3616,6 +3655,9 @@ class Runner:
         if turning_on:
             # L1: refused while the circuit breaker is tripped unless acknowledged (the ack clears it, store first)
             cleared = await self._breaker_gate(ack=ack_breaker, by=by)
+            if gen != self._stop_gen or self._stopping or self._stop_writes:
+                raise StopInProgress("stopped_during_start")
+            await self._no_remote_stop_since(requested_utc, "arb_desired")
             if gen != self._stop_gen or self._stopping or self._stop_writes:
                 raise StopInProgress("stopped_during_start")
         if desired == "running" and stored_kill:
@@ -3953,10 +3995,18 @@ class Runner:
                     self.arb_kill_path.write_text(stamp, encoding="utf-8")
             except Exception as e:  # noqa: BLE001
                 errors.append(f"arb_kill_switch: {type(e).__name__}")
+            # P2-H1: the other env (keys set) is cancelled at the same time on its own pool; never awaited here
+            cancel_deadline = asyncio.get_running_loop().time() + CANCEL_TIMEOUT_S
+            stop_mode = self.mode                 # P4-I2: one mode for this Stop (a switch mid-Stop hides nothing)
+            fails_before = self.cancel_failures(stop_mode)
+            others = self._start_other_cancels(stop_mode)
             try:
-                cancelled = await asyncio.wait_for(self._cancel_in_stop_pool(self.mode), timeout=CANCEL_TIMEOUT_S)
+                cancelled = await asyncio.wait_for(self._cancel_in_stop_pool(stop_mode), timeout=CANCEL_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001
                 errors.append(f"cancel: {type(e).__name__}")
+            failed = self.cancel_failures(stop_mode) - fails_before
+            if failed > 0:
+                errors.append(f"cancel: {failed} order(s) not cancelled")          # P3-B
             self._stop_pending = True
             # the store write runs as its own task: the response waits for it only briefly (a healthy store lands
             # inside STOP_STORE_WAIT_S, so nothing changes then); a slow one finishes, or hands over to the retry,
@@ -3968,6 +4018,11 @@ class Runner:
                 errors.append("store: slow (still writing in background)")
             elif not write.cancelled() and write.result():
                 errors.append(f"store: {write.result()} (retrying in background)")
+            if others:                       # P2-H1: within the same cancel bound, after the store write started
+                n_other, other_errors = await self._finish_other_cancels(
+                    others, min(cancel_deadline, asyncio.get_running_loop().time() + STOP_OTHER_ENV_WAIT_S))
+                cancelled += n_other
+                errors.extend(other_errors)
             try:
                 log.warning("STOP by %s: cancelled=%s errors=%s", by, cancelled, errors)
                 self._spawn(self.alerter.send("Bot stopped", f"by {by}; cancelled {cancelled}; errors {errors}"))
@@ -4005,9 +4060,11 @@ class Runner:
     async def _write_stopped(self, by: str) -> None:
         """One store write that stops both strategies (maker-only on a store without the arb fields)."""
         try:
-            await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
+            doc = await self.store.set_state(by=by, desired="stopped", arb_desired="stopped", arb_mode="demo")
         except TypeError:
-            await self.store.set_state(by=by, desired="stopped")
+            doc = await self.store.set_state(by=by, desired="stopped")
+        with contextlib.suppress(Exception):     # P3-A: our own stopped write (a retry of it never blocks a Start)
+            self._own_stop_ts = schemas._safe_to_utc((doc or {}).get("updated_utc"))
 
     def _cancel_in_stop_pool(self, mode: str) -> asyncio.Future:
         """CA-2: _cancel_resting on Stop's dedicated pool (never the default executor). If that pool was already shut
@@ -4028,12 +4085,15 @@ class Runner:
             return fut
 
     def _cancel_resting(self, mode: str) -> int:
+        """Cancel every resting BOT order (client id `mm-` or `arb-`) in `mode`; the owner's orders are never touched.
+        GET + DELETE only. Returns the number cancelled; a listing failure raises. P3-B: a cancel that fails is
+        counted per env (`cancel_failures`); an order Kalshi says is already gone (404) is not a failure."""
         client = self.kalshi_factory(mode)
         if client is None:
             return 0
-        n = 0
+        n = failed = 0
         for o in client.get_orders(status="resting"):
-            if str(o.get("client_order_id", "")).startswith("mm-"):
+            if str(o.get("client_order_id", "")).startswith(BOT_ORDER_PREFIXES):
                 try:
                     client.cancel_order(o["order_id"], market_ticker=o.get("ticker"))
                     n += 1
@@ -4041,8 +4101,87 @@ class Runner:
                     if q is not None:
                         q.append(str(o["order_id"]))      # queue telemetry: outcome "stopped" (in-memory only)
                 except Exception as e:  # noqa: BLE001
+                    if getattr(e, "status", None) in _CANCEL_GONE_STATUSES:
+                        continue                          # filled or cancelled meanwhile: nothing left resting
+                    failed += 1
                     log.warning("cancel failed for an order: %s", type(e).__name__)
+        if failed:
+            with self._cancel_fail_lock:
+                self._cancel_failures[mode] = self._cancel_failures.get(mode, 0) + failed
         return n
+
+    def cancel_failures(self, mode: str) -> int:
+        with self._cancel_fail_lock:
+            return self._cancel_failures.get(mode, 0)
+
+    def _start_other_cancels(self, mode: str) -> dict:
+        """P2-H1: start Stop's cancel in every OTHER env that has keys, on its own pool, without waiting. Returns
+        {env: (future, failures before) | "error text"}. Never raises; nothing here awaits."""
+        out: dict = {}
+        try:
+            for env in ("demo", "live"):
+                if env == mode or not env_has_keys(env):
+                    continue                              # no keys: skipped silently
+                prev = self._other_cancel.get(env)
+                if prev is not None and not prev.done():
+                    out[env] = "previous cancel still running"
+                    continue
+                before = self.cancel_failures(env)
+                try:
+                    fut = asyncio.get_running_loop().run_in_executor(self._stop_other_executor,
+                                                                     self._cancel_resting, env)
+                except RuntimeError:                      # pool shut down (end of shutdown): skip, say so
+                    out[env] = "not started (shutting down)"
+                    continue
+                self._other_cancel[env] = fut
+                out[env] = (fut, before)
+        except Exception as e:  # noqa: BLE001
+            out["?"] = type(e).__name__
+        return out
+
+    def _late_other_cancel(self, env: str, fut: Any, before: int) -> None:
+        """An other-env cancel that outlived Stop's reply: log the outcome, alert if it did not fully succeed."""
+        try:
+            exc = None if fut.cancelled() else fut.exception()
+            nf = self.cancel_failures(env) - before
+            if exc is None and nf <= 0 and not fut.cancelled():
+                log.warning("Stop: %s cancel finished late: cancelled=%s", env, fut.result())
+                return
+            why = type(exc).__name__ if exc is not None else (f"{nf} order(s) not cancelled" if nf > 0 else "cancelled")
+            log.error("Stop: %s cancel did not complete: %s", env, why)
+            self._spawn(self.alerter.send(f"Stop: {env} orders may still rest",
+                                          f"Cancelling bot orders in {env} did not complete ({why}). Check Kalshi "
+                                          "for resting orders.", priority="urgent"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _finish_other_cancels(self, started: dict, deadline: float) -> tuple[int, list[str]]:
+        """Wait for the other-env cancels until `deadline` (loop time). (cancelled, errors naming the env). A cancel
+        still running at the deadline keeps running in the background and is reported. Never raises."""
+        n, errors = 0, []
+        try:
+            futs = {env: v for env, v in started.items() if isinstance(v, tuple)}
+            for env, v in started.items():
+                if not isinstance(v, tuple):
+                    errors.append(f"cancel ({env}): {v}")
+            if futs:
+                loop = asyncio.get_running_loop()
+                await asyncio.wait([f for f, _ in futs.values()], timeout=max(0.05, deadline - loop.time()))
+            for env, (fut, before) in futs.items():
+                if not fut.done():
+                    errors.append(f"cancel ({env}): timed out (still trying)")
+                    fut.add_done_callback(lambda f, e=env, b=before: self._late_other_cancel(e, f, b))
+                    continue
+                if fut.exception() is not None:
+                    errors.append(f"cancel ({env}): {type(fut.exception()).__name__}")
+                    continue
+                n += int(fut.result() or 0)
+                nf = self.cancel_failures(env) - before
+                if nf > 0:
+                    errors.append(f"cancel ({env}): {nf} order(s) not cancelled")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"cancel (other env): {type(e).__name__}")
+        return n, errors
 
     def _ensure_stop_retry(self, by: str) -> None:
         try:
@@ -4069,7 +4208,26 @@ class Runner:
             except Exception:  # noqa: BLE001
                 delay = min(delay * 2, 300)
 
-    async def start_trading(self, by: str, *, ack_breaker: bool = False) -> dict:
+    def stop_generation(self) -> int:
+        """P3-A: read by a route BEFORE any await (preflight) and passed back in, so a Stop at any point after that,
+        even one that has already finished, refuses the Start / arbitrage enable / switch to live."""
+        return int(self._stop_gen)
+
+    async def _no_remote_stop_since(self, since: datetime | None, field: str = "desired") -> None:
+        """P3-A (another instance): refuse when the store says stopped by a write newer than `since` (a Stop the
+        other instance took while this request was in flight). A store error raises (the caller refuses)."""
+        if since is None:
+            return
+        st = await asyncio.wait_for(self.store.get_state(), 5)
+        ts = schemas._safe_to_utc((st or {}).get("updated_utc"))
+        since_ms = since.replace(microsecond=since.microsecond // 1000 * 1000)     # the store keeps milliseconds
+        if ts is not None and ts == getattr(self, "_own_stop_ts", None):
+            return                       # this process's own Stop (e.g. its delayed retry): this instance saw it
+        if (st or {}).get(field) == "stopped" and ts is not None and ts >= since_ms:
+            raise StopInProgress("stopped_during_start")
+
+    async def start_trading(self, by: str, *, ack_breaker: bool = False, stop_gen: int | None = None,
+                            requested_utc: datetime | None = None) -> dict:
         """Removes the kill switch and sets desired=running (store first: fail-safe).
         Stop always wins a race: if a Stop is running, or one ran while the store write was in flight, the start is
         refused (StopInProgress) and stopped is re-asserted in the store. Arbitrage is not started by this.
@@ -4083,7 +4241,9 @@ class Runner:
             raise PermissionError("strategy_not_installed")
         if self.mode == "live" and not self.armed("maker"):
             raise PermissionError("maker_not_armed")       # item 10: arm the maker first (Arming page, fresh 2FA)
-        gen = self._stop_gen
+        gen = self._stop_gen if stop_gen is None else int(stop_gen)   # P3-A: the route's value from before preflight
+        if gen != self._stop_gen:
+            raise StopInProgress("stopped_during_start")
         if self._stopping or self._stop_writes:      # a Stop, or its store write, is still in flight: Stop wins
             raise StopInProgress("stop_in_progress")
         # reload the config from the store (the owner may have fixed it since the last load). A config that still
@@ -4096,6 +4256,9 @@ class Runner:
         if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         cleared = await self._breaker_gate(ack=ack_breaker, by=by)     # L1; refuses while tripped without the ack
+        if gen != self._stop_gen or self._stopping or self._stop_writes:
+            raise StopInProgress("stopped_during_start")
+        await self._no_remote_stop_since(requested_utc)                 # P3-A: a Stop taken by another instance
         if gen != self._stop_gen or self._stopping or self._stop_writes:
             raise StopInProgress("stopped_during_start")
         kw ={"arb_desired": "stopped"} if self.arb_desired == "stopped" else {}   # keep the store's arb state honest
@@ -4119,11 +4282,13 @@ class Runner:
         self.store_ok = True
         return {"desired": "running", **({"breaker_cleared": True} if cleared else {})}
 
-    async def set_mode(self, mode: str, by: str) -> dict:
+    async def set_mode(self, mode: str, by: str, *, stop_gen: int | None = None) -> dict:
         if mode not in ("demo", "live"):
             raise ValueError("mode must be demo or live")
         if mode == "live" and not self.live_allowed():
             raise PermissionError(self.live_block_reason() or "live_not_allowed")
+        if mode == "live" and stop_gen is not None and int(stop_gen) != self._stop_gen:
+            raise StopInProgress("stopped_during_start")   # P3-A: a Stop during the live recheck
         await self.store.set_state(by=by, mode=mode)
         self.mode = mode
         if mode == "live":
@@ -4281,7 +4446,8 @@ class Runner:
         self.arming = {**self.arming, s: False, "updated": now, "by": who}
         errors: list[str] = []
         cancel = None
-        if s == "maker" and self.mode == "live":
+        if s == "maker" and (self.mode == "live" or env_has_keys("live")):
+            # P2-H1: also after a switch to demo, live maker orders may still rest; disarm removes them
             # the same cancel Stop makes (Stop's own pool, bounded); arbitrage sets are immediate-or-cancel.
             # Single-flight: repeated disarms never hold more than one of Stop's workers, so Stop is never slowed.
             if self._disarm_cancel is None or self._disarm_cancel.done():

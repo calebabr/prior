@@ -142,17 +142,25 @@ async def _start_body(request: Request) -> dict:
     return body
 
 
+async def stop_mark(request: Request) -> tuple[int, datetime]:
+    """P3-A: (stop generation, now), resolved BEFORE the 2FA dependency and any preflight (declare it first), so a
+    Stop that starts, and even finishes, while the request is being checked still wins."""
+    return request.app.state.runner.stop_generation(), datetime.now(timezone.utc)
+
+
 @router.post("/bot/start")
-async def start(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
+async def start(request: Request, mark: tuple = Depends(stop_mark), user: dict = Depends(require_fresh_2fa)) -> dict:
     """Fresh 2FA. L1: while the circuit breaker is tripped, also needs body {"ack_breaker": true} (else 409
     "breaker_tripped"); the acknowledgement clears the trip (audited as breaker.ack)."""
+    stop_gen, requested = mark
     ack_breaker = (await _start_body(request)).get("ack_breaker") is True
     if _runner(request).mode == "live" and _runner(request).live_allowed():
         # L-1: Start in live re-runs the go-live preflight, so a stale arm cannot start live trading (409 + checks)
         from .arming import live_recheck
         await live_recheck(request, user=user, action="bot.start")
     try:
-        res = await _runner(request).start_trading(by=user.get("username", "user"), ack_breaker=ack_breaker)
+        res = await _runner(request).start_trading(by=user.get("username", "user"), ack_breaker=ack_breaker,
+                                                   stop_gen=stop_gen, requested_utc=requested)
     except ConfigInvalid as e:
         # the reloaded stored config still fails validation: stay stopped, say why ("invalid_config: ...")
         await audit(request, "bot.start", ok=False, user=user, details={"error": "invalid_config"})
@@ -185,8 +193,10 @@ class ModeIn(BaseModel):
 
 
 @router.put("/mode")
-async def set_mode(body: ModeIn, request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
+async def set_mode(body: ModeIn, request: Request, mark: tuple = Depends(stop_mark),
+                   user: dict = Depends(require_fresh_2fa)) -> dict:
     r = _runner(request)
+    stop_gen = mark[0]                              # P3-A: before 2FA and the live recheck
     if body.mode == "live" and body.confirm != "LIVE":
         await audit(request, "mode.set", ok=False, user=user, details={"mode": body.mode, "error": "confirm"})
         raise HTTPException(400, "type LIVE to confirm")
@@ -195,7 +205,10 @@ async def set_mode(body: ModeIn, request: Request, user: dict = Depends(require_
         from .arming import live_recheck
         await live_recheck(request, user=user, action="mode.set", details={"mode": body.mode})
     try:
-        res = await r.set_mode(body.mode, by=user.get("username", "user"))
+        res = await r.set_mode(body.mode, by=user.get("username", "user"), stop_gen=stop_gen)
+    except StopInProgress as e:
+        await audit(request, "mode.set", ok=False, user=user, details={"mode": body.mode, "error": str(e)})
+        raise HTTPException(409, str(e)) from e
     except PermissionError as e:
         why = str(e) if str(e) in ("strategy_not_installed", "live_not_allowed") else "live_not_allowed"
         await audit(request, "mode.set", ok=False, user=user, details={"mode": body.mode, "error": why})

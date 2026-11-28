@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from control_api.db import MemoryStore
+from control_api import runner as rn
 from control_api.runner import Runner
 from control_api.services import arming as armsvc
 from control_api.services import preflight as pf
@@ -162,8 +163,18 @@ async def test_disarm_needs_no_2fa_and_cancels_live_maker_orders(live_ok):
     assert any(a["ok"] and a["details"]["armed"] is False for a in await _audits(live_ok))
 
 
-async def test_disarm_in_demo_cancels_nothing(live_ok):
+async def test_disarm_in_demo_still_cancels_resting_live_bot_orders(live_ok):
+    # P2-H1 (owner-approved 2026-11-27): live maker orders can still rest after a switch to demo; with live keys
+    # set, disarming the maker cancels them (the bot's mm- orders only; the owner's o2 is never touched)
     await _put(live_ok, {"strategy": "maker", "armed": True})
+    r = await _put(live_ok, {"strategy": "maker", "armed": False}, two_fa=False)
+    assert r.status_code == 200 and r.json()["result"]["cancelled"] == 2
+    assert sorted(live_ok.kalshi.cancelled) == ["o1", "o3"]
+
+
+async def test_disarm_in_demo_without_live_keys_cancels_nothing(live_ok, monkeypatch):
+    await _put(live_ok, {"strategy": "maker", "armed": True})
+    monkeypatch.setattr(rn, "env_has_keys", lambda m: False)
     r = await _put(live_ok, {"strategy": "maker", "armed": False}, two_fa=False)
     assert r.status_code == 200 and r.json()["result"]["cancelled"] == 0 and live_ok.kalshi.cancelled == []
 

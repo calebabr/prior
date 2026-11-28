@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ..auth.audit import audit
 from ..auth.deps import current_user, require_fresh_2fa
 from ..runner import RunnerDisabled, StopInProgress
+from .bot import stop_mark
 from ..services import arb as arbsvc
 from ..services import arbsets
 from ..services import pnl as pnlsvc
@@ -112,8 +113,10 @@ async def get_arb(request: Request, tz: str | None = Query(None), user: dict = D
 
 
 @router.put("/arb")
-async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> dict:
+async def put_arb(request: Request, mark: tuple = Depends(stop_mark),
+                  user: dict = Depends(require_fresh_2fa)) -> dict:
     r = request.app.state.runner
+    stop_gen, requested = mark                    # P3-A: before 2FA, the recheck and the config write
     by = user.get("username", "user")
     try:
         body: Any = await request.json()
@@ -164,7 +167,8 @@ async def put_arb(request: Request, user: dict = Depends(require_fresh_2fa)) -> 
     if enabled is not None or live is not None:
         try:
             res = await r.set_arb(enabled=enabled, live=live, by=by, ack_legging=bool(body.get("ack_legging")),
-                                  ack_breaker=body.get("ack_breaker") is True)
+                                  ack_breaker=body.get("ack_breaker") is True, stop_gen=stop_gen,
+                                  requested_utc=requested)
         except PermissionError as e:
             await audit(request, "arb.toggle", ok=False, user=user, details={"error": str(e)})
             raise HTTPException(409, str(e)) from e

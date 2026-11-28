@@ -186,7 +186,7 @@ describe('A3 and A19: after a Stop that worked', () => {
     expect(screen.getByTestId('stopped-line')).toBeInTheDocument();
     expect(screen.queryByTestId('stop-alert')).toBeNull();
     // A19: the card says so and Stop is still offered, with the same confirm.
-    expect(await screen.findByTestId('already-stopped')).toHaveTextContent('Already stopped. Stop again cancels any leftover live orders.');
+    expect(await screen.findByTestId('already-stopped')).toHaveTextContent('Already stopped. Stop again cancels any leftover bot orders.');
     const card = screen.getByTestId('status-card');
     await user.click(within(card).getByRole('button', { name: /stop the bot/i }));
     expect(screen.getByRole('dialog', { name: 'Stop all trading?' })).toBeInTheDocument();
@@ -199,7 +199,7 @@ describe('A3 and A19: after a Stop that worked', () => {
   it('names only the current mode, and says nothing about orders while running', async () => {
     const { state } = fake({ status: { ...STOPPED, mode: 'demo' } });
     const first = renderApp('/');
-    expect(await screen.findByTestId('already-stopped')).toHaveTextContent('leftover demo orders');
+    expect(await screen.findByTestId('already-stopped')).toHaveTextContent('leftover bot orders');
     expect(screen.queryByTestId('stopped-line')).toBeNull(); // no Stop from this phone: nothing claimed
     first.unmount();
     state.status = RUNNING;

@@ -31,8 +31,8 @@ describe('A6: switching to demo', () => {
     await user.click(await screen.findByRole('button', { name: /switch to demo/i }));
     const box = screen.getByTestId('to-demo-warning');
     expect(box).toHaveTextContent('Tap Stop BEFORE switching, while still in live.');
-    expect(box).toHaveTextContent('live orders stay open and can fill until you cancel them on Kalshi or the market closes');
-    expect(box).toHaveTextContent('Stop in demo does not cancel them');
+    expect(box).toHaveTextContent('live orders stay open and can fill until you tap Stop, cancel them on Kalshi, or the market closes');
+    expect(box).toHaveTextContent('Switching cancels nothing');
     expect(box).toHaveTextContent('Filled positions stay until settlement.');
     expect(box).toHaveTextContent(TO_DEMO_ARB);
     expect(calls.some((c) => c.method === 'PUT')).toBe(false);
@@ -52,9 +52,8 @@ describe('A6: switching to demo', () => {
   });
 
   it('no copy claims a Stop reaches the other mode', () => {
-    expect(STOP_COPY.alreadyStopped('live')).toBe('Already stopped. Stop again cancels any leftover live orders.');
-    expect(STOP_COPY.alreadyStopped('demo')).toBe('Already stopped. Stop again cancels any leftover demo orders.');
-    expect(TO_DEMO_WARNING.join(' ')).toMatch(/Stop in demo does not cancel them/);
+    expect(STOP_COPY.alreadyStopped()).toBe('Already stopped. Stop again cancels any leftover bot orders.');
+    expect(TO_DEMO_WARNING.join(' ')).not.toMatch(/Stop in demo does not/);
   });
 });
 
@@ -347,5 +346,24 @@ describe('A24: contrast and tap targets (styles)', () => {
     const analytics = read('styles/analytics.css');
     expect(analytics).not.toMatch(/verdict-counts li\.muted \{[^}]*opacity/);
     expect(read('styles/help.css')).toMatch(/\.term-related a \{[^}]*min-height: var\(--tap\)/);
+  });
+});
+
+describe('A Stop that came first is said in plain words', () => {
+  it('on a refused switch to live', async () => {
+    const user = userEvent.setup();
+    stubApi({
+      'GET /api/status': { ...LIVE, mode: 'demo', desired: 'stopped', live_allowed: true },
+      'PUT /api/mode': [409, { detail: 'stopped_during_start' }],
+      'POST /api/mode': [409, { detail: 'stopped_during_start' }],
+    });
+    renderApp('/mode');
+    await user.click(await screen.findByRole('button', { name: /switch to live/i }));
+    await user.type(await screen.findByRole('textbox'), 'LIVE');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    await user.type(await screen.findByLabelText('6-digit code'), '123456');
+    await user.click(screen.getByRole('button', { name: 'Go LIVE' }));
+    expect(await screen.findByText(/Stop won\. Nothing was turned on\./)).toBeInTheDocument();
+    expect(screen.queryByText('Live trading is not allowed by the server')).toBeNull();
   });
 });

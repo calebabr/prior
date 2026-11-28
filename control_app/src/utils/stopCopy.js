@@ -1,11 +1,10 @@
 // Every sentence about what Stop did, what it can reach and what a mode switch leaves behind, in one place.
 //
 // What these rest on (server behaviour; change the words here if the server changes):
-// - Stop cancels the bot's resting orders in the CURRENT mode only. It never claims anything about the other mode.
+// - Stop cancels the bot's resting orders in every mode that has keys (never the owner's own orders), and reports
+//   any it could not cancel. A Stop that arrives while a Start or a switch is being checked wins.
 // - Switching mode cancels nothing. Live resting orders have no expiry: they stay open and can fill until they are
-//   cancelled on Kalshi or their market closes. Filled positions stay until settlement.
-
-const modeWord = (mode) => (mode === 'live' ? 'live' : 'demo');
+//   cancelled (Stop, disarming the maker, or Kalshi) or their market closes. Filled positions stay until settlement.
 
 export const STOP_COPY = {
   checkKalshi: 'Check Kalshi for resting orders and cancel any left, then tap Stop again.',
@@ -21,14 +20,20 @@ export const STOP_COPY = {
   unansweredText: 'The app closed or reloaded before the server answered. Check Kalshi for resting orders, then tap Stop again.',
   crossedTitle: 'Check that the bot is stopped',
   crossedText: (action) => `"${action}" was already sent when you tapped Stop and may have gone through. Tap Stop again.`,
-  /** Under the buttons of a stopped bot. Stop only reaches the current mode, and says so. */
-  alreadyStopped: (mode) => `Already stopped. Stop again cancels any leftover ${modeWord(mode)} orders.`,
+  /** Under the buttons of a stopped bot. */
+  alreadyStopped: () => 'Already stopped. Stop again cancels any leftover bot orders.',
+};
+
+/** A Start, mode switch or arbitrage change refused because a Stop came first (409 detail -> words). */
+export const STOP_WON = {
+  stopped_during_start: 'A Stop arrived first, so Stop won. Nothing was turned on.',
+  stop_in_progress: 'A Stop is still being saved. Try again in a few seconds.',
 };
 
 /** Warning in the "Switch to DEMO?" dialog, one paragraph per entry. */
 export const TO_DEMO_WARNING = [
   'Tap Stop BEFORE switching, while still in live. Switching cancels nothing.',
-  'Otherwise live orders stay open and can fill until you cancel them on Kalshi or the market closes. Stop in demo does not cancel them.',
+  'Otherwise live orders stay open and can fill until you tap Stop, cancel them on Kalshi, or the market closes.',
   'Filled positions stay until settlement.',
 ];
 /** Arbitrage has its own Live setting, which a mode switch leaves alone. */

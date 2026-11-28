@@ -700,7 +700,7 @@ const RAW_GLOSSARY = [
     aliases: ['stop button', 'halt'],
     short: 'The red button: Halts trading and cancels all resting bids. No code needed.',
     body:
-      'Stop halts both strategies (maker and arbitrage): it sets both kill switches, marks the bot stopped and cancels the bot\'s resting orders. It needs one tap and one confirm, never a 2FA code, and the kill switch is set on the server even if the database or Kalshi is unreachable (the result then lists any orders it could not cancel; tap Stop again). It does not sell positions you already hold; they settle normally. Starting again needs a fresh 2FA code.',
+      'Stop halts both strategies (maker and arbitrage): it sets both kill switches, marks the bot stopped and cancels the bot\'s resting orders in demo and live (each mode that has keys), never orders you placed yourself. It needs one tap and one confirm, never a 2FA code, and the kill switch is set on the server even if the database or Kalshi is unreachable (the result then lists any orders it could not cancel; tap Stop again). It does not sell positions you already hold; they settle normally. Starting again needs a fresh 2FA code.',
     related: ['kill-switch', 'two-factor', 'position'],
   },
   {

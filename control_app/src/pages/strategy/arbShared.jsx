@@ -7,6 +7,7 @@ import { usePageVisible } from '../../hooks/usePageVisible.js';
 import { api } from '../../services/api.js';
 import { humanize } from '../../utils/format.js';
 import { BREAKER_ACK_LABEL, breaker409, isTripped } from '../../utils/breaker.js';
+import { STOP_WON } from '../../utils/stopCopy.js';
 
 // Bracket arbitrage (DASHBOARD_PLAN.md "Strategies run by the app").
 //   GET  /api/arb               -> {settings, schema?, ceilings?, status, pnl, expectation?}
@@ -257,7 +258,9 @@ export function useArbController() {
   }
 
   function errorToast(err, fallbackTitle) {
-    if (err.status === 409 && String(err.detail).startsWith('live_not_allowed')) {
+    if (err.status === 409 && STOP_WON[err.detail]) {
+      notify({ kind: 'error', title: fallbackTitle, text: STOP_WON[err.detail] });
+    } else if (err.status === 409 && String(err.detail).startsWith('live_not_allowed')) {
       notify({
         kind: 'error',
         title: 'Live arbitrage is not allowed by the server',

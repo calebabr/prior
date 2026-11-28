@@ -640,7 +640,7 @@ async function expectAudit(page, id, route) {
   if (id === 'audit-stale') await expect(page.locator('header.appbar .badge-label')).toHaveText('Not Confirmed');
   if (id === 'audit-stale') await expect(page.locator('header.appbar .badge-label')).toBeVisible();
   if (id === 'audit-status-down') await expect(page.getByTestId('state-label')).toHaveText('Status unknown');
-  if (id === 'audit-stopped' && route === '/') await expect(page.getByTestId('already-stopped')).toContainText('leftover live orders');
+  if (id === 'audit-stopped' && route === '/') await expect(page.getByTestId('already-stopped')).toContainText('leftover bot orders');
   if (id === 'audit-stopped' && route === '/arming') await expect(page.getByTestId('kill-switch-help')).toBeVisible();
   if (id === 'audit-few' && route === '/health') await expect(page.getByText('Too few results for a range.').first()).toBeVisible();
   if (id === 'audit-few' && route !== '/health') {

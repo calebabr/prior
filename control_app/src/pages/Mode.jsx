@@ -6,7 +6,7 @@ import { ErrorNotice, Loading } from '../components/Notices.jsx';
 import { useDialogs } from '../context/DialogContext.jsx';
 import { useStatus } from '../context/StatusContext.jsx';
 import { api } from '../services/api.js';
-import { TO_DEMO_ARB, TO_DEMO_ARB_LIVE, TO_DEMO_WARNING } from '../utils/stopCopy.js';
+import { STOP_WON, TO_DEMO_ARB, TO_DEMO_ARB_LIVE, TO_DEMO_WARNING } from '../utils/stopCopy.js';
 
 export default function Mode() {
   const { status, error, loading, refresh } = useStatus();
@@ -55,14 +55,15 @@ export default function Mode() {
       });
       if (r) notify({ kind: 'ok', title: `Mode is now ${String(r.mode || target).toUpperCase()}` });
     } catch (err) {
+      const stopWon = err.status === 409 ? STOP_WON[err.detail] : undefined;
+      const refused = err.status === 409 && !stopWon;
       notify({
         kind: 'error',
-        title: err.status === 409 ? 'Live trading is not allowed by the server' : 'Mode not changed',
-        text:
-          err.status === 409
-            ? 'The server environment is missing the prod key or KALSHI_LIVE_CONFIRM. Set them in the Render dashboard.'
-            : err.message,
-        details: err.details,
+        title: refused ? 'Live trading is not allowed by the server' : 'Mode not changed',
+        text: refused
+          ? 'The server environment is missing the prod key or KALSHI_LIVE_CONFIRM. Set them in the Render dashboard.'
+          : stopWon || err.message,
+        details: stopWon ? undefined : err.details,
       });
     } finally {
       setBusy(false);
